@@ -296,6 +296,12 @@ vs 起服后 `client-save-after-boot.json`（`e49afcd3…`，2933 区块，`Time
     [⚡]  2.3/3.7/5.5/8.6;  0.5/4.0/11.6/130.9
     [Rcon: Stopped tick profiling after 19.98 seconds and 400 ticks (20.02 ticks per second)]
 
+
+**交叉验证：Carpet 自己的 `/profile <ticks>`**（Carpet 内置的 tick 计时器，与 spark 独立）——
+空载窗口实测返回 `[Rcon: Average tick time: 0.791ms]`，与 spark 的 MSPT 中位数 1.2 ms 同量级。
+注意它的参数形式很挑：同一个 `profile 600` 在另一次运行里被拒（`Incorrect argument for command`），
+且它**只回给命令源、不打印调用树**，所以四块占比还是得靠 `tools/sparkprofile-buckets.cjs`。
+
 **MSPT 口径**：空载中位数 **1.2 ms**、95%ile 2.9 ms；有负载中位数 **4.4–5.3 ms**、95%ile 5.8–8.7 ms。
 两档都跑满 20 TPS（有负载 5 分钟均值 19.85–19.95）。
 

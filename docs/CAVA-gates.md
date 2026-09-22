@@ -133,6 +133,31 @@ Java 的 `MemoryLayout` 镜像、以及**两侧算出的 `layout_hash_sum`**。�
     有 dll  -> PathfindAbiTest ran=6 skipped=0 ；NativeFallbackTest skipped
     无 dll  -> NativeFallbackTest ran=2 skipped=0 ；PathfindAbiTest skipped
 
+### 附带确认：兼容层报告在真实服务端里跑通了（端到端）
+
+同一轮实机启动（含 Lithium / ServerCore / VMP / FerriteCore / Carpet / TIS）里，服务端主线程打出了完整归属表：
+
+    CAVA-COMPAT|v1|header|mc=1.20.4|loader=0.19.5|native=OPEN|mods=56|relevant=5|overlaps=10|defer=entity,redstone|rules=0/19
+    CAVA-COMPAT|v1|owner|pathfind|lithium|mixin.ai.pathing|native|auto|decided|LandPathNodeMaker 缓存短路（priority 990）；不碰 PathNodeNavigator
+    CAVA-COMPAT|v1|owner|pathfind|servercore|optimizations.misc.PathFinderMixin|native|...
+    CAVA-COMPAT|v1|owner|entity|vmp|entity.move_zero_velocity.MixinEntity|mod|auto|pending-p2|...
+    CAVA-COMPAT|v1|owner|redstone|carpet|CarpetSettings.fastRedstoneDust|mod|auto|pending-p3|...
+    [Server thread/INFO]: Done (6.051s)!
+    [cava] 金丝雀跳过 entity：兼容层：让位给 lithium(...) + servercore(...) + vmp(...)
+    [cava] 金丝雀跳过 redstone：兼容层：让位给 lithium(...) + carpet(...) + carpet-tis-addition(...)
+
+两点值得注意：
+1. **Mixin 层面确实生效了**：日志里有
+   `Force-disabling mixin 'ai.pathing.LandPathNodeMakerMixin' as rule 'mixin.ai.pathing' (added by mods [cava])`，
+   证明 `custom.lithium:options` 那条配置真的被 Lithium 读到了（不是"写了但没人读"）。
+2. **金丝雀的 0/3 现在有解释了**，而且解释是**逐点、带 mod 名的** —— 不再是笼统的"P0 骨架未启用"。
+   这正是兼容层该有的样子：**每个让位决定都能在日志里被追责。**
+
+> ⚠️ **一个必须说清的性能事实**：`mixin.ai.pathing` 现在**已经关掉**，而 P1 的原生路径**尚未接管**
+> （`cava_pathfind` 保守返回 `CAVA_ERR_UNIMPLEMENTED`）。也就是说**在 P1 接管之前，寻路比装 Cava 之前更慢**
+> —— 关掉的是 Lithium 的 `LandPathNodeMaker` 缓存短路，纯损失、没有任何补偿。
+> 回退办法是删掉 `fabric.mod.json` 里的 `custom` 段（单测会提醒）。**这条已上报 captain 待拍板。**
+
 ### 验证这类事情时的一个陷阱（我自己先踩了一次）
 
 我第一次验"无 dll"是直接把 dll 改名后跑 `gradlew test` —— **结论是错的**，

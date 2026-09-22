@@ -26,10 +26,29 @@
 
 ---
 
+> ## ⚠️ 勘误（2026-09-22）：`layout_hash_sum` 旧值作废
+>
+> | | 值 | 状态 |
+> | --- | --- | --- |
+> | **旧**（P0，4 个结构体） | `0x6149FD30` = 1632238896 | **已作废，不要再使用** |
+> | **新**（P0+P1，9 个结构体） | `0x6975CBF9` = 1769327609 | **当前权威值** |
+>
+> **作废原因（两条同时发生）**：
+> 1. ABI 扩展：新增 5 个导出结构体 `CavaPathRequest` / `CavaPathNode` /
+>    `CavaMobProfile` / `CavaStateRecord` / `CavaCollisionBox`；
+> 2. 同一次扩展里修掉一个真 bug：`CavaPathNode` 起初只登记了 6 个字段（漏 `type` / `flags`），
+>    导致 C 侧算出 `0x80b49975` 与 Java 侧对不上（详见 §5.5）。
+>
+> 本文里凡是出现 `0x6149FD30` 的地方（§5.3 / §7.1）都是**当时的实测记录**，不是当前值。
+> 当前值请以本节与 §0 的表格为准；旧值只应出现在「历史证据」语境里。
+
+---
+
 ## 0. Java 侧直接要抄的数字（x64 / ABI v1，**9 个结构体**）
 
 > 2026-09-22 更新：captain 随 P1 扩展把导出结构体从 4 个加到 9 个。
-> **旧的 4 条和值 0x6149FD30 已作废**，不要再往 `CavaOpenParams.layout_hash_sum` 里填它。
+> **旧的 4 条和值 0x6149FD30 已作废**（原因见文首勘误：扩了 5 个结构体 + CavaPathNode 漏登记 2 个字段），
+> 不要再往 `CavaOpenParams.layout_hash_sum` 里填它。
 
 | 结构体 | struct_size | align | field_count | layout_hash |
 | --- | --- | --- | --- | --- |
@@ -363,6 +382,49 @@ captain 用「Java 侧只哈希前 6 个字段恰好得到 0x80b49975」反推�
 **给后续加结构体的人**：`cava_layout.cpp` 的 `kLayouts` 与
 Java 侧 `cava/ffm/CavaLayouts.java` 必须**同时**登记；
 加完先跑 `cava_selftest --dump-layout` 看和值，与 Java 侧对上再提交。
+
+### 5.6 `cava_pathfind_vectors`（P1 的跨语言差分测试）在 CTest 里的接线复核（2026-09-22）
+
+captain 裁定该文件的 CMake/CTest 接线归 P0-B，**内容不动**（它是 P1 的产物，10000 组跨语言比对靠它）。
+复核结论：**接线正确、失败会红**（实测三条）：
+
+1. **CTest 用例本身跑得过**（不重新构建，用现成 build 目录）：
+
+~~~
+> ctest --test-dir build/native-captain -R cava_pathfind_vectors --output-on-failure
+    Start 3: cava_pathfind_vectors
+1/1 Test #3: cava_pathfind_vectors ............   Passed    0.60 sec
+100% tests passed, 0 tests failed out of 1
+~~~
+
+2. **本机直接重编（当前源码 + 当前 DLL）也全绿**：
+
+~~~
+[shard] ./src/test/resources/cava/oracle/vectors-00.bin  version=1 cases=10000 master=1f2e3d4c5b6a7988 shard=0/1
+  cases=10000 mismatches=0 worldHashFail=0 goldenBlockMismatch=0
+[shard] ./src/test/resources/cava/oracle/golden-00.bin  version=1 cases=60 master=1f2e3d4c5b6a7988 shard=0/0
+RESULT: PASS (truthTableFails=0, abiSmokeFails=0, shards=1)      EXITCODE=0
+~~~
+
+   它无参时从工作目录（CTest 设成仓库根）向上找 `src/test/resources/cava/oracle`，所以 CTest 不用传参数 —— 与
+   `native/tests/CMakeLists.txt` 的 WORKING_DIRECTORY 设置对得上。
+
+3. **阴性对照：失败确实会让 CI 红**（两份对照都不改原文件，只在 `native/build/tmp/` 里做手脚）：
+
+~~~
+--- 对照 1：把 vectors-00.bin 的 body 翻一个字节 ---
+  cases=10000 mismatches=1 worldHashFail=0 goldenBlockMismatch=0
+RESULT: FAIL (truthTableFails=0, abiSmokeFails=0, shards=1)      EXITCODE=1
+--- 对照 2：向量目录不存在 ---
+no vectors-*.bin under ...\no-such-dir                          EXITCODE=2
+~~~
+
+   即出口码 `0`=通过、`1`=内容不一致、`2`=文件/格式问题，后两者都会被 CTest 判失败。
+
+**顺带一条踩坑记录（给以后复用 build 目录的人）**：`build/native-p1`（exe 时间戳 14:16，早于 ABI 扩展）
+里的同一个用例会失败，报 `abiSmokeFails=1` —— 那是**旧 exe 把 layout_hash_sum 写死了旧值**；
+当前源码里的 `abi_smoke_test()` 已改成从 `cava_layout_report` 现算和值，所以重编即过。
+结论：**不要复用别人/过期的 build 目录**（与 captain 决定 3 一致）。
 
 ---
 

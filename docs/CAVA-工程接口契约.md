@@ -108,13 +108,28 @@ Java 侧算出期望值填进 `CavaOpenParams.layout_hash_sum`；原生侧比较
 - **镜像侧 ABI（区段/方块状态推送）故意留到 P1 真正开工时冻结** —— 它必须由区段镜像与方块状态表的实际实现推导。
   在它冻结之前，P1 只允许先做「纯算法内核 + 逐位一致性验证」，不得自行发明镜像 ABI。
 
-### 2.5 Java 侧 FFM 三个坑（JDK 21 预览 API，**已实测**）
+### 2.5 Java 侧 FFM 的坑（JDK 21 预览 API，**本机已逐条实测**）
 
-- **没有 `Linker.Option.critical`**（JDK 22 才有）。不要写。
-- 数组分配是 `arena.allocateArray(layout, count)`。
-  `arena.allocate(ValueLayout.JAVA_INT, 10)` 是「分配一个 int，值为 10」，**只有 4 字节** —— 用错会让原生写越界，直接把 JVM 打成段错误（本项目已复现过）。
-- **Arena 没有 `byteSize()`**。
-- 铁律：任何 (指针, 长度) 必须同源（同一个 arena、同一个 layout、同一个 count）。
+证据来源：`spike/ffm/FfmProbe.java`（已实跑，见下表"实测输出"列）。
+复现命令：
+```powershell
+$javac = 'C:\Program Files\Java\jdk-21\bin\javac.exe'
+$java  = 'C:\Program Files\Java\jdk-21\bin\java.exe'
+& $javac --release 21 --enable-preview -d out spike/ffm/FfmProbe.java
+& $java --enable-preview --enable-native-access=ALL-UNNAMED -cp out FfmProbe
+```
+
+| 坑 | JDK 21 的实际形状 | 实测输出 |
+| --- | --- | --- |
+| 没有 `Linker.Option.critical` | 只有 `firstVariadicArg` / `captureCallState` / `captureStateLayout` / **`isTrivial`**（22 才改名 critical） | `Linker.Option has critical()? false` |
+| `allocate` 的数值重载**不是**数组分配 | `arena.allocate(JAVA_INT, 10)` = 一个 int、值 10 | `byteSize() = 4` |
+| 数组分配要显式 | `arena.allocateArray(JAVA_INT, 10)` | `byteSize() = 40` |
+| **`Arena` 没有 `byteSize()`** | `byteSize()` 只在 `MemorySegment` 上 | `Arena has byteSize()? false` |
+| **没有 `allocateFrom(String)`**（22 才有） | 用 `arena.allocate(len, 1)` + `setUtf8String` | `Arena has allocateFrom? false` |
+| **没有 `setString` / `getString`**（22 才有） | JDK 21 是 **`setUtf8String(long, String)`** / `getUtf8String(long)`，**且没有 Charset 重载** | 编译期 `cannot find symbol: method setString(int,String)` |
+| 端到端可用性 | `Linker.nativeLinker().defaultLookup()` + `downcallHandle` 正常 | `strlen("hello") = 5` |
+
+**铁律**：任何 (指针, 长度) 必须同源（同一个 arena、同一个 layout、同一个 count）。
 
 ---
 

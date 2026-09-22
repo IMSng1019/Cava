@@ -39,7 +39,7 @@ bench 里 20000 次真实调用 **canaryDelta=20000/20000**（一次不多、一
 | ~~src/main/java/cava/hook/PathfindBench.java~~ | ~~/cava pathfind {stats|probe|bench <n>}~~：**不依赖 profiler 的端到端测量** |
 | ~~src/main/java/cava/hook/PathfindBootstrap.java~~ | 幂等自举（生命周期监听 + 命令注册） |
 | ~~src/main/resources/cava.mixins.json~~ | 只加了本流的 4 个 mixin 类 |
-| ~~src/test/java/cava/hook/*Test.java~~ | 6 个纯单测类（24 个用例，**不需要 MC、不需要原生库**） |
+| ~~src/test/java/cava/hook/*Test.java~~ | 6 个纯单测类（23 个 ~~@Test~~ 用例，**不需要 MC、不需要原生库**） |
 
 ---
 

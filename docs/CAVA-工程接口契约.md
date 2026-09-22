@@ -203,7 +203,13 @@ $java  = 'C:\Program Files\Java\jdk-21\bin\java.exe'
 
 第一行必须是头，字段固定：
 
-    {"t":"h","v":1,"label":"...","native":false,"mods":"<modset 指纹>","mc":"1.20.4","cava":"0.1.0","seed":12345,"startTick":0}
+    {"t":"h","v":1,"label":"...","native":false,"mods":"<modset 指纹>","mc":"1.20.4","cava":"0.1.0","seed":12345,"startTick":0,
+ "radius":8,"spawnExcl":8,"excl":<dim:chunk 列表>,"incl":<dim:chunk 列表>,"hash":"fnv1a64"}
+
+**排除范围必须写进头行**（上面最后 5 个键，2026-09-22 由差分流追加并经 captain 认可）——
+因为"比对了什么"必须可复现：`radius` = 固定扫描盒半径；`spawnExcl` = 出生点附近被排除的区块半径；
+`excl`/`incl` = 显式排除/包含的 `dim:chunk` 列表；`hash` = 哈希算法名。
+**原有 8 个键一个都没动**，只追加。
 
 之后每 tick 一行，**字段缺省即 null，但键必须都在**：
 
@@ -212,6 +218,10 @@ $java  = 'C:\Program Files\Java\jdk-21\bin\java.exe'
      "x":"<可选扩展：子系统自检抽样哈希>"}
 
 - `w`：对**固定扫描盒内的所有区块**的方块状态按 **(dim, x, y, z, stateId)** 排序后逐项 FNV-1a；**禁用对象身份**。
+  **不含实体**（实体层本质不确定，见 `docs/CAVA-determinism-report.md`）。
+  > **维度偏离（差分流实测后的小调整）**：契约原写"覆盖 3 个维度"，但实测本存档的 `DIM-1`/`DIM1`
+  > **一个区块都没生成**，强行覆盖 3 维会在第一 tick 触发约 480 个区块的生成（分钟级 + c2me 时序噪声）。
+  > 所以场景层固定 `-Dcava.parity.dims=overworld`。**这是记录在案的有意偏离**，不是漏做。
   **扫描盒必须固定、可复现**（默认：以原点为中心、半径 `-Dcava.parity.world.radius` 个区块，默认 8，覆盖 3 个维度；空段跳过）。
   **不要用"当前已加载区块集合"**：1.20.4 Yarn 没有公开的枚举 API（`threadedAnvilChunkStorage`/`loadedChunks` 都是私有字段），
   而且已加载集合本身会抖动 → 会产生假差异。两侧必须用同一个扫描盒（由系统属性固定）。

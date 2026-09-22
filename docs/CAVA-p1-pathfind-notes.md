@@ -300,7 +300,42 @@ RAIL / LEAVES / FENCES / WALLS / FENCE_GATE(+OPEN) / FIRE_DAMAGE / canPathfindTh
 本流已把测试改成**自动定位**（从 cwd 与 argv[0] 逐级向上找 \`src/test/resources/cava/oracle\`，
 找不到才报 usage），所以不需要改别人的 \`native/tests/CMakeLists.txt\`。
 
-**仍未通过（不是本流的）**：\`ctest\` 里 \`cava_selftest\`(9 项) 与 \`cava_dll_loadtest\` 失败 ——
-都是扩 ABI 造成的**既有断言过期**（\`cava_layout_report 返回 9（期望 4）\`、
-\`native_layout_sum=0xc04a5791 与 Java 侧算的和一致\`）。归 P0-B。
+**（已解决）** 当时 \`ctest\` 里 \`cava_selftest\` / \`cava_dll_loadtest\` 因扩 ABI 的既有断言过期而失败 ——
+P0-B 已更新，本轮最终实测 **4/4 全绿**。
+---
+
+## 9. 【最终】cava_pathfind 已真实接线（不再是保守回退）
+
+两条历史阻塞**均已解除**（captain 裁决）：
+- `CAVA_PNT_*` 已换成 javap 实证的 ordinal ⇒ **`CAVA_PNT_N` 就是内核的 `PT_N`**，惩罚表按真实 ordinal 索引；
+- 内核 `PF_*` 已改为头文件 `CAVA_SF_* / CAVA_PF_*` 的**别名**（唯一事实来源）；
+  Java 侧 `MirrorFlags.commonNodeType(flags)` 是内核 `common_node_type()` 的逐分支镜像，
+  并已对全部真实状态对拍（26644 条，0 不一致）。
+
+接线内容：`HandleState`（区域 + 状态表 + 生物档案）→ `WorldView` + `MobProfile`；
+`CavaPathRequest` 的 tx/ty/tz、reach_range、max_range、max_visited_nodes → `SolveParams`；
+`SolveResult.nodes` → `CavaPathNode`（g = penalizedPathLength、f = heapWeight、heapIndex、type，
+与 `NativePathBuilder` 的读取一一对应）。
+
+**ABI 层实测（[abi] 段）**：
+
+    [abi] cava_pathfind=3 nodes; first=(1,1,1) last=(3,1,3) last.g=2.82843 last.f=2.82843 type(first)=2 heapIndex(first)=-1
+    [abi] cava_pathfind(cap=1, 路径更长)=-4 (expect -4), buffer 首字段=-777 (expect -777)
+
+- 3 个节点、首=起点、末=终点（reach_range=0）；g = 2.82843 = 2√2（两步对角）—— 数值自洽。
+- **cap 不足返回 `CAVA_ERR_ARG` 且验证了「绝不部分写入」**（哨兵值 -777 未被覆盖）。
+- `<=0` 的 max_visited_nodes 直接 `CAVA_ERR_ARG`：Java 侧 `PathfindHook` 本来就保证 budget>0
+  （budget<=0 自己就先回退了），所以这一支没有"猜一个默认值"的必要。
+
+**回归**（接线后重跑，证明内核没被改坏）：
+
+    10000/10000 vectors + 60/60 golden：mismatches=0，worldHashFail=0
+    ctest：100% tests passed, 0 tests failed out of 4
+           （cava_dll_loadtest / cava_fp_probe / cava_pathfind_vectors / cava_selftest）
+    natives/windows-x64/cava.dll 重新构建：2,828,332 B @ 15:44:38
+
+**未验证**：**整服层的 takeovers > 0 尚待注入流复测**（本流没有跑真实服务器的路径）。
+ABI 层已实测能出路径、cap 与错误码语义都符合契约，但「接管后与同一整合包 native 关闭逐 tick 一致」
+仍然是**未验证**的 —— 需要注入流复测 + 整服差分。
+
 

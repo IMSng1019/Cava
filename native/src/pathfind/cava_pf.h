@@ -219,6 +219,7 @@ struct SolveParams {
 struct OutNode {
     int32_t x = 0, y = 0, z = 0;
     int32_t type = PT_BLOCKED;
+    int32_t heap_index = -1;   /* 原版 PathNode.heapIndex；只做 parity 证据，不参与行为 */
     bool    visited = false;
     float   path_length = 0.0f;
     float   penalized_path_length = 0.0f;

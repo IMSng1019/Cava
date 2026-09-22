@@ -617,9 +617,13 @@ static int abi_smoke_test() {
     std::printf("[abi] state_table_upload=%d (expect 0)\n", st);
     if (st != CAVA_OK) fails++;
 
-    /* 索引顺序 x 最快、y 最慢：dim 2x2x2 时 idx1 = (1,0,0)。*/
-    int32_t ids[8] = {0, 1, 0, 0, 0, 0, 0, 0};
-    st = cava_region_upload(handle, 2, 2, 2, 0, 0, 0, ids, 8);
+    /* 区域 4x3x4：y=0 一层石头地板，y=1/2 空气。索引顺序 x 最快、y 最慢。*/
+    int32_t ids[48];
+    for (int32_t ly = 0; ly < 3; ++ly)
+        for (int32_t lz = 0; lz < 4; ++lz)
+            for (int32_t lx = 0; lx < 4; ++lx)
+                ids[(ly * 4 + lz) * 4 + lx] = (ly == 0) ? 1 : 0;
+    st = cava_region_upload(handle, 4, 3, 4, 0, 0, 0, ids, 48);
     std::printf("[abi] region_upload=%d (expect 0)\n", st);
     if (st != CAVA_OK) fails++;
 
@@ -659,7 +663,7 @@ static int abi_smoke_test() {
     mp.reserved_max_fall_distance = 0.0f; mp.safe_fall_distance = 3;
     mp.min_y = -64; mp.sea_level = 63;
     mp.caps = CAVA_NAV_CAN_OPEN_DOORS | CAVA_NAV_ON_GROUND;
-    mp.start_x = 0.5; mp.start_y = 1.0; mp.start_z = 0.5;
+    mp.start_x = 1.5; mp.start_y = 1.0; mp.start_z = 1.5;
     st = cava_mob_profile_upload(handle, &mp);
     std::printf("[abi] mob_profile_upload=%d (expect 0)\n", st);
     if (st != CAVA_OK) fails++;
@@ -669,12 +673,43 @@ static int abi_smoke_test() {
     std::printf("[abi] mob_profile_upload(width<0)=%d (expect %d)\n", st, CAVA_ERR_ARG);
     if (st != CAVA_ERR_ARG) fails++;
 
-    /* 输入齐了，但 ABI 的 CAVA_PNT_* 序号表与 javap 实证的枚举 ordinal 不一致（见 cava_pf_abi.cpp
-     * 的注释），所以**只回退不猜** -> CAVA_ERR_UNIMPLEMENTED。*/
+    /* **真实求解**：起点 (1,1,1) 站在石地板上，终点 (3,1,3)，reach_range=0。*/
+    req.tx = 3; req.ty = 1; req.tz = 3;
+    req.reach_range = 0;
     st = cava_pathfind(handle, &req, out_nodes, 8);
-    std::printf("[abi] cava_pathfind(输入齐)=%d (expect %d = CAVA_ERR_UNIMPLEMENTED: PNT 序号表待裁决)\n",
-                st, CAVA_ERR_UNIMPLEMENTED);
-    if (st != CAVA_ERR_UNIMPLEMENTED) fails++;
+    if (st > 0) {
+        std::printf("[abi] cava_pathfind=%d nodes; first=(%d,%d,%d) last=(%d,%d,%d) "
+                    "last.g=%g last.f=%g type(first)=%u heapIndex(first)=%d\n",
+                    st, out_nodes[0].x, out_nodes[0].y, out_nodes[0].z,
+                    out_nodes[st - 1].x, out_nodes[st - 1].y, out_nodes[st - 1].z,
+                    (double) out_nodes[st - 1].g, (double) out_nodes[st - 1].f,
+                    out_nodes[0].type, out_nodes[0].heapIndex);
+    } else {
+        std::printf("[abi] cava_pathfind=%d (期望 >0)\n", st);
+    }
+    if (st < 3) { std::printf("[abi] FAIL: 期望至少 3 个节点\n"); fails++; }
+    else {
+        if (out_nodes[0].x != 1 || out_nodes[0].y != 1 || out_nodes[0].z != 1) {
+            std::printf("[abi] FAIL: 首节点不是起点\n"); fails++;
+        }
+        if (out_nodes[st - 1].x != 3 || out_nodes[st - 1].y != 1 || out_nodes[st - 1].z != 3) {
+            std::printf("[abi] FAIL: 末节点不是终点（reach_range=0）\n"); fails++;
+        }
+        if (out_nodes[st - 1].g < 0.0f || !(out_nodes[st - 1].f >= out_nodes[st - 1].g)) {
+            std::printf("[abi] FAIL: g/f 不合法\n"); fails++;
+        }
+    }
+
+    /* 契约：cap 不足 -> CAVA_ERR_ARG 且**绝不部分写入**。*/
+    CavaPathNode small[1];
+    std::memset(small, 0, sizeof small);
+    small[0].x = -777;
+    const int32_t st_cap = cava_pathfind(handle, &req, small, 1);
+    std::printf("[abi] cava_pathfind(cap=1, 路径更长)=%d (expect %d), buffer 首字段=%d (expect -777)\n",
+                st_cap, CAVA_ERR_ARG, small[0].x);
+    if (st_cap != CAVA_ERR_ARG) fails++;
+    if (small[0].x != -777) { std::printf("[abi] FAIL: cap 不足时发生了部分写入\n"); fails++; }
+
     st = cava_mob_profile_clear(handle);
     std::printf("[abi] mob_profile_clear=%d (expect 0)\n", st);
     if (st != CAVA_OK) fails++;

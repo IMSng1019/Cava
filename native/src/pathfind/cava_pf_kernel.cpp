@@ -911,6 +911,7 @@ bool solve(const WorldView& world, const MobProfile& mob_in,
             OutNode o;
             o.x = nd.x; o.y = nd.y; o.z = nd.z;
             o.type = nd.type;
+            o.heap_index = nd.heap_index;
             o.visited = nd.visited;
             o.path_length = nd.path_length;
             o.penalized_path_length = nd.penalized_path_length;
@@ -934,6 +935,7 @@ bool solve(const WorldView& world, const MobProfile& mob_in,
             OutNode o;
             o.x = nd.x; o.y = nd.y; o.z = nd.z;
             o.type = nd.type;
+            o.heap_index = nd.heap_index;
             o.visited = nd.visited;
             o.path_length = nd.path_length;
             o.penalized_path_length = nd.penalized_path_length;
@@ -946,9 +948,10 @@ bool solve(const WorldView& world, const MobProfile& mob_in,
     out.found = true;
     if (!out.nodes.empty()) {
         const OutNode& last = out.nodes.back();
-        const float dx = (float) std::abs(params.target_x - last.x);
-        const float dy = (float) std::abs(params.target_y - last.y);
-        const float dz = (float) std::abs(params.target_z - last.z);
+        /* Math.abs(int)：INT_MIN 上 std::abs 是 UB，用与 Java 同语义的 jabs_i。*/
+        const float dx = (float) jabs_i(params.target_x - last.x);
+        const float dy = (float) jabs_i(params.target_y - last.y);
+        const float dz = (float) jabs_i(params.target_z - last.z);
         out.manhattan_distance_from_target = dx + dy + dz;
     }
     out.expanded_count = expanded;

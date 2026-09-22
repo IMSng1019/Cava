@@ -3,11 +3,9 @@
  * 实现范围（诚实版，见 docs/CAVA-p1-pathfind-notes.md 的「ABI 缺口」一节）：
  *   - cava_state_table_upload / cava_region_upload / cava_region_clear /
  *     cava_region_state_id_at：**完整可用**，是 Java 侧镜像的落地接口。
- *   - cava_pathfind：校验完整，但因为**冻结的 CavaPathRequest 里没有生物档案通道**
- *     （width/height/stepHeight/惩罚表/实体 double 位姿/world bottomY/seaLevel/maxRange），
- *     无法在不破坏 parity 的前提下求解 —— 因此返回 CAVA_ERR_UNIMPLEMENTED，
- *     Java 侧据此回退原逻辑（契约要求：错误码 = 回退，绝不是崩）。
- *     需要 captain 决定是否扩 ABI（提案见 notes）。
+ *   - cava_mob_profile_upload / cava_mob_profile_clear：**已实现**（含非法字段拒绝且不改变已有档案）。
+ *   - cava_pathfind：**已接线**，真的求解并写出节点（见函数内注释；两条历史阻塞已解除）。
+ *     返回值：>0 节点数 / 0 无路径 / <0 错误码（Java 侧按契约回退原逻辑，绝不崩）。
  *
  * 句柄校验：句柄编码 = (generation << 32) | (slot_index + 1)（见 cava_handle.cpp）。
  * 本文件只能校验**形状**并查自己的状态表 —— 真正的代际校验要 cava::detail::lookup()，
@@ -195,30 +193,63 @@ extern "C" CAVA_EXPORT int32_t cava_pathfind(int64_t handle, const CavaPathReque
     if (!st->region_valid || st->ids.empty()) return CAVA_ERR_ARG;   /* 区域还没推 */
     if (!st->has_mob) return CAVA_ERR_ARG;                           /* 生物档案还没推 */
 
-    /* ⚠️ 输入齐了，但**还不能算** —— 有两处必须先由 captain 裁决的语义冲突：
-     *
-     * (1) CAVA_PNT_* 的序号表与 javap 实证的 PathNodeType 枚举 ordinal **不一致**。
-     *     头文件写"必须与 Java 枚举 ordinal 完全一致"，但实测（oracle spec §8，
-     *     javap -p -c net.minecraft.entity.ai.pathing.PathNodeType 的 static{}）真实 ordinal 是：
-     *        0 BLOCKED 1 OPEN 2 WALKABLE 3 WALKABLE_DOOR 4 TRAPDOOR 5 POWDER_SNOW
-     *        6 DANGER_POWDER_SNOW 7 FENCE 8 LAVA 9 WATER 10 WATER_BORDER 11 RAIL
-     *        12 UNPASSABLE_RAIL 13 DANGER_FIRE 14 DAMAGE_FIRE 15 DANGER_OTHER 16 DAMAGE_OTHER
-     *        17 DOOR_OPEN 18 DOOR_WOOD_CLOSED 19 DOOR_IRON_CLOSED 20 BREACH 21 LEAVES
-     *        22 STICKY_HONEY 23 COCOA 24 DAMAGE_CAUTIOUS 25 DANGER_TRAPDOOR
-     *     而头文件给的是 5=FENCE 6=LAVA 7=WATER 8=RAIL 9=UNPASSABLE ...，且含 1.20.4 里
-     *     **根本不存在**的 DAMAGE_CACTUS / DOOR_OPEN_IRON / DAMAGE_WITHER_ROSE / DANGER_WATER，
-     *     缺 POWDER_SNOW / WATER_BORDER / DANGER_TRAPDOOR / DAMAGE_CAUTIOUS。
-     *     => Java 若按 pnt.ordinal() 填惩罚表、原生按头文件常量索引，**惩罚表整体错位**。
-     *     本内核内部坚持用 javap 实证的 ordinal（PT_*），所以这里不做"猜着映射"。
-     *
-     * (2) CAVA_PF_* 状态位是一组**派生/合成**标志（FENCE_OR_WALL_CLOSED / DANGER / DOOR_IRON），
-     *     与 getCommonNodeType 的 19 个 1:1 谓词不是一一对应（例如 WALLS 与 FENCES 分开、
-     *     FENCE_GATE 的"开着"没有单独位），映射规则要先定义。
-     *
-     * 在这两条定下来之前算出来的路径会"看起来正常但与原版不一致" —— 契约明令禁止这种猜测。
-     * 所以只回退，并给出精确错误码。内核本身已被 10060 组向量逐位验证（见 notes 第 2 节），
-     * 缺的只是 ABI 这一层的语义对齐。*/
-    (void) out;
-    (void) cap;
-    return CAVA_ERR_UNIMPLEMENTED;
+    /* 【历史记录，两条阻塞均已解除 —— 不要按旧结论再拒算】
+     * (1) CAVA_PNT_* 与 PathNodeType 枚举 ordinal 曾经不一致：**已修**。
+     *     captain 重读 static{} 后把头文件换成实测 ordinal，现在 CAVA_PNT_N 就是内核的 PT_N
+     *     （同一套数）。惩罚表按 CAVA_PNT_* 索引 = 按真实 ordinal 索引。
+     * (2) 内核的 PF_* 与头文件 CAVA_PF_* 曾经 19/19 全错位：**已修**。
+     *     cava_pf.h 的 PF_* 现在是头文件宏的别名（唯一事实来源），
+     *     Java 侧 MirrorFlags 与内核 common_node_type 已逐状态对拍（26644 条 0 不一致）。
+     * 若将来再出现"输入对不上"，**停下来上报**，不要在这里加回退。*/
+
+    /* 预算：Java 侧（PathfindHook）保证 budget = (int)((float)range * followRange) > 0，
+     * 否则它自己就回退了。<=0 在这里没有可靠推导方式 —— 不猜，直接报参数错。*/
+    if (req->max_visited_nodes <= 0) return CAVA_ERR_ARG;
+
+    /* 全程持锁求解：区域/状态表的 vector 必须保持存活，且 MC 的世界访问本来就在主线程。
+     * （若将来出现真实的并发推送需求，改成 shared_ptr 快照即可。）*/
+    WorldView w;
+    w.recs = st->recs.data();
+    w.rec_count = (int32_t) st->recs.size();
+    w.boxes = st->boxes.empty() ? nullptr : st->boxes.data();
+    w.box_count = (int32_t) st->boxes.size();
+    w.origin_x = st->origin_x;
+    w.origin_y = st->origin_y;
+    w.origin_z = st->origin_z;
+    w.dim_x = st->dim_x;
+    w.dim_y = st->dim_y;
+    w.dim_z = st->dim_z;
+    w.ids = st->ids.data();
+    w.min_y = st->min_y;
+    w.sea_level = st->sea_level;
+
+    cava::pathfind::SolveParams p;
+    p.start_x = st->mob.block_x();          /* 内核从实体位姿推起点，这三个只做记录 */
+    p.start_y = st->mob.block_y();
+    p.start_z = st->mob.block_z();
+    p.target_x = req->tx;
+    p.target_y = req->ty;
+    p.target_z = req->tz;
+    p.node_budget = req->max_visited_nodes;
+    p.max_range = req->max_range;
+    p.reach_radius = req->reach_range;
+
+    cava::pathfind::SolveResult res;
+    if (!cava::pathfind::solve(w, st->mob, p, res)) return CAVA_ERR_ARG;
+    if (!res.found || res.nodes.empty()) return 0;      /* 0 = 无路径（合法结果）*/
+
+    const int32_t n = (int32_t) res.nodes.size();
+    if (n > cap) return CAVA_ERR_ARG;                   /* 契约：cap 不足**绝不部分写入** */
+
+    for (int32_t i = 0; i < n; ++i) {
+        const cava::pathfind::OutNode& s = res.nodes[(size_t) i];
+        CavaPathNode& d = out[i];
+        d.x = s.x; d.y = s.y; d.z = s.z;
+        d.heapIndex = s.heap_index;
+        d.g = s.penalized_path_length;   /* Java: node.penalizedPathLength = g */
+        d.f = s.heap_weight;             /* Java: node.heapWeight = f */
+        d.type = (uint32_t) s.type;
+        d.flags = 0;                     /* CAVA_PATH_NODE_* 当前没有定义任何位 */
+    }
+    return n;
 }

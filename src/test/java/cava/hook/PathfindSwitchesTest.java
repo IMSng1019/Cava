@@ -57,15 +57,12 @@ class PathfindSwitchesTest {
     }
 
     @Test
-    void mirrorClassDefaultsToTheFrozenImplementationName() {
-        String old = System.getProperty(PathfindSwitches.PROP_MIRROR_CLASS);
-        System.clearProperty(PathfindSwitches.PROP_MIRROR_CLASS);
-        try {
-            assertEquals("cava.mirror.RegionMirror", PathfindSwitches.mirrorClassName());
-        } finally {
-            if (old != null) {
-                System.setProperty(PathfindSwitches.PROP_MIRROR_CLASS, old);
-            }
+    void reflectionBasedMirrorLookupIsGone() {
+        // -Dcava.mirror.class 已随"按类名试工厂"的反射一起删除（captain 加了契约入口 MirrorFactory）。
+        // 这条测试防的是"有人把反射 hack 加回来"：只要常量不存在，编译期就红。
+        for (java.lang.reflect.Field f : PathfindSwitches.class.getDeclaredFields()) {
+            org.junit.jupiter.api.Assertions.assertNotEquals("PROP_MIRROR_CLASS", f.getName(),
+                    "按类名找镜像实现的开关不该回来：实测它会伪装成『子系统缺失』");
         }
     }
 }

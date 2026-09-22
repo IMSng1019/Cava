@@ -13,10 +13,13 @@
 ~~金丝雀 PASS：主动触发 findPathToAny 一次，计数 0 -> 1~~（日志见 §2.2）；
 bench 里 20000 次真实调用 **canaryDelta=20000/20000**（一次不多、一次不少）。
 
-**原生接管当前整条关闭**（by design，见 §4.1）：~~cava_pathfind~~ 保守返回
-~~CAVA_ERR_UNIMPLEMENTED~~，且镜像流的 ~~isProfileReadyForSolve~~ 目前恒 false
-（实测 ~~reasons={profile-not-ready=20201}~~）。
-编排链路本身已被证实是通的（§2.5：~~nativeCalls=5201~~ 全部按 ~~native-unimplemented~~ 正确回退）。
+**编排链路端到端全通、且不再需要任何诊断开关**（§2.6）：真实服务端上
+~~接管条件全部满足~~、~~mirrorFactory=cava.mirror.MirrorFactory instance=true impl=cava.mirror.RegionMirror~~、
+~~nativeCalls=5201 reasons={native-unimplemented=5201} errors=0~~。
+
+**唯一还挡着"第一次真实接管"的，是原生内核的保守返回**：~~cava_pathfind~~ 仍返回
+~~CAVA_ERR_UNIMPLEMENTED~~（P1 内核流/A 的 ~~CAVA_PF_*~~ 位对齐尚未回执）⇒ ~~takeovers=0~~。
+这是**当前唯一的阻塞**，且不在本流路径上。
 
 ---
 
@@ -137,6 +140,16 @@ jar 里**没有也不需要 refmap**。
 3. 三条腿的 ~~canaryDelta~~ 全部等于 n ⇒ 这个 bench 同时是一条**注入覆盖率**断言。
 4. ~~avgNodes=4.00 nullPaths=0~~：合成场景稳定产出 4 节点路径，两腿可比。
 
+**最终配置的复验**（新契约 ~~MirrorFactory~~ + ~~bind~~ + ~~isFlagsReadyFor~~ + ~~uploadProfileForSolve(handle, uploader)~~，
+**诊断开关关闭**，n=5000）：
+
+    [cava/pathfind] BENCH n=5000 ns/op=430803.9 totalMs=2154.0 avgNodes=4.00 nullPaths=0
+        canaryDelta=5000(expect 5000) takeovers=0
+        | canary=5201 takeovers=0 nativeCalls=5201 errors=0 reasons={native-unimplemented=5201}
+
+⇒ 完整编排（绑世界 + flags 门禁 + 区域推送 + 档案上传 + ~~cava_pathfind~~ 返回 -7 + 回退）
+**430.8 µs/op ≈ 3.3–4.2× 纯原版**（102.7–131.1 µs）。这条比 D 腿更硬：**没有任何诊断开关参与**。
+
 **最终 jar 的复验**（把 ABI 偏移常量改成 ~~CavaLayouts.MobProfileOffset.*~~ 之后重跑 A 腿）：
 ~~n=20000 ns/op=102731.8 totalMs=2054.6 avgNodes=4.00 nullPaths=0 canaryDelta=20000(expect 20000)~~，
 金丝雀同样 PASS。**同一腿三次实测 102.7 / 113.0 µs**，再次说明噪声大于效应。
@@ -253,7 +266,7 @@ B 腿实测 ~~-Dcava.pathfind.hook=false~~ 时 ~~canaryDelta~~ 仍等于 n，正
 
 ## 4. 跨流接口缺口 / 请求清单
 
-### 4.1 原阻塞已由 captain 修契约解决（**等 A 跟进后复测**）
+### 4.1 原阻塞：**已解决并经真实服务端复测**（契约 ~~MirrorFactory~~ 是最后一块拼图）
 
 现象（C 腿实测）：~~reasons={profile-not-ready=20201}~~（20000 次 bench + 1 次探测），
 **即使打开 ~~-Dcava.pathfind.native~~，原生也一次都不会被调用**。
@@ -267,9 +280,27 @@ captain 复核后认定**根因是他的契约设计错了**（不是 A 的实�
 - 新增 ~~isFlagsReadyFor(int caps)~~（取代 profileKey 门禁）；
 - 新增 ~~bind(ServerWorld)~~（见 §4.3）。
 
-本流已按新接口改完（~~PathfindHook~~ / ~~PathfindMirrorBridge~~），**等 A 把 ~~RegionMirror~~ 跟到新接口后复测**。
+本流已按新接口改完（~~PathfindHook~~ / ~~PathfindMirrorBridge~~），**并已在真实服务端复测通过**：
 
-### 4.2 档案的权威生产者 = **注入流**（captain 2026-09-22 裁决）
+    [cava/pathfind] 注入体已自举（...）；mirrorFactory=cava.mirror.MirrorFactory instance=true impl=cava.mirror.RegionMirror；
+        penalizeDeepWater=readable
+    [cava/pathfind] 接管条件全部满足（hook=true native=true probe=true bypassProfileGate=false ...）
+    [cava/pathfind] 金丝雀 PASS：主动触发 findPathToAny 一次，计数 0 -> 1（原版返回 Path(4 节点)）；
+        canary=1 takeovers=0 nativeCalls=1 errors=0 disabled=false reasons={native-unimplemented=1}
+
+注意 ~~bypassProfileGate=false~~、~~reasons~~ 里**没有** ~~flags-not-ready~~ ⇒ 镜像流的 flags 就绪门禁**真的返回了 true**。
+
+### 4.2 实例入口：~~MirrorFactory~~（captain 提交 ~~d014f11~~）
+
+我按 (A) 方案把**「按类名试工厂」的反射彻底删掉**了：~~PathfindMirrorBridge~~ 现在直接
+~~import cava.mirror.MirrorFactory~~。~~-Dcava.mirror.class~~ 也随之删除。
+**现在是编译期强耦合**：~~MirrorFactory~~ 一旦改名/消失，**编译就红**，不会再伪装成运行期的静默回退。
+（captain 的总结值得记：**删掉一个反射 hack 只做了一半的活** —— 契约必须同时提供"正当地做这件事"的入口，
+否则 fail-closed 会伪装成"子系统缺失"，排查成本极高。这次的实测表现就是 ~~reasons={mirror-missing=20201}~~。）
+
+### 4.3 原「档案互斥桥」：已删除
+
+### 4.4 档案的权威生产者 = **注入流**（captain 2026-09-22 裁决）
 
 理由同 §4.1：**只有注入点有位姿与惩罚表**。
 本流据此**删掉了中间层 ~~PathfindProfileBridge~~**（含它"优先走镜像流"的分支）——
@@ -277,13 +308,14 @@ captain 复核后认定**根因是他的契约设计错了**（不是 A 的实�
 ~~mirror.uploadProfileForSolve(handle, seg -> profile.writeTo(seg, 0))~~。
 **不存在"两个生产者"，也不需要互斥桥。**
 
-### 4.3 其他接口请求
+### 4.5 其他接口请求
 
 | # | 给谁 | 请求 |
 | --- | --- | --- |
-| 1 | captain | ⚠ **未闭合**：~~bind(ServerWorld)~~ 已进契约、~~forWorld~~ 反射已删，但契约里**仍然没有"如何获得一个 ~~RegionSource~~ 实例"的入口**，而 A 的 ~~RegionMirror~~ 只有 ~~(RegionUploader, StateTableGate)~~ / ~~(RegionReader, RegionUploader, StateTableGate)~~ / ~~static forWorld(ServerWorld)~~。**真实服务端实测（新 jar，~~native=true~~）：~~instance=false boundWorlds=0 reasons={mirror-missing=20201} nativeCalls=0~~** ⇒ 原生整条路径仍然到不了。请求二选一：(A) 契约加 ~~static RegionSource instance()~~（推荐，一行）；(B) 允许保留"只调 ~~forWorld(ServerWorld)~~"的最小兜底。**在回执之前本流保持现状，不会自己加回反射。** |
+| 1 | captain | ✅ **已闭合**：~~MirrorFactory~~（~~d014f11~~）成为实例入口，反射全删，真实服务端复测通过（§4.1/§4.2） |
 | 2 | P1-Java-A | **已作废**：~~profileKey~~ 随旧接口一起删掉了，现在门禁是 ~~isFlagsReadyFor(caps)~~，档案由注入流填值 |
 | 3 | captain / P0-B | **已撤回**（captain 用 javap 纠正了我的前提）：寻路是**同步跑在主线程**的，不存在吞吐问题，不做 ABI 改造。见 §3.7 |
+| 4 | P1 内核流 | **当前唯一的阻塞**：~~cava_pathfind~~ 仍保守返回 ~~CAVA_ERR_UNIMPLEMENTED~~ ⇒ ~~takeovers=0~~。前端的输入（状态表 flags 就绪 / 区域 / 档案）**已经全部备齐并实测通过**，只等内核肯算 |
 
 ### 4.4 已确认的 ABI 缺口（不阻塞本轮）
 

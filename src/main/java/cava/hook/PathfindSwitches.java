@@ -18,8 +18,6 @@ package cava.hook;
  *       <td>探测最长等待多少个服务端 tick（等世界/生物就绪）。超时 = 计数为 0 的失败路径。</td></tr>
  *   <tr><td>{@code cava.pathfind.maxRegionBlocks}</td><td>8000000</td>
  *       <td>单次区域推送的体积上限（方块数）；超过就回退原逻辑（不做部分推送）。</td></tr>
- *   <tr><td>{@code cava.mirror.class}</td><td>cava.mirror.RegionMirror</td>
- *       <td>镜像流（P1-Java-A）的 {@code RegionSource} 实现类名。见 {@link PathfindMirrorBridge}。</td></tr>
  * </table>
  *
  * <p>为什么不把开关放进 {@code config/cava.json}：那需要改 {@code cava/CavaConfig.java}（不是本流的文件）。
@@ -37,8 +35,9 @@ public final class PathfindSwitches {
     public static final String PROP_PROBE_TICKS = "cava.pathfind.probe.ticks";
     /** 区域推送体积上限（方块数）。 */
     public static final String PROP_MAX_REGION_BLOCKS = "cava.pathfind.maxRegionBlocks";
-    /** 镜像实现类名。 */
-    public static final String PROP_MIRROR_CLASS = "cava.mirror.class";
+    // 说明：原来这里有一个 -Dcava.mirror.class=<实现类名>（注入流靠反射按名字找实现）。
+    // captain 2026-09-22 加了契约入口 cava.mirror.MirrorFactory 之后，**它已删除** ——
+    // "靠反射猜实现类"被实测证明会伪装成"子系统缺失"（reasons={mirror-missing=20201}）。
     /**
      * **诊断开关（默认 false，不要在生产开）**：跳过镜像流的 {@code isProfileReadyForSolve} 门禁。
      *
@@ -53,8 +52,6 @@ public final class PathfindSwitches {
      */
     public static final String PROP_BYPASS_PROFILE_GATE = "cava.pathfind.diagnostic.bypassProfileGate";
 
-    /** {@link #PROP_MIRROR_CLASS} 的默认值。 */
-    public static final String DEFAULT_MIRROR_CLASS = "cava.mirror.RegionMirror";
     /** {@link #PROP_MAX_REGION_BLOCKS} 的默认值。 */
     public static final long DEFAULT_MAX_REGION_BLOCKS = 8_000_000L;
     /** {@link #PROP_PROBE_TICKS} 的默认值。 */
@@ -89,11 +86,6 @@ public final class PathfindSwitches {
     /** 见 {@link #PROP_BYPASS_PROFILE_GATE}：**仅供诊断**。 */
     public static boolean bypassProfileGate() {
         return readBoolean(PROP_BYPASS_PROFILE_GATE, false);
-    }
-
-    public static String mirrorClassName() {
-        String v = System.getProperty(PROP_MIRROR_CLASS, "").trim();
-        return v.isEmpty() ? DEFAULT_MIRROR_CLASS : v;
     }
 
     private static boolean readBoolean(String key, boolean def) {
@@ -139,7 +131,6 @@ public final class PathfindSwitches {
                 + " probe=" + probeEnabled()
                 + " bypassProfileGate=" + bypassProfileGate()
                 + " probeTicks=" + probeTicks()
-                + " maxRegionBlocks=" + maxRegionBlocks()
-                + " mirrorClass=" + mirrorClassName();
+                + " maxRegionBlocks=" + maxRegionBlocks();
     }
 }

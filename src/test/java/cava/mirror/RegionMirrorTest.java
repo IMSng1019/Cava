@@ -247,24 +247,45 @@ class RegionMirrorTest {
         assertEquals(1, mirror.failures());
     }
 
+    /**
+     * 复用语义（2026-09-22 captain 定稿）：**按"自上次上传以来有没有发生失效事件"判定，不按 tick 判定**。
+     *
+     * <p>旧语义是"同 tick 才复用"，那会漏掉同一 tick 内的方块变化，所以只能当可选快路径；
+     * 而且旧版本同时要求 {@code lastTick == currentTick} 与 {@code lastTick != MIN_VALUE}，
+     * 导致**复用永远不可能命中**（实测 6000 次求解 0 命中）。
+     *
+     * <p>新语义下：换 tick 但地形没变 → **仍然复用**；只要 {@code onBlockChanged} /
+     * {@code onSectionUnloaded} / {@code onWorldChanged} 任一生效 → **必须重推**。
+     * 这正是"有变更就不复用"从赌变成结构性保证的地方，所以下面两条断言都很重要：
+     * 前者保证性能（否则 320µs/次的推送会淹没求解），后者保证正确性。
+     */
     @Test
-    void sameTickReuseOnlyForIdenticalRegion() {
+    void reuseIsKeyedOnInvalidationNotOnTick() {
         RegionRect rect = new RegionRect(0, 60, 0, 8, 8, 8);
         mirror.pushReusingSameTick(rect);
         assertEquals(1, uploader.uploads.size());
         mirror.pushReusingSameTick(rect);
-        assertEquals(1, uploader.uploads.size(), "同 tick 同矩形应当复用");
+        assertEquals(1, uploader.uploads.size(), "同矩形且无失效事件应当复用");
         assertEquals(1, mirror.reuseSkips());
-        // 换了 tick -> 重推
+
+        // 换了 tick，但地形没变 -> **仍然复用**（旧语义在这里会重推，正是 0 命中率的原因）
         reader.tick++;
         mirror.pushReusingSameTick(rect);
-        assertEquals(2, uploader.uploads.size(), "换 tick 必须重推");
-        // 通知失效 -> 同 tick 也要重推
+        assertEquals(1, uploader.uploads.size(), "换 tick 但无失效事件必须复用");
+        assertEquals(2, mirror.reuseSkips());
+
+        // 方块变化 -> 立即失效，必须重推（正确性保证）
         mirror.onBlockChanged(1, 2, 3);
         mirror.pushReusingSameTick(rect);
-        assertEquals(3, uploader.uploads.size(), "失效通知后必须重推");
+        assertEquals(2, uploader.uploads.size(), "方块变化后必须重推");
         assertEquals(1, mirror.invalidationCount());
         assertTrue(mirror.lastInvalidation().contains("方块变化"));
+
+        // 区段卸载 -> 同样必须重推
+        mirror.onSectionUnloaded(0, 0);
+        mirror.pushReusingSameTick(rect);
+        assertEquals(3, uploader.uploads.size(), "区段卸载后必须重推");
+        assertEquals(2, mirror.invalidationCount());
     }
 
     @Test

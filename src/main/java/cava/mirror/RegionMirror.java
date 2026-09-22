@@ -422,8 +422,19 @@ public final class RegionMirror implements RegionSource {
              *   **同一片地形上的连续多次求解不再需要重推几万格**（实测瓶颈）。
              *
              *   注意：lastTick == Long.MIN_VALUE 同时覆盖"从未推过"与"刚失效"两种情况。*/
+            /* 复用条件（2026-09-22 captain 定稿）：
+             *   rect 相同 + 维度相同 + **自上次上传以来没有发生失效事件** + 表与上传器可用。
+             *
+             *   `lastTick != Long.MIN_VALUE` 就是"没有失效事件"的哨兵：
+             *   成功推送后 lastTick 被写成真实 tick 值；而 invalidate() 会把它写回 Long.MIN_VALUE，
+             *   且 invalidate() 由 onBlockChanged / onSectionUnloaded / onWorldChanged 调用 ——
+             *   于是"有变更就不复用"是**结构性保证**，不是"赌 tick 内没有变更"。
+             *
+             *   ⚠️ **不要再把 `lastTick == r.currentTick()` 加回来**：那是按 tick 判定，
+             *   会漏掉同一 tick 内的方块变化（玩家/别的 mod 放置），因而只能当可选快路径。
+             *   早先的版本同时写了这两个条件，结果复用**永远不可能命中**（实测 6000 次求解 0 命中）。*/
             if (lastRect != null && lastRect.equals(rect) && lastDim.equals(r.dimensionId())
-                    && lastTick == r.currentTick() && lastTick != Long.MIN_VALUE
+                    && lastTick != Long.MIN_VALUE
                     && table.ready() && uploader.available()) {
                 reuseSkips++;
                 return new Pushed(rect.dimX(), rect.dimY(), rect.dimZ(), rect.minX(), rect.minY(), rect.minZ(),
@@ -437,7 +448,10 @@ public final class RegionMirror implements RegionSource {
     public Pushed pushForSolve(int sx, int sy, int sz, int tx, int ty, int tz,
                                float width, float height, int safeFallDistance) {
         RegionReader r = requireReader();
-        return push(RegionRect.forSolve(sx, sy, sz, tx, ty, tz, width, height, safeFallDistance,
+        /* **必须走复用路径**：同一片地形上的连续求解（同一 tick 内多只生物、或地形没变）不应重推。
+         * 2026-09-22 实测：这里原本直接调 push()，于是 6000 次求解 = 6000 次推送、**复用命中 0 次**。
+         * 复用是否成立的判定在 pushReusingSameTick 里（按"自上次上传以来有没有发生失效事件"）。*/
+        return pushReusingSameTick(RegionRect.forSolve(sx, sy, sz, tx, ty, tz, width, height, safeFallDistance,
                 r.minY(), r.maxY()));
     }
 

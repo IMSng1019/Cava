@@ -1,10 +1,8 @@
 {
 	"required": true,
-	"package": "cava.modid.client.mixin",
+	"package": "cava.client.mixin",
 	"compatibilityLevel": "JAVA_17",
-	"client": [
-		"ExampleClientMixin"
-	],
+	"client": [],
 	"injectors": {
 		"defaultRequire": 1
 	},

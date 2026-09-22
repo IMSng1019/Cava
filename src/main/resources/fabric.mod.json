@@ -2,24 +2,21 @@
 	"schemaVersion": 1,
 	"id": "cava",
 	"version": "${version}",
-	"name": "cava",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"name": "Cava",
+	"description": "把生物寻路 / 实体开销 / 红石三个子系统的内层循环搬到原生侧（Java 21 预览版 FFM + C++），行为与 native 关闭时逐 tick 一致。P0 只有骨架，不注入任何游戏逻辑。",
 	"authors": [
-		"Me!"
+		"Cava project"
 	],
-	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
-	},
+	"contact": {},
 	"license": "CC0-1.0",
 	"icon": "assets/cava/icon.png",
 	"environment": "*",
 	"entrypoints": {
 		"main": [
-			"cava.modid.Cava"
+			"cava.Cava"
 		],
 		"client": [
-			"cava.modid.client.CavaClient"
+			"cava.client.CavaClient"
 		]
 	},
 	"mixins": [
@@ -32,7 +29,7 @@
 	"depends": {
 		"fabricloader": ">=0.19.5",
 		"minecraft": "~1.20.4",
-		"java": ">=17",
+		"java": ">=21",
 		"fabric-api": "*"
 	}
 }

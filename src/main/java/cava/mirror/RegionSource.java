@@ -26,6 +26,44 @@ package cava.mirror;
  */
 public interface RegionSource {
 
+    /**
+     * 绑定到某个世界。
+     *
+     * <p><b>为什么需要这个方法（2026-09-22 补，由注入流实测暴露）</b>：镜像的实现是按世界构造的
+     * （要读 {@code ServerWorld} 的区块与高度），但冻结接口里原本没有任何办法<b>把世界递进来</b>，
+     * 注入流只能靠反射去撞实现的内部字段 —— 那是"靠运行期静默回退掩盖接口不对"，
+     * 属于必须消灭的形态。**请实现者在这里完成绑定，调用者在每次要用之前确保已绑定到正确的世界。**
+     *
+     * <p>生命周期约定：一个世界一个实例；换维度/换世界时重新绑定。实现必须能处理
+     * "同一世界重复绑定"（幂等）。
+     */
+    void bind(net.minecraft.server.world.ServerWorld world);
+
+    /**
+     * 把一份**已经填好的** {@code CavaMobProfile} 内容上传给原生，供本次求解使用。
+     *
+     * <p><b>权威生产者（captain 2026-09-22 裁决）</b>：
+     * 档案里含实体位姿与 26 项惩罚表，而<b>只有注入点拿得到这些东西</b>（它有 {@code MobEntity} 与
+     * {@code PathNodeMaker} 的上下文）。所以：
+     * <ul>
+     *   <li><b>生产者 = 注入流</b>（它已经把值算好了）；</li>
+     *   <li><b>镜像流只负责"写进原生"</b>（它持有 `handle` 与 arena 的生命周期）。</li>
+     * </ul>
+     * 这样两边不会各推一份，也不需要"互斥桥"这种中间层。
+     * <b>之前"镜像流负责产出档案"的设计已作废</b> —— 它拿不到位姿，只能恒返回"未就绪"。
+     *
+     * @param uploader 一个把已填好的档案写进给定内存段的回调（调用方负责填值，避免两边各自解释布局）
+     * @return 成功与否；false 表示调用方必须回退
+     */
+    boolean uploadProfileForSolve(long handle, java.util.function.Consumer<java.lang.foreign.MemorySegment> uploader);
+
+    /**
+     * flags 语义对于"本类型生物"是否已就绪。
+     *
+     * @param caps 该生物的 {@code CAVA_NAV_*} 能力位（由注入流给出；镜像流据此判断是否需要重算）
+     */
+    boolean isFlagsReadyFor(int caps);
+
     /** 一次区域推送的结果。 */
     record Pushed(int dimX, int dimY, int dimZ,
                   int originX, int originY, int originZ,
@@ -45,37 +83,12 @@ public interface RegionSource {
     /** 清掉原生侧的区域缓存。幂等。 */
     void clear();
 
-    /**
-     * 该生物档案对应的**方块状态 flags 语义**是否已就绪。
-     *
-     * <p>原版 {@code getCommonNodeType} 依赖实体上下文（开门能力、能否越过栅栏、体型……），
-     * 所以"一个状态一个 pathType"不足以表达。镜像流负责把这个差异消化掉；
-     * 在它确认"这个 profile 语义已就绪"之前，<b>注入流必须回退原逻辑</b>。
-     *
-     * <p><b>注意通道</b>：原生内核**只读 {@code CavaStateRecord.flags}**，
-     * <b>不读</b> {@code path_type_idx} / {@code malus}（2026-09-22 由镜像流 grep 实证）。
-     * 所以"就绪"指的是 <b>flags 的 19 个谓词位已按该 profile 填对</b>，
-     * 而不是某张 pathType 表已上传。
-     *
-     * @param profileKey 生物档案的稳定标识（镜像流决定其构成，例如 caps 的组合）
-     */
-    boolean isProfileReadyForSolve(long profileKey);
-
-    /**
-     * 上传当前生物的档案（{@code CavaMobProfile}）以供**本次求解**使用。
-     *
-     * <p><b>语义（captain 2026-09-22 裁决，不要按字面之外的方式理解）</b>：
-     * {@code CavaMobProfile} 里含实体的<b>当前位姿</b>（{@code start_x/y/z}），而
-     * {@code CavaPathRequest} 里<b>没有</b>起点字段。因此该档案
-     * <b>必须在每次求解前重新上传</b>，<b>不得跨 tick 复用</b> —— 否则起点是陈旧的，
-     * 会算出一条"看起来正常但起点错了"的路径。
-     *
-     * <p>成本是可接受的：192 字节 + 一次 FFM 调用（实测边界 ≈ 14–16 ns/次），
-     * 相对一次完整寻路可忽略。
-     *
-     * @return 成功与否；false 表示调用方必须回退
-     */
-    boolean uploadProfileForSolve(long handle, long profileKey);
+    /* 说明：原设计里"镜像流产出生物档案"的两个方法（isProfileReadyForSolve(profileKey) /
+     * uploadProfileForSolve(handle, profileKey)）**已于 2026-09-22 作废并删除**。
+     * 原因：档案需要实体位姿与惩罚表，而镜像流拿不到它们 —— 那个设计必然恒返回"未就绪"，
+     * 表现就是"原生一次都不会被调用"（注入流实测 20201 次 profile-not-ready）。
+     * 取代它的是上面的 uploadProfileForSolve(handle, uploader) 与 isFlagsReadyFor(int caps)：
+     * **生产者是注入流，镜像流只负责写进原生。** */
 
     /** 镜像侧不可用（原生关闭 / 表未上传 / 世界未就绪 / 参数非法）。 */
     class MirrorUnavailableException extends RuntimeException {

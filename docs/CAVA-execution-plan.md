@@ -39,8 +39,14 @@
 | `testbed/**`（gitignore）、`tools/setup-testbed.ps1` 等、`docs/CAVA-baseline.md` | P0-E | 测试服与基线 |
 | `docs/CAVA-pathfind-oracle-spec.md`、`src/test/java/cava/oracle/**`、`src/test/resources/cava/oracle/**` | P1-Oracle | 参照实现 |
 
-> 上一轮并行期的**唯一已知冲突点**：P0-A 在 `native/src/common/` 放了两个临时占位文件
-> （`cava_p0a_stub.c` / `cava_p0a_stub.cpp`）用来验证 CMake 配置。**整合时必须删除**（见第 5 节）。
+> **Wave 1 的冲突点已全部清理**：P0-A 的临时占位 `native/src/common/cava_p0a_stub.{c,cpp}` 与
+> `native/tests/tmp_p0a_smoke.cpp` 已不在源码树中（P0-B 构建时源码已是 5 个 `.cpp`，DLL 导出只剩 10 个 `cava_*`）。
+> 另外确认：`natives/` 在 `.gitignore` 内，原生产物不入库。
+
+> **Wave 1 的实际结论：六条流全部收工，门禁 #1/#2/#3/#5 全部通过**（证据 `docs/CAVA-gates.md`）。
+> `gradlew build` 绿 + 28 单测绿；CMake/`ctest` 3/3 绿；Java ↔ 原生端到端 `SELF-TEST: PASS`；
+> 一键回退与 ABI 守卫逐项实测。**唯一大缺口**：MC 侧三个文件（`cava.Cava` / `TickSampler` / `CavaClient`）
+> 只做过"手写桩"的类型自检，**尚未与真实 MC API 对编** —— 这条由 Wave 2 的 `gradlew build` 覆盖。
 
 ## 4. 当前这一轮（Wave 1）的分流
 
@@ -71,15 +77,25 @@
 
 ## 6. Wave 2 分流（P0 冒烟通过后立即开）
 
-| 流 | 任务书 | 前置 | 交付 |
-| --- | --- | --- | --- |
-| W2-兼容层 | `prompts/02` | P0-C（config/入口/报告骨架） | `custom.lithium:options`、ServerCore/VMP 适配、Carpet/TIS 规则检测、启动报告表、`config/cava.json` 覆盖 |
-| W2-差分测试 | `prompts/03` | P0-C（黄金轨迹）+ P0-E（测试服） | 确定性前置证明、三层测试、`parityDiff` 一条命令、CI 化 |
-| W2-P1 寻路 | `prompts/04` | P1-Oracle 规格 + P0-B（镜像 ABI 需先冻结） | `cava_pathfind` 原生实现 + 注入 `PathNodeNavigator.findPathToAny`（method_52/54）+ 金丝雀 + 三层差分 |
-| W2-P2 实体 | `prompts/05` | P0 冒烟 + 兼容层归属决策 | 碰撞求解内核 + 事件回放 + 实体 SoA 镜像 |
-| W2-P3 红石 | `prompts/06` | 兼容层归属决策（Carpet 复刻 vs 让位） | `RedstoneWireBlock.update`(method_10485) 的归属实现 + contraption 语料 |
+| 流 | 任务书 | 前置 | 状态 | 交付 |
+| --- | --- | --- | --- | --- |
+| W2-兼容层 | `prompts/02` | P0-C ✅ | **运行中** | `custom.lithium:options`（本轮只关 `mixin.ai.pathing`）、ServerCore/VMP 适配、Carpet/TIS 规则检测、启动报告表、`config/cava.json` 覆盖 |
+| W2-P1 寻路 | `prompts/04` | 镜像 ABI ✅（已冻结） | **运行中** | `cava_pathfind` 原生实现 + 注入 `PathNodeNavigator.findPathToAny`（method_52/54）+ 金丝雀 + 三层差分 |
+| P0-E 基线 | `prompts/01` 第 7 条 | — | **运行中** | 测试服 + spark 四块占比 |
+| P1-Oracle | `prompts/04` 前置 | — | **运行中** | 原版语义规格（javap 证据）+ 纯 Java 参照实现 + 向量 |
+| W2-差分测试 | `prompts/03` | P0-C ✅ + P0-E（测试服） | pending | 确定性前置证明、三层测试、`parityDiff` 一条命令、CI 化 |
+| W2-P2 实体 | `prompts/05` | 兼容层归属决策 + 差分测试 | pending | 碰撞求解内核 + 事件回放 + 实体 SoA 镜像 |
+| W2-P3 红石 | `prompts/06` | 兼容层归属决策（Carpet 复刻 vs 让位） | pending | `RedstoneWireBlock.update`(method_10485) 的归属实现 + contraption 语料 |
 
-**Wave 2 之前必须先冻结**：镜像侧 ABI（区段/方块状态推送）—— 由 P1 流按真实 `ChunkSection` 镜像推导，captain 审查后写进 `cava_abi.h`。
+**镜像侧 ABI 已由 captain 冻结**（`native/include/cava_abi.h`）：采用**有界长方体区域推送**，不是整块世界镜像 ——
+P1 的每次寻路本来就有天然边界（起点→终点 + maxVisitedNodes），这样绕开了调色板压缩、脏标记与区段卸载通知。
+**Wave 2 的归属决策（captain 已定，供兼容层与后续流遵守）**：
+- `mixin.ai.pathing`：P1 复刻 → **关**（Lithium 的寻路优化让位给原生 A*）。
+- `mixin.entity.collisions.movement`：**本轮不关**（P2 才决策）。
+- `mixin.block.redstone_wire`：**本轮不关**（P3 才决策）。
+- `mixin.shapes`：不关（不在我们的注入点）。
+
+**Wave 2 之后、Wave 3 之前必须先冻结**：实体镜像 ABI（P2 的 SoA 布局）—— 由 P2 流按真实 `Entity` 推导，captain 审查后写进 `cava_abi.h`。
 
 ## 7. 风险台账
 

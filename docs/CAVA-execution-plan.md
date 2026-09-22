@@ -125,3 +125,5 @@ P1 的每次寻路本来就有天然边界（起点→终点 + maxVisitedNodes�
 | `PathMinHeap` 相等元素顺序搞错 | — | P1-Oracle 正在用 javap 固化 | 单元层 10^5 组逐节点比对 |
 | Lithium `@Overwrite` 碰撞点 | P2 | 未决 | 兼容层给出售让/复刻的显式决策 |
 | 反编译器在本 jar 上未验证 | — | 已标注「未验证」，默认走 javap | 不阻塞 |
+| **参照实现可能"自洽但不对齐原版"** | 已实际发生一次 | `LandMaker.isValidDiagonalSuccessor` 的第三个合取项被写成 `flag5`（应为 `!flag5`）；**10000 组向量是参照实现自己产的，抓不住这个错** | ① 每个易读反的分支都要有**定点真值表断言**（不靠随机向量）；② W2-P1 用 javac 判定性实验独立复核，captain 用 javap 仲裁 |
+| **读原版行为的 jar 路径被写错** | 已实际发生一次 | `docs/CAVA-dev-toolbox.md` 早期写 `minecraft-clientonly`，而 `entity/*` 与 `ai/pathing/*` **只在 `minecraft-common` 里**（clientonly 的 entity 条目数 = 0） | 已勘误并写进 toolbox；所有"读原版"的流都被这条卡过，固化进门禁 #5 的教训 |

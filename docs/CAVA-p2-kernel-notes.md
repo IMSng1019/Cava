@@ -430,6 +430,23 @@
 3. 两侧独立复算 `layout_hash_sum`，**以实测为准**（本文件给的是提案投影值 `0x1C12265E`，
    一旦结构体有任何字段调整就作废）。
 
+
+### 5.10 与 captain 刚落地的 `CAVA_EF_*` 的关系（复验）
+
+写本文件期间，captain 已在 `native/include/cava_abi.h` 里落地了**实体镜像标志位** `CAVA_EF_*`（11 位，`1u<<0..10`，
+`CAVA_EF_ALL = 0x000007FF`），来源是 `commit a694e7d`。三点复验结论：
+
+1. **不冲突**：本提案新增的常量前缀是 `CAVA_SHAPE_POINTS_*` / `CAVA_ESHAPE_SRC_*` / `CAVA_MSHAPE_*`，
+   与 `CAVA_EF_*` 不重名、不复用位段（本提案**一个位段都没用**，全部是整型枚举）。
+2. **该 commit 只加了 `#define`，没有动任何结构体**。本文件 5.9 的 layout_hash 对拍在更新后的头文件上**重跑仍然是 9/9 OK**、
+   `和 = 0x6975CBF9`（实测）。
+3. **语义一致**：captain 独立复核的两条（`MathHelper.approximatelyEquals` 用 `9.999999747378752E-6`、
+   `verticalCollision` 用精确 `!=` 而 x/z 用 approximatelyEquals）与本规格 oracle spec §6.4 / §6.1 的结论**逐字一致**，
+   属于第三方向独立印证。
+
+> `CAVA_EF_*` 的位号由 **Java 侧 `cava.entity.EntityFlags` 拥有、头文件镜像**（captain 的 commit message 明确写了方向）。
+> 本提案的结构体字段则相反：**头文件是唯一权威**（与 P1 相同）。两个方向的纪律不要混。
+
 ---
 
 ## 6. 未验证 / 留白（**不要当成已完成**）

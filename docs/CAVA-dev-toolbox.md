@@ -32,9 +32,21 @@ javadoc 行也以 `c` 开头，判别式必须是 `p.length === 4 && p[2].indexO
 **不需要反编译器就能拿到"权威行为"**：Loom 缓存里已经有一份 **Yarn 命名**的 Minecraft jar，
 里面是重命名后的字节码，`javap -c -p` 出来的控制流顺序就是 parity 的唯一依据。
 
-    C:\Users\<user>\.gradle\caches\fabric-loom\minecraftMaven\net\minecraft\minecraft-clientonly\
+    C:\Users\<user>\.gradle\caches\fabric-loom\minecraftMaven\net\minecraft\minecraft-common\
         1.20.4-net.fabricmc.yarn.1_20_4.1.20.4+build.3-v2\
-        minecraft-clientonly-1.20.4-net.fabricmc.yarn.1_20_4.1.20.4+build.3-v2.jar
+        minecraft-common-1.20.4-net.fabricmc.yarn.1_20_4.1.20.4+build.3-v2.jar
+
+> **勘误（2026-09-22，由 P1-Oracle 实测发现，captain 已复核）**：本文早期写的是
+> **`minecraft-clientonly`** jar —— **那是错的**。实测条目数：
+>
+> | jar | `net/minecraft/*` | `net/minecraft/entity/*` | `entity/ai/pathing/*` |
+> | --- | --- | --- | --- |
+> | `minecraft-clientonly-1.20.4-…jar` | 2152 | **0** | **0** |
+> | `minecraft-common-1.20.4-…jar` | 5907 | **911** | **21** |
+>
+> `javap -classpath <clientonly> net.minecraft.entity.ai.pathing.PathNodeNavigator` → **找不到类**；
+> 换成 `minecraft-common` 立刻能读。
+> **服务端相关逻辑（含寻路）在 `minecraft-common` 里**，读原版行为一律用这个 jar。
 
 ```powershell
 & 'C:\Program Files\Java\jdk-21\bin\javap.exe' -p -c -classpath <上面的 jar> net.minecraft.entity.ai.pathing.PathNodeNavigator

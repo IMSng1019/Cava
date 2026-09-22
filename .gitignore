@@ -37,7 +37,12 @@ run/
 .probe/
 .cava-research/
 spike/
-tools/
+
+# tools/ SOURCES are tracked (mapquery.cjs / gen-pathfind-vectors.cjs / *.ps1 ...):
+# they are the reproducible evidence behind docs/CAVA-dev-toolbox.md.
+# Only the bulky downloaded artifacts are ignored.
+tools/cmake/
+tools/decompiler/
 
 # AgentTeams orchestration state (never commit)
 .agent-teams/

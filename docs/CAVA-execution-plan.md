@@ -60,8 +60,12 @@
    `cava_build_id` / `cava_abi_version` / 布局自检 4 条全过 / `cava_open` 成功 / `cava_d2i_sat` 正确。
 3. **失败路径冒烟**：故意改坏 `CavaOpenParams.layout_hash_sum` → 必须 `CAVA_ERR_LAYOUT` 且句柄为 0；`-Dcava.native.enabled=false` → 状态 `DISABLED_BY_FLAG` 且无 ERROR。
 4. **Gradle 真的能过**：`$env:GRADLE_USER_HOME='J:\mc\Cava\.gradle-home'; .\gradlew.bat build --console=plain` 至少到"编译通过"；记录耗时与下载量。
-5. **预览版 class 能被 Fabric Loader 加载**（**架构级门**）：把编译出的 mod jar（含 preview class）放进 P0-E 的测试服，确认服务器能启动且日志有 Cava 的启动横幅。
-   > 这条如果失败，整个"JDK 21 + --enable-preview"的载体假设就要重审 —— **必须最先验证**。
+5. ~~**预览版 class 能被 Fabric Loader 加载**（**架构级门**）~~ → ✅ **已通过（captain 亲自验证，证据见 `docs/CAVA-gates.md`）**：
+   `javac --release 21 --enable-preview` 编出的 mod（class major.minor = **65.65535**）在真实 **Fabric Loader 0.19.5 / MC 1.20.4** 服务端上被加载并执行，
+   `java.lang.foreign` 可用，native downcall `strlen("cava") = 4`，服务器 `Done (14.193s)`。
+   **派生硬约束**：启动参数必须含 **`--enable-native-access=ALL-UNNAMED`**（少了它 native 调用被拒）；
+   **Loader 0.19.5 是已验证可用版本**，任何 loader 版本变更都要重跑这条门禁。
+   **仍未验证**：Mixin + Loom remap 在**含预览版 class 的池**上是否正常（留给下面第 2 条端到端冒烟，用真实 Loom 产物跑）。
 6. **回填 P0 验收台账**：`docs/CAVA-p0-acceptance.md` 每条都要有证据或明确的「受阻 + 卡点」。
 7. **更新 `docs/CAVA-后续对话提示词.md` 的"附二：本轮成果"**，让下一个会话不必重做。
 
@@ -81,7 +85,9 @@
 
 | 风险 | 触发条件 | 现状 | 对策 |
 | --- | --- | --- | --- |
-| **预览版 class 无法被 Fabric Loader 加载** | 冒烟第 5 条失败 | 未验证 | 若失败：评估把 FFM 调用隔离到独立 classloader / 改用 JDK 21 非预览替代方案（代价大，需重审载体假设） |
+| ~~预览版 class 无法被 Fabric Loader 加载~~ | — | ✅ **已排除**（`docs/CAVA-gates.md` 门禁 #5，实测通过） | 保留门禁复现脚本；loader 版本变更时重跑 |
+| **Loom 1.18.x 要求 JVM 25，与 JDK 21 硬约束冲突** | 构建期 | ✅ 已定位并修复：`loom_version` pin **1.17.20**（`docs/CAVA-gates.md` 门禁 #1） | CI 的 JDK 必须固定 21（模板自带的 JDK 25 是因为 Loom 1.18） |
+| Mixin + Loom remap 在含预览版 class 的池上是否正常 | 端到端冒烟 | 未验证 | 用真实 Loom 产物做门禁 2 |
 | Gradle 首次构建下不动 | 网络/缓存 | 已确认网络可达（node fetch 200），`GRADLE_USER_HOME` 已改为工作区内 | P0-A 报告实际耗时与下载量 |
 | 没有服务端根目录 | — | 已由 P0-E 在 `testbed/` 内新建 | P0-E |
 | `PathMinHeap` 相等元素顺序搞错 | — | P1-Oracle 正在用 javap 固化 | 单元层 10^5 组逐节点比对 |

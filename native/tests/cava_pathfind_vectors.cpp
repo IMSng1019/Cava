@@ -582,9 +582,18 @@ static int abi_smoke_test() {
     CavaOpenParams op;
     std::memset(&op, 0, sizeof op);
     op.abi_version = CAVA_ABI_VERSION;
-    /* 广播 #6 的 9 结构体 layout_hash_sum（含 P1 的 5 个新结构体）。
-     * 旧值 0x6149FD30 是 4 结构体时代的，扩 ABI 后必须换。*/
-    op.layout_hash_sum = 0xC04A5791ull;
+    /* 不硬编码 layout_hash_sum —— ABI 扩展期这个值会连续变（本会话就改过 3 次）。
+     * 契约 2.3 的定义：sum = 所有导出结构体 layout_hash 的 uint32 回绕和。
+     * 这里用 cava_layout_report 自己算出来（Java 侧也必须用同一公式）。*/
+    {
+        CavaLayoutReport rep;
+        std::memset(&rep, 0, sizeof rep);
+        const int32_t n = cava_layout_report(&rep);
+        uint32_t sum = 0;
+        for (int32_t i = 0; i < rep.entry_count && i < n; ++i) sum += rep.entries[i].layout_hash;
+        op.layout_hash_sum = (uint64_t) sum;
+        std::printf("[abi] layout_report entries=%d sum=%08x\n", rep.entry_count, sum);
+    }
     int64_t handle = 0;
     CavaOpenResult ores;
     std::memset(&ores, 0, sizeof ores);

@@ -250,8 +250,11 @@ RAIL / LEAVES / FENCES / WALLS / FENCE_GATE(+OPEN) / FIRE_DAMAGE / canPathfindTh
   **失败不改变已有档案**（实测：\`mob_profile_upload(width<0)=-4\`）。
 - \`CavaPathRequest\` 删掉 \`sx/sy/sz\` 与 \`profile\`，改为 \`tx/ty/tz + reach_range + max_range +
   max_visited_nodes + reserved0/1/2\`；本流 ABI 层已按新字段校验。
-- \`layout_hash_sum\` **0x6149FD30（4 结构体）→ 0xC04A5791（9 结构体）**；
-  本流测试里的硬编码值已同步更新，\`cava_open\` 实测 \`native_layout_sum=c04a5791\`。
+- \`layout_hash_sum\` 在**同一个会话里就变了 4 次**（实测观测序列：
+  \`0x6149FD30\`(4 结构体) → \`0xC04A5791\`(广播 #6) → \`0xcd595745\` → \`0xc750ed61\`(最终实测)）。
+  所以本流测试**不再硬编码**这个值：改用 \`cava_layout_report\` 按契约 2.3 的公式自算
+  （\`sum = Σ layout_hash\` 的 uint32 回绕和），\`cava_open\` 实测随头文件自动跟上。
+  **提醒**：Java 侧 \`CavaLayouts\` 必须用同一公式；只要头文件还在动，两侧就必须一起动。
 
 ### 8.2 ⚠️ 仍然阻塞：**\`CAVA_PNT_*\` 不是 Yarn \`PathNodeType\` 的枚举 ordinal**
 

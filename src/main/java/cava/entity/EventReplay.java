@@ -187,8 +187,13 @@ public final class EventReplay<S, H> {
 
         // ---- 11–14. 踩踏音效 / 游泳 / 空中效果（偏移 574–853）----
         if (in.moveEffectHasAny() && !in.hasVehicle()) {
+            // 偏移 626/636：steppingPos 与 steppingState 在这一支的**开头**解析一次，
+            // 后面的 722（isAir）、744、770 全部复用同一引用。
             BlockPos steppingPos = in.steppingPos();
             S steppingState = cb.stateAt(steppingPos);
+            // 偏移 589–705：Java 内部记账（speed / horizontalSpeed / distanceTraveled / canClimb）。
+            // 它在 708 的步声判定**之前**，所以必须在这里回调，而不是在分支外。
+            cb.moveEffectBookkeeping(steppingPos, steppingState);
             if (in.stepSoundBranch()) {
                 boolean played = cb.stepOnBlock(landingPos, landingState, in.moveEffectPlaysSounds(),
                         in.steppingEqualsLanding(), in.movement());

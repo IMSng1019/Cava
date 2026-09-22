@@ -509,6 +509,61 @@ public final class CavaNative {
     }
 
     // ------------------------------------------------------------------
+    // P2 薄封装：实体位移（形状表 + 一次求解）
+    // ------------------------------------------------------------------
+
+    /**
+     * {@code cava_shape_table_upload}：一次性上传「按 state id 索引」的常驻形状表
+     * （点表 + 体素位图，碰撞求解用；与 P1 的扁平 AABB 状态表是**两张不同的表**）。
+     *
+     * <p>数组一律用 {@link #allocateArray}(arena, …)：
+     * {@code records} = {@code allocateArray(arena, CavaLayouts.SHAPE_RECORD, n)}，
+     * {@code points} = {@code allocateArray(arena, ValueLayout.JAVA_DOUBLE, m)}，
+     * {@code bits} = {@code allocateArray(arena, ValueLayout.JAVA_LONG, w)}。
+     * 容量为 0 的数组传 {@code MemorySegment.NULL}（**不要**传 {@code arena.allocate(layout, 0)}）。
+     */
+    public int shapeTableUpload(long handle, MemorySegment records, int recordCount,
+                                MemorySegment points, int pointCount,
+                                MemorySegment bits, int bitWordCount) {
+        CavaBindings b = bindingsIfOpen();
+        if (b == null) {
+            return ERR_NATIVE_UNAVAILABLE;
+        }
+        try {
+            return b.shapeTableUpload(handle, records, recordCount, points, pointCount, bits, bitWordCount);
+        } catch (Throwable t) {
+            onNativeCallFailure(CavaBindings.SYM_SHAPE_TABLE_UPLOAD, t);
+            return ERR_CALL_FAILED;
+        }
+    }
+
+    /**
+     * {@code cava_resolve_move}：一次实体位移求解。
+     *
+     * <p>返回 {@code CAVA_OK} 时还要看 {@code out} 的 {@code event_overflow}；
+     * {@code ==1} ⇒ 调用方必须回退纯 Java（见 {@code cava.entity.MoveEventLog#overflowed()}）。
+     */
+    public int resolveMove(long handle, MemorySegment req,
+                           MemorySegment refs, int refCount,
+                           MemorySegment inlineShapes, int inlineShapeCount,
+                           MemorySegment inlinePoints, int inlinePointCount,
+                           MemorySegment inlineBits, int inlineBitWordCount,
+                           MemorySegment events, int eventCap,
+                           MemorySegment out) {
+        CavaBindings b = bindingsIfOpen();
+        if (b == null) {
+            return ERR_NATIVE_UNAVAILABLE;
+        }
+        try {
+            return b.resolveMove(handle, req, refs, refCount, inlineShapes, inlineShapeCount,
+                    inlinePoints, inlinePointCount, inlineBits, inlineBitWordCount, events, eventCap, out);
+        } catch (Throwable t) {
+            onNativeCallFailure(CavaBindings.SYM_RESOLVE_MOVE, t);
+            return ERR_CALL_FAILED;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 报告
     // ------------------------------------------------------------------
 

@@ -183,18 +183,41 @@ public final class LayoutCheck {
             NativeEntry e = report.entries().get(i);
             StructInfo match = null;
             int matchIndex = -1;
-            for (int j = 0; j < java.structs().size(); j++) {
-                StructInfo s = java.structs().get(j);
+            // 【2026-09-22 修正】**优先按下标一一对应**。
+            // 两侧的顺序都约定为「cava_abi.h 的声明顺序」（= cava_layout.cpp 的 kLayouts 顺序）。
+            // 原来只按 (struct_size, field_count) 找**第一个**匹配 —— P2 冻结后
+            // CavaShapeRecord(32 字节/8 字段) 与 CavaPathNode(32 字节/8 字段) 完全同形，
+            // 于是 CavaPathNode 被匹配两次、CavaShapeRecord 永远找不到对应 entry，
+            // 整个原生库被判 LAYOUT_MISMATCH —— **测试静默 skip、原生路径整条不可用**。
+            // layout_hash 也区分不了它们（同一个 (offset,size) 序列），所以只能靠下标。
+            if (i < java.structs().size()) {
+                StructInfo s = java.structs().get(i);
                 if (s.size() == e.structSize() && s.fieldCount() == e.fieldCount()) {
                     match = s;
-                    matchIndex = j;
-                    break;
+                    matchIndex = i;
+                }
+            }
+            if (match == null) {
+                for (int j = 0; j < java.structs().size(); j++) {
+                    if (seen[j]) {
+                        continue;
+                    }
+                    StructInfo s = java.structs().get(j);
+                    if (s.size() == e.structSize() && s.fieldCount() == e.fieldCount()) {
+                        match = s;
+                        matchIndex = j;
+                        break;
+                    }
                 }
             }
             if (match == null) {
                 problems.add("entry[" + i + "]: 找不到匹配的 Java 结构体 (struct_size=" + e.structSize()
                         + ", field_count=" + e.fieldCount() + ")");
                 continue;
+            }
+            if (matchIndex != i) {
+                notes.add("entry[" + i + "] 按内容匹配到 Java 结构体[" + matchIndex + "] " + match.name()
+                        + "（两侧声明顺序不一致，请检查 cava_abi.h / cava_layout.cpp / CavaLayouts 的顺序）");
             }
             seen[matchIndex] = true;
             if (e.structAlign() != match.align()) {

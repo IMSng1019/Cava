@@ -6,7 +6,10 @@
 		"pathfind.PathNodeNavigatorMixin",
 		"pathfind.PathNodeNavigatorAccessor",
 		"pathfind.MinecraftServerBootstrapMixin",
-		"pathfind.AmphibiousPathNodeMakerAccessor"
+		"pathfind.AmphibiousPathNodeMakerAccessor",
+		"entity.VoxelShapeAccessor",
+		"entity.McMoveAccess",
+		"entity.EntityMoveMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

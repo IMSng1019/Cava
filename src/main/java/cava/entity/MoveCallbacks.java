@@ -77,6 +77,27 @@ public interface MoveCallbacks<S, H> {
     /** 偏移 565：{@code Block.onSteppedOn(World,BlockPos,BlockState,Entity)}。 */
     void onSteppedOn(S state, BlockPos pos);
 
+    /**
+     * 偏移 589–705：{@code moveEffect} 分支里的 **Java 内部记账**
+     * （{@code speed} / {@code horizontalSpeed} / {@code distanceTraveled}，以及
+     * {@code getSteppingPos()} + {@code world.getBlockState(steppingPos)} + {@code canClimb(...)}）。
+     *
+     * <p>它夹在 {@link MoveStep#STEPPED_ON} 与 {@link MoveStep#STEP_ON_BLOCK_MAIN} 之间，
+     * 和别的步骤一样**有可观测副作用**，所以回放必须给它在原位留一个位置。
+     * 原版调用序（字节码偏移）：
+     * <pre>
+     *   626 getSteppingPos()  →  636 world.getBlockState(steppingPos)  →  645 canClimb(steppingState)
+     *   609/622 speed += (float)vec3d.length() * 0.6F
+     *   660/672 horizontalSpeed += (float)vec3d.horizontalLength() * 0.6F
+     *   677/705 distanceTraveled += (float)sqrt(x*x + e*e + z*z) * 0.6F   // e 被 canClimb 覆写为 0
+     * </pre>
+     *
+     * <p><b>默认空实现</b>：老的假实现（单测）不需要为它改变记录到的调用序列；
+     * 生产实现（{@code cava.mixin.entity.EntityMoveMixin} 的回放驱动）覆盖它。
+     */
+    default void moveEffectBookkeeping(BlockPos steppingPos, S steppingState) {
+    }
+
     /** 偏移 749/774：{@code Entity.stepOnBlock(...)} 的返回值（决定是否刷新 nextStepSoundDistance）。 */
     boolean stepOnBlock(BlockPos pos, S state, boolean playSounds, boolean emitGameEvents, Vec3d movement);
 

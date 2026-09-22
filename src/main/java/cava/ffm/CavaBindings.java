@@ -63,6 +63,16 @@ public final class CavaBindings {
     /** {@code int32_t cava_region_state_id_at(int64_t, int32_t, int32_t, int32_t, int32_t*)}。 */
     public static final String SYM_REGION_STATE_ID_AT = "cava_region_state_id_at";
 
+    // ---- P2：实体位移（形状表 + 一次求解）----
+    /** {@code int32_t cava_shape_table_upload(int64_t, const CavaShapeRecord*, int32_t, const double*, int32_t, const uint64_t*, int32_t)}。 */
+    public static final String SYM_SHAPE_TABLE_UPLOAD = "cava_shape_table_upload";
+    /**
+     * {@code int32_t cava_resolve_move(int64_t, const CavaMoveRequest*, const CavaMoveShapeRef*, int32_t,
+     * const CavaShapeRecord*, int32_t, const double*, int32_t, const uint64_t*, int32_t,
+     * CavaMoveEvent*, int32_t, CavaMoveResult*)}。
+     */
+    public static final String SYM_RESOLVE_MOVE = "cava_resolve_move";
+
     /**
      * 全部必须存在（缺一个就 {@link NativeStatus#LOAD_FAILED} → 整体回退纯 Java）。
      *
@@ -73,7 +83,8 @@ public final class CavaBindings {
             SYM_BUILD_ID, SYM_ABI_TOUCH, SYM_ABI_VERSION, SYM_LAYOUT_REPORT,
             SYM_OPEN, SYM_CLOSE, SYM_D2I_SAT, SYM_D2L_SAT, SYM_BITS_OF_DOUBLE, SYM_DOUBLE_OF_BITS,
             SYM_PATHFIND, SYM_MOB_PROFILE_UPLOAD, SYM_MOB_PROFILE_CLEAR, SYM_STATE_TABLE_UPLOAD,
-            SYM_REGION_UPLOAD, SYM_REGION_CLEAR, SYM_REGION_STATE_ID_AT);
+            SYM_REGION_UPLOAD, SYM_REGION_CLEAR, SYM_REGION_STATE_ID_AT,
+            SYM_SHAPE_TABLE_UPLOAD, SYM_RESOLVE_MOVE);
 
     /** 原生调用抛出任何 Throwable 时的包装（Numeric/CavaNative 会捕获它并回退）。 */
     public static final class CallFailure extends RuntimeException {
@@ -108,6 +119,8 @@ public final class CavaBindings {
     private final MethodHandle hRegionUpload;
     private final MethodHandle hRegionClear;
     private final MethodHandle hRegionStateIdAt;
+    private final MethodHandle hShapeTableUpload;
+    private final MethodHandle hResolveMove;
 
     private CavaBindings(Path libraryPath, String lookupKind, Arena lookupArena, Linker linker, SymbolLookup lookup)
             throws NativeLibrary.Failure {
@@ -164,6 +177,22 @@ public final class CavaBindings {
         this.hRegionStateIdAt = downcall(linker, lookup, SYM_REGION_STATE_ID_AT,
                 FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG,
                         ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
+
+        // P2：形状表上传（3 组 (指针,长度)）与一次求解（refs / inline_shapes / inline_points / inline_bits / events 五组）。
+        this.hShapeTableUpload = downcall(linker, lookup, SYM_SHAPE_TABLE_UPLOAD,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS, ValueLayout.JAVA_INT,
+                        ValueLayout.ADDRESS, ValueLayout.JAVA_INT,
+                        ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+        this.hResolveMove = downcall(linker, lookup, SYM_RESOLVE_MOVE,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,                     // req
+                        ValueLayout.ADDRESS, ValueLayout.JAVA_INT,  // refs / ref_count
+                        ValueLayout.ADDRESS, ValueLayout.JAVA_INT,  // inline_shapes / count
+                        ValueLayout.ADDRESS, ValueLayout.JAVA_INT,  // inline_points / count
+                        ValueLayout.ADDRESS, ValueLayout.JAVA_INT,  // inline_bits / count
+                        ValueLayout.ADDRESS, ValueLayout.JAVA_INT,  // events / cap
+                        ValueLayout.ADDRESS));                      // out
     }
 
     private static MethodHandle downcall(Linker linker, SymbolLookup lookup, String symbol, FunctionDescriptor desc) {
@@ -385,6 +414,57 @@ public final class CavaBindings {
             return (int) hRegionStateIdAt.invokeExact(handle, x, y, z, outStateId);
         } catch (Throwable t) {
             throw new CallFailure(SYM_REGION_STATE_ID_AT, t);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // P2：实体位移（形状表 + 一次求解）
+    // ------------------------------------------------------------------
+
+    /**
+     * {@code cava_shape_table_upload}：一次性上传「按 state id 索引」的常驻形状表。
+     *
+     * <p>{@code records} = {@code allocateArray(SHAPE_RECORD, recordCount)}，
+     * {@code points} = {@code allocateArray(JAVA_DOUBLE, pointCount)}，
+     * {@code bits} = {@code allocateArray(JAVA_LONG, bitWordCount)}。
+     * 三者容量为 0 时传 {@code MemorySegment.NULL} 或空段。
+     *
+     * <p><b>不要用 {@code arena.allocate(JAVA_INT, n)} 当数组</b>（见类注释）。
+     */
+    public int shapeTableUpload(long handle, MemorySegment records, int recordCount,
+                               MemorySegment points, int pointCount,
+                               MemorySegment bits, int bitWordCount) {
+        try {
+            return (int) hShapeTableUpload.invokeExact(handle, records, recordCount,
+                    points, pointCount, bits, bitWordCount);
+        } catch (Throwable t) {
+            throw new CallFailure(SYM_SHAPE_TABLE_UPLOAD, t);
+        }
+    }
+
+    /**
+     * {@code cava_resolve_move}：一次实体位移求解。
+     *
+     * <p>五组 (指针,长度) 必须各自同源：{@code refs/refCount}、{@code inlineShapes/inlineShapeCount}、
+     * {@code inlinePoints/inlinePointCount}、{@code inlineBits/inlineBitWordCount}、{@code events/eventCap}。
+     *
+     * <p>返回 {@code CAVA_OK} 时 {@code out} 里同时给出 {@code event_overflow}；
+     * <b>{@code event_overflow==1} 时 Java 必须回退纯 Java</b>（事件不全 = 回放不全）。
+     */
+    public int resolveMove(long handle, MemorySegment req,
+                           MemorySegment refs, int refCount,
+                           MemorySegment inlineShapes, int inlineShapeCount,
+                           MemorySegment inlinePoints, int inlinePointCount,
+                           MemorySegment inlineBits, int inlineBitWordCount,
+                           MemorySegment events, int eventCap,
+                           MemorySegment out) {
+        try {
+            return (int) hResolveMove.invokeExact(handle, req,
+                    refs, refCount, inlineShapes, inlineShapeCount,
+                    inlinePoints, inlinePointCount, inlineBits, inlineBitWordCount,
+                    events, eventCap, out);
+        } catch (Throwable t) {
+            throw new CallFailure(SYM_RESOLVE_MOVE, t);
         }
     }
 

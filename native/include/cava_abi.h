@@ -202,6 +202,78 @@ int32_t cava_pathfind(int64_t handle, const CavaPathRequest* req, CavaPathNode* 
  * 只读方块查询回调，不得自行发明镜像 ABI。*/
 
 /* ------------------------------------------------------------------ */
+/* 镜像侧 ABI：方块状态表 + 区域推送（P1 已冻结）                       */
+/* ------------------------------------------------------------------ */
+/* 设计裁定（2026-09-22，captain）：
+ *   镜像**不把整块世界搬到原生**，而是由 Java 侧按需推送一个**有界的长方体区域**
+ *   （pathfinding 的求解窗口）。理由：整块镜像需要调色板压缩 + 脏标记 + 区段卸载通知，
+ *   而 P1 的每次寻路本来就有天然边界（起点→终点 + maxVisitedNodes）。
+ *
+ *   方块状态用 **state id** 作键，id 的定义 = Block.STATE_IDS 的原始 id
+ *   （Yarn: net.minecraft.block.Block.getRawIdFromState(BlockState) / getStateFromRawId(int)）。
+ *   **禁止在任何地方用 BlockState 的对象身份做键** —— FerriteCore 的
+ *   blockstateCacheDeduplication 会让内容相同的状态共享实例。
+ *
+ *   state id 的具体数值由 **Java 侧**在推送时给出（它不是编译期常量），
+ *   原生侧只把它们当作不透明整数。方块状态表一次性推送（cava_state_table_upload）。
+ *
+ *   已知待验证假设：**air 的 state id == 0**。Java 侧在启动时必须实测校验
+ *   （Block.getRawIdFromState(Blocks.AIR.getDefaultState()) == 0），
+ *   不成立时**不要静默**，要么拒绝启用该子系统，要么按实际 id 传参。*/
+
+/* 方块状态表里一个状态的静态属性（P1 只用到这些；后续按需在末尾追加）。*/
+#define CAVA_SF_SOLID            (1u << 0)  /* isSolid */
+#define CAVA_SF_BLOCKS_MOTION    (1u << 1)  /* blocksMotion */
+#define CAVA_SF_FLUID            (1u << 2)
+#define CAVA_SF_WATER            (1u << 3)
+#define CAVA_SF_LAVA             (1u << 4)
+#define CAVA_SF_OPEN             (1u << 5)  /* 门/活板门/栅栏门的"开着" */
+
+/* PathNodeType 的序号必须与 Java 枚举 ordinal **完全一致**（P1 会逐点核对）。*/
+#define CAVA_PATH_TYPE_COUNT 16
+
+typedef struct CavaCollisionBox {
+    float min_x, min_y, min_z;   /* 相对方块原点的扁平 AABB 集合，不是体素近似 */
+    float max_x, max_y, max_z;
+} CavaCollisionBox;
+
+typedef struct CavaStateRecord {
+    uint32_t flags;              /* CAVA_SF_* */
+    uint32_t box_offset;         /* 进 coll_boxes 的下标，MAX 表示无碰撞盒 */
+    uint32_t box_count;
+    uint32_t path_type_idx;      /* 该状态的默认 PathNodeType 序号 */
+    float    malus;              /* 该状态的默认 malus，float 原样 */
+} CavaStateRecord;
+
+#define CAVA_BOX_NONE 0xFFFFFFFFu
+
+/* 一次性上传方块状态表。cap 不足返回 CAVA_ERR_ARG 且不写任何内容。*/
+int32_t cava_state_table_upload(int64_t handle,
+                                const CavaStateRecord* records, int32_t record_count,
+                                const CavaCollisionBox* boxes, int32_t box_count);
+
+/* 区域推送：把 Java 侧读到的 state id 拷进原生侧的区域缓存。
+ * ids 是 dim_x*dim_y*dim_z 个 int32，索引顺序 = ((y*dim_z)+z)*dim_x+x，
+ * 即 **x 最快、y 最慢**（与 region_state_id_at 一致）。
+ * 任一维度 <=0、或 dim 乘积 <=0、或超过原生侧上限 => CAVA_ERR_ARG，且不改变已有区域。*/
+int32_t cava_region_upload(int64_t handle,
+                           int32_t dim_x, int32_t dim_y, int32_t dim_z,
+                           int32_t origin_x, int32_t origin_y, int32_t origin_z,
+                           const int32_t* ids, int32_t id_count);
+
+int32_t cava_region_clear(int64_t handle);
+
+typedef struct CavaRegionQuery {
+    int32_t x, y, z;             /* in: 世界方块坐标 */
+    int32_t state_id;            /* out: 该坐标的 state id；区域外为 -1 */
+    uint32_t flags;              /* out: 从状态表查到的 CAVA_SF_*（区域外为 0）*/
+    uint32_t box_count;          /* out: 该方块碰撞盒个数 */
+} CavaRegionQuery;
+
+/* 单点查询，给单元层/调试用。真正热的路径不要让 Java 逐点查。*/
+int32_t cava_region_state_id_at(int64_t handle, int32_t x, int32_t y, int32_t z, int32_t* out_state_id);
+
+/* ------------------------------------------------------------------ */
 /* 数值工具（跨平台逐位一致性的唯一入口）                               */
 /* ------------------------------------------------------------------ */
 /* Java 的 (double)->int 越界饱和；C++ 直接转是 UB。所有需要落到 int 的

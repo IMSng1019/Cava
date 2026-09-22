@@ -190,6 +190,32 @@ int32_t cava_close(int64_t handle);
 #define CAVA_NAV_ON_GROUND            (1u << 8)
 #define CAVA_NAV_TOUCHING_WATER       (1u << 9)
 #define CAVA_NAV_CAN_WALK_ON_FLUID    (1u << 10)
+/* 1u << 11 .. 1u << 15 保留（CAVA_NAV_* 只在 CavaMobProfile.caps / CavaMoveRequest.caps 里用）*/
+
+/* ------------------------------------------------------------------ */
+/* 实体镜像的 flags 位（P2）                                            */
+/* ------------------------------------------------------------------ */
+/* **唯一事实来源是 Java 侧的 `cava.entity.EntityFlags`** —— 本块只是它的镜像，
+ * 两侧必须**逐位一致**（P1 的硬教训：同一份位布局定义在两处必然漂移，且运行期无法发现）。
+ * 改任何一位都必须同时改两处，并重跑两侧的布局/位号对拍测试。
+ *
+ * `CAVA_EF_SERVERCORE_INACTIVE` 是**观测位，不是原版标志**：该实体本 tick 被 ServerCore
+ * 整 tick 跳过，**位置不变是预期行为**；镜像仍然打包它（它照样参与碰撞），
+ * 但原生侧**不得推进它、不得唤醒它、不得回写**。*/
+#define CAVA_EF_ON_GROUND            (1u << 0)
+#define CAVA_EF_HORIZONTAL_COLLISION (1u << 1)
+#define CAVA_EF_VERTICAL_COLLISION   (1u << 2)
+#define CAVA_EF_GROUND_COLLISION     (1u << 3)
+#define CAVA_EF_COLLIDED_SOFTLY      (1u << 4)
+#define CAVA_EF_HAS_VEHICLE          (1u << 5)
+#define CAVA_EF_REMOVED              (1u << 6)
+#define CAVA_EF_NO_CLIP              (1u << 7)
+#define CAVA_EF_TOUCHING_WATER       (1u << 8)
+#define CAVA_EF_WAS_ON_FIRE          (1u << 9)
+#define CAVA_EF_SERVERCORE_INACTIVE  (1u << 10)
+#define CAVA_EF_ALL                  0x000007FFu   /* 以上 11 位 */
+
+/* **不要把 VMP 的 `velocityDirty` 放进这里** —— 那是 VMP 的状态位，不是我们的（契约点名的坑）。*/
 
 /* PathNodeType 的完整序号表 = **Yarn 1.20.4 枚举的 ordinal，逐条从字节码 static{} 读出**
  * （`javap -p -c net.minecraft.entity.ai.pathing.PathNodeType`：每个常量先 push ordinal 再

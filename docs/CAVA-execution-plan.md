@@ -73,7 +73,23 @@
    **Loader 0.19.5 是已验证可用版本**，任何 loader 版本变更都要重跑这条门禁。
    **仍未验证**：Mixin + Loom remap 在**含预览版 class 的池**上是否正常（留给下面第 2 条端到端冒烟，用真实 Loom 产物跑）。
 6. **回填 P0 验收台账**：`docs/CAVA-p0-acceptance.md` 每条都要有证据或明确的「受阻 + 卡点」。
-7. **更新 `docs/CAVA-后续对话提示词.md` 的"附二：本轮成果"**，让下一个会话不必重做。
+7. ~~**更新 `docs/CAVA-后续对话提示词.md` 的"附二：本轮成果"**~~ → ✅ 已写入 **附二·A**（P0 结果 + 六条本机实测坑）。
+
+### 整合门的实际结论（captain 亲自复跑，证据 `docs/CAVA-gates.md`）
+
+| 门 | 状态 | 证据摘要 |
+| --- | --- | --- |
+| 1 删占位文件 | ✅ | `native/src/` 只剩 5 个 `.cpp`，DLL 只导出 10 个 `cava_*` |
+| 2 端到端冒烟 | ✅ | `NativeSelfTest` → `status=OPEN`、`java_layout_sum == native_layout_sum == 0x6149FD30`、`SELF-TEST: PASS` |
+| 3 失败路径冒烟 | ✅ | `tools/LayoutGuardProbe`：错误 layout_hash → `CAVA_ERR_LAYOUT`；ABI≠1 → `CAVA_ERR_ABI_VERSION`；都在写句柄之前失败；`close` 幂等 + 伪造句柄安全 |
+| 4 Gradle 真能过 | ✅ | `BUILD SUCCESSFUL`；JUnit XML 逐类核对 **28 tests / 0 failures / 0 errors**；jar 内含 `natives/windows-x64/cava.dll` |
+| 5 预览版 class 能被 Loader 加载 | ✅ | `docs/CAVA-gates.md` 门禁 #5（真实 Fabric 0.19.5 服务端） |
+| 6 回填验收台账 | ⏳ | 由 P0-E（基线）与 W2 流补齐后回填 |
+| 7 更新跨会话记忆 | ✅ | `docs/CAVA-后续对话提示词.md` 附二·A |
+
+**仍未闭合的最大缺口**：MC 侧三个文件（`cava.Cava` / `cava.parity.TickSampler` / `cava.client.CavaClient`）
+只做过"手写桩"的类型自检。虽然 `compileJava` 已绿（说明它们能对编 `net.minecraft.*`），
+但**尚未在真实服务端里跑过一次**（启动横幅 + 黄金轨迹），这一条由 W2 差分测试流负责。
 
 ## 6. Wave 2 分流（P0 冒烟通过后立即开）
 

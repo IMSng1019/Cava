@@ -1,0 +1,27 @@
+# Cava P0-E: EMPTY four-bucket window, JFR armed at JVM start.
+#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/measure-jfr-empty.txt -Name measure-jfr-empty \
+#     -JavaArgs @('-Xms2G','-Xmx4G','--enable-preview','--enable-native-access=ALL-UNNAMED',
+#                 '-XX:StartFlightRecording=name=cava,settings=profile,delay=60s,duration=60s,filename=J:\mc\Cava\testbed\runs\measure-jfr-empty\cava.jfr')
+[pre]
+restore base-a
+[steps]
+ready 300
+sleep 20
+cmd gamerule doDaylightCycle false
+cmd time set 18000
+cmd save-off
+cmd spark tps
+sleep 30
+cmd spark health
+sleep 20
+cmd spark tps
+sleep 10
+cmd debug start
+sleep 20
+cmd debug stop
+sleep 20
+cmd spark tps
+sleep 10
+stop
+[post]
+hash measure-jfr-empty-final

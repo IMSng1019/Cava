@@ -1,0 +1,27 @@
+# Cava P0-E: EMPTY baseline -- normal ticking, no players, no extra entities.
+# Produces: spark TPS/MSPT/health output in the transcript, a saved spark profile,
+# and the vanilla /debug call tree (text) under testbed/server/debug/.
+#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/baseline-empty.txt -Name baseline-empty
+[pre]
+restore base-a
+[steps]
+ready 300
+sleep 20
+cmd gamerule doDaylightCycle false
+cmd time set 18000
+cmd save-off
+cmd spark tps
+sleep 12
+cmd spark health
+sleep 5
+cmd debug start
+sleep 20
+cmd debug stop
+sleep 5
+cmd spark profiler start --timeout 60 --save-to-file
+sleep 75
+cmd spark tps
+sleep 3
+stop
+[post]
+hash baseline-empty-final

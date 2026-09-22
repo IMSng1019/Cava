@@ -75,4 +75,36 @@ $env:GRADLE_USER_HOME = 'J:\mc\Cava\.gradle-home'
 
 - 工作区内 `GRADLE_USER_HOME` 首次构建**实际需要下载多少、耗时多久**：未验证（任务在 P0-A 里）。
 - `优化模组/服务端模组/`（174.6 MB）**是否要纳入 git**：未验证，属仓库体积决定，等用户定。
-- 存档 `新的世界` 能否用于服务端整服层差分：未验证（P0-F/P0-D 会碰到）。
+- 存档 `新的世界` 能否用于服务端整服层差分：未验证（P0-F/P0-D 会碰到）。**→ 2026-09-22 已实测：能，见第 7 节。**
+## 7. 测试服实测（P0-E，2026-09-22）
+
+> 完整数据、逐条证据、四块占比表、未验证清单都在 **`docs/CAVA-baseline.md`**。这里只放会改变别人决策的结论。
+
+**1. 测试服已经真的建起来并跑通了**（第 3 节说的「没有现成的服务端根目录」这个缺口已补）：
+`J:\mc\Cava\testbed\server\`，Fabric Loader **0.19.5** + Installer **1.1.2** + MC 1.20.4 + 33 个 keep 档 mod。
+启动参数带 `--enable-preview --enable-native-access=ALL-UNNAMED`，**原版 + Fabric 完全接受这两个参数**，无任何相关告警。
+Done 行：`[14:03:13] [Server thread/INFO]: Done (3.157s)! For help, type "help"`。
+一键复现：`pwsh -File tools/setup-testbed.ps1 -Wave 4`。
+
+**2. 端口避让**：本机 25565 曾被别的 agent 的探针服占用（实测 `BindException`）。本测试服固定用
+**game 25566 / RCON 25576**，密码 `cava`。脚本起服前会先探测端口是否被占。
+
+**3. 第 6 节「存档 `新的世界` 能否用于服务端整服层差分」→ 已实测：能。**
+客户端存档整份拷进 `testbed/server/world/` 后服务端正常加载，逐 region 文件的区块数完全一致（1024/640/512/319/160/32 全部对上），
+说明服务端读的是原有区块而不是重新生成。
+
+**4. 第 6 节「逐位一致的前置条件」→ 坏消息：当前整合包不满足。**
+从同一快照出发、`tick freeze` + `/tick sprint` 精确推进同样 tick 数，三次运行 tick 数完全一致（203/404/1005），
+但区块内容**不一致**：`region/` 有 23/2025 区块连剔除 `LastUpdate`/`InhabitedTime` 后仍不同、`entities/` 24/39 不同、
+生成的区块集合也不同。两次全新生成同一种子同样不一致（region 118/2025 不同）。
+→ **差分测试（prompts/03）与所有整服层验收在此之前都无法给出可信结论**，建议优先做「少 c2me 一档」的对照实验定位根因。
+
+**5. 三条 logger 的期望要下调**：Carpet / TIS 的 `/log microTiming`、`/log movement`、`/log pathfinding` 在**无客户端的专用服务端上不落盘**
+（只写 `config/carpettisaddition/logger_subscriptions.json`，输出走 HUD）；vanilla `/debug` 在专用服务端**只打印一行统计、不写调用树文件**。
+能落盘的只有 spark 的 `config/spark/*.sparkprofile`（**裸 protobuf，不是 gzip**）和 JFR 的 `.jfr`。
+另外 `jcmd` 在本机**挂不上**服务器（沙箱禁 attach 管道），JFR 必须在启动参数里用 `-XX:StartFlightRecording` 武装。
+
+**6. 其他给后续流的两条实测事实**：
+- `/log <名字>` 从 RCON 直接下发会返回 `[Rcon: No player specified]`，必须 `/execute as <假人> run log <名字>`。
+- `/tick sprint N` 在**未冻结**时会让游戏在冲刺后继续正常跑（实测「200 tick」变成 +340 tick）；在**已冻结**时才是精确的。
+  要精确 tick 数就用：数据包 `#minecraft:load` 里 `tick freeze` → 然后 `/tick sprint N`。

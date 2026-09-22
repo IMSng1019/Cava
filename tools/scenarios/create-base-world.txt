@@ -1,9 +1,11 @@
 # Cava P0-E: create a deterministic test world (fixed level-seed from server.properties),
-# generate the spawn area, save, stop, snapshot it. Run once per snapshot name:
-#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/create-base-world.txt -Name base-a
-#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/create-base-world.txt -Name base-b
+# generate the spawn area, save, stop, snapshot it.
+# The freeze-at-load datapack is installed first so that the number of ticks that elapse
+# after "Done" is exactly zero -> two generations become comparable (game time == 0).
+#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/create-base-world.txt -Name base-c
 [pre]
 deleteworld
+datapack
 [steps]
 ready 300
 sleep 5

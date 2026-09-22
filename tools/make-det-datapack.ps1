@@ -16,7 +16,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-if (-not (Test-Path -LiteralPath $WorldDir)) { throw "world dir not found: $WorldDir" }
+New-Item -ItemType Directory -Force -Path $WorldDir | Out-Null
 $base = Join-Path $WorldDir ("datapacks\" + $Name)
 New-Item -ItemType Directory -Force -Path (Join-Path $base 'data\cava\functions'), (Join-Path $base 'data\minecraft\tags\functions') | Out-Null
 

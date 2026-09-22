@@ -10,6 +10,9 @@ param(
   [int]$Port = 25576,   # testbed default; 25575 belongs to other agents' servers on this host
   [string]$Password = 'cava',
   [int]$TimeoutMs = 20000,
+  # after the first response packet, keep reading until the server has been silent for
+  # this long: spark replies from a worker thread and can send several packets
+  [int]$IdleMs = 2500,
   [switch]$NoLog
 )
 $ErrorActionPreference = 'Stop'
@@ -56,12 +59,17 @@ try {
   $auth = Read-Packet $stream
   if ($auth.Id -eq -1) { throw 'rcon: authentication failed' }
   Send-Packet $stream 2 2 $Command
-  $resp = Read-Packet $stream
+  $sb = New-Object System.Text.StringBuilder
+  $client.ReceiveTimeout = $IdleMs
+  while ($true) {
+    try { $p = Read-Packet $stream; [void]$sb.Append($p.Body) } catch { break }
+  }
+  $text = $sb.ToString().TrimEnd()
   if (-not $NoLog) {
     Write-Host ("[rcon] > {0}" -f $Command)
-    if ($resp.Body) { Write-Host $resp.Body.TrimEnd() }
+    if ($text) { Write-Host $text }
   }
-  $resp.Body.TrimEnd()
+  $text
 } finally {
   $stream.Close(); $client.Close()
 }

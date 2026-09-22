@@ -32,6 +32,11 @@ param(
   [string]$Root = '',
   [string]$JavaExe = 'C:\Program Files\Java\jdk-21\bin\java.exe',
   [string[]]$JavaArgs = @('-Xms2G','-Xmx4G','-Dstdout.encoding=UTF-8','-Dstderr.encoding=UTF-8','--enable-preview','--enable-native-access=ALL-UNNAMED'),
+  # jcmd cannot attach to the server on this host (the sandbox denies the attach pipe), so a
+  # JFR recording has to be armed on the JVM command line instead.
+  [string]$JfrFile = '',
+  [int]$JfrDelaySec = 60,
+  [int]$JfrDurationSec = 60,
   [switch]$KeepRunning
 )
 $ErrorActionPreference = 'Stop'
@@ -93,15 +98,31 @@ foreach ($step in $sections.pre) {
     'setup'     { Say "[pre] setup $rest"; $a = $rest -split '\s+'; & (Join-Path $PSScriptRoot 'setup-testbed.ps1') @a }
     'snapshot'  { Do-Snapshot $rest }
     'restore'   { Do-Restore $rest }
-    'deleteworld' { if (Test-Path $worldDir) { Remove-Item $worldDir -Recurse -Force }; Say '[pre] world deleted' }
+    'deleteworld' {
+      if (Test-Path $worldDir) { Remove-Item $worldDir -Recurse -Force }
+      # recreate empty: an absent world dir makes the server generate a fresh world from
+      # level-seed, and the datapack/loadpack steps below need a directory to write into
+      New-Item -ItemType Directory -Force -Path $worldDir | Out-Null
+      Say '[pre] world deleted (empty dir recreated; server will regenerate from level-seed)'
+    }
     'datapack'  { & (Join-Path $PSScriptRoot 'make-det-datapack.ps1') -WorldDir $worldDir | Out-Null; Say '[pre] determinism datapack installed' }
-    'hash'      { $h = Invoke-CavaWorldHash -Root $Root -Label $rest; Say ("[pre] hash {0} = {1} chunks={2} ticks={3}" -f $h.Label, $h.Digest, $h.Chunks, $h.Ticks) }
+    'loadpack'  {
+      $n = if ($rest) { [int]$rest } else { 200 }
+      & (Join-Path $PSScriptRoot 'make-load-datapack.ps1') -WorldDir $worldDir -Count $n | Out-Null
+      Say "[pre] entity-load datapack installed ($n mobs)"
+    }
+    'hash'      { $h = Invoke-CavaWorldHash -Root $Root -Label ($Name + '-' + $rest); Say ("[pre] hash {0} = {1} chunks={2} ticks={3}" -f $h.Label, $h.Digest, $h.Chunks, $h.Ticks) }
     'sleep'     { Start-Sleep -Seconds ([int]$rest) }
     default     { throw "unknown [pre] step: $step" }
   }
 }
 
 # ---------- start ----------
+if ($JfrFile) {
+  $JfrFile = [System.IO.Path]::GetFullPath($JfrFile)
+  $JavaArgs = $JavaArgs + ("-XX:StartFlightRecording=name=cava,settings=profile,delay={0}s,duration={1}s,filename={2}" -f $JfrDelaySec, $JfrDurationSec, $JfrFile)
+  Say ("[scenario] JFR armed: delay=${JfrDelaySec}s duration=${JfrDurationSec}s -> $JfrFile")
+}
 $srv = Start-CavaServer -Root $Root -Name $Name -JavaExe $JavaExe -JavaArgs $JavaArgs
 Say "[scenario] started pid=$($srv.Process.Id) at $(Get-Date -Format o)"
 Say "[scenario] cmdline: $($srv.CommandLine)"
@@ -134,8 +155,16 @@ try {
         $r = Wait-CavaLogMatch -Server $srv -Pattern $p[1] -TimeoutSec ([int]$p[0])
         if ($r.Matched) { Say ("[step] log matched after {0:n1}s: {1}" -f $r.Seconds, $r.Line) } else { Say "[step] !! log pattern not matched: $($p[1])" }
       }
-      'hash' { $h = Invoke-CavaWorldHash -Root $Root -Label $rest; Say ("[step] hash {0} = {1} chunks={2} ticks={3}" -f $h.Label, $h.Digest, $h.Chunks, $h.Ticks) }
+      'hash' { $h = Invoke-CavaWorldHash -Root $Root -Label ($Name + '-' + $rest); Say ("[step] hash {0} = {1} chunks={2} ticks={3}" -f $h.Label, $h.Digest, $h.Chunks, $h.Ticks) }
       'snapshot' { Do-Snapshot $rest }
+      'jfr' {
+        $secs = if ($rest) { [int]$rest } else { 30 }
+        $serverPid = (Get-Content (Join-Path $runDir 'server.pid') -Raw).Trim()
+        $jfrOut = Join-Path $runDir 'cava.jfr'
+        $jcmd = 'C:\Program Files\Java\jdk-21\bin\jcmd.exe'
+        $r = & $jcmd $serverPid JFR.start ("name=cava,settings=profile,duration={0}s,filename={1}" -f $secs, $jfrOut) 2>&1
+        Say ("[step] JFR.start -> " + ($r -join ' '))
+      }
       'stop' {
         $res = Stop-CavaServer -Server $srv
         Say ("[step] stopped exitCode={0} forced={1}" -f $res.ExitCode, $res.Forced)
@@ -160,11 +189,21 @@ foreach ($step in $sections.post) {
   $verb = $parts[0]; $rest = if ($parts.Count -gt 1) { $parts[1] } else { '' }
   switch ($verb) {
     'note'     { Say "[post] note: $rest" }
-    'hash'     { $h = Invoke-CavaWorldHash -Root $Root -Label $rest; Say ("[post] hash {0} = {1} chunks={2} ticks={3}" -f $h.Label, $h.Digest, $h.Chunks, $h.Ticks) }
+    'hash'     { $h = Invoke-CavaWorldHash -Root $Root -Label ($Name + '-' + $rest); Say ("[post] hash {0} = {1} chunks={2} ticks={3}" -f $h.Label, $h.Digest, $h.Chunks, $h.Ticks) }
     'snapshot' { Do-Snapshot $rest }
     'restore'  { Do-Restore $rest }
     'deleteworld' { if (Test-Path $worldDir) { Remove-Item $worldDir -Recurse -Force }; Say '[post] world deleted' }
     'sleep'    { Start-Sleep -Seconds ([int]$rest) }
+    'jfrprint' {
+      $jfrFile = Join-Path $runDir 'cava.jfr'
+      if (-not (Test-Path $jfrFile)) { Say '[post] no cava.jfr'; }
+      else {
+        $jfrExe = 'C:\Program Files\Java\jdk-21\bin\jfr.exe'
+        $samples = Join-Path $runDir 'jfr-samples.txt'
+        & $jfrExe print --events jdk.ExecutionSample --stack-depth 40 $jfrFile 2>&1 | Set-Content -Encoding UTF8 $samples
+        Say ("[post] jfr samples -> $samples (" + (Get-Item $samples).Length + ' bytes)')
+      }
+    }
     default    { throw "unknown [post] step: $step" }
   }
 }

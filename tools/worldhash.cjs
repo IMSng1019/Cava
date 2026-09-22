@@ -40,7 +40,7 @@ function readNbt(buf) {
       case 4: return i8().toString();
       case 5: return f4();
       case 6: return f8();
-      case 7: { const n = i4(); const b = buf.subarray(p, p + n); p += n; return '<byte[' + n + ']>'; }
+      case 7: { const n = i4(); const b = buf.subarray(p, p + n); p += n; return '<byte[' + n + ']:' + sha(b).slice(0, 16) + '>'; }
       case 8: return str();
       case 9: {
         const et = u1(); const n = i4(); const out = [];
@@ -61,6 +61,24 @@ function readNbt(buf) {
   if (rootType !== 10) throw new Error('nbt: root is not a compound');
   str(); // root name
   return payload(10);
+}
+
+// NBT keys that legitimately differ between two runs of the same world
+// ("LastUpdate" is world.getGameTime() at save time, "InhabitedTime" counts ticks the
+// chunk was loaded). Everything else must match for a determinism claim.
+const VOLATILE_NBT_KEYS = new Set(['LastUpdate', 'InhabitedTime']);
+function stripVolatile(node) {
+  if (Array.isArray(node)) { for (const c of node) stripVolatile(c); return; }
+  if (node && typeof node === 'object') {
+    for (const k of Object.keys(node)) {
+      if (VOLATILE_NBT_KEYS.has(k)) delete node[k];
+      else stripVolatile(node[k]);
+    }
+  }
+}
+function canonicalChunk(data) {
+  try { const nbt = readNbt(data); stripVolatile(nbt); return Buffer.from(JSON.stringify(nbt)); }
+  catch (e) { return null; }
 }
 
 // ---------------- region file ----------------
@@ -88,7 +106,8 @@ function readRegion(file) {
       chunks.push({ i, x: i % 32, z: Math.floor(i / 32), sha: 'decompress-error:' + e.message, bytes: 0 });
       continue;
     }
-    chunks.push({ i, x: i % 32, z: Math.floor(i / 32), sha: sha(data), bytes: data.length });
+    const canon = canonicalChunk(data);
+    chunks.push({ i, x: i % 32, z: Math.floor(i / 32), sha: sha(data), csha: canon ? sha(canon) : 'nbt-parse-error', bytes: data.length });
   }
   return { raw, chunks };
 }
@@ -110,7 +129,9 @@ for (const sub of ['region', 'entities', 'poi']) {
 
 const rawLines = [];
 const payLines = [];
+const canonLines = [];
 const chunkLines = [];
+const canonChunkLines = [];
 const perFile = {};
 let chunkCount = 0;
 for (const rf of regionFiles) {
@@ -120,7 +141,9 @@ for (const rf of regionFiles) {
   const sorted = chunks.slice().sort((a, b) => a.i - b.i);
   for (const c of sorted) {
     payLines.push(key + '\t' + c.i + '\t' + c.sha);
+    canonLines.push(key + '\t' + c.i + '\t' + c.csha);
     chunkLines.push([key, c.x, c.z, c.sha].join('\t'));
+    canonChunkLines.push([key, c.x, c.z, c.csha].join('\t'));
     chunkCount++;
   }
   perFile[key] = { chunks: chunks.length, rawSha256: sha(raw) };
@@ -149,23 +172,40 @@ if (levelDat.present) {
 
 const digestRaw = sha(rawLines.join('\n'));
 const digestPayload = sha(payLines.join('\n'));
+const digestCanonical = sha(canonLines.join('\n'));
+// per-directory digests: region/ holds terrain, entities/ holds entities (random UUIDs), poi/ points of interest
+const bySub = {};
+for (const sub of ['region', 'entities', 'poi']) {
+  const pay = payLines.filter(l => l.startsWith(sub + '/'));
+  const can = canonLines.filter(l => l.startsWith(sub + '/'));
+  if (!pay.length) continue;
+  bySub[sub] = { chunks: pay.length, digestPayload: sha(pay.join('\n')), digestCanonical: sha(can.join('\n')) };
+}
 
 const result = {
   worldDir: path.resolve(worldDir),
   regionFiles: regionFiles.length,
   chunks: chunkCount,
   digestPayload,
+  digestCanonical,
   digestRaw,
+  digestBySub: bySub,
   levelDat,
   perFile,
 };
 
 if (jsonOut) { fs.mkdirSync(path.dirname(path.resolve(jsonOut)), { recursive: true }); fs.writeFileSync(jsonOut, JSON.stringify(result, null, 2)); }
-if (chunksOut) { fs.mkdirSync(path.dirname(path.resolve(chunksOut)), { recursive: true }); fs.writeFileSync(chunksOut, chunkLines.join('\n') + '\n'); }
+if (chunksOut) {
+  fs.mkdirSync(path.dirname(path.resolve(chunksOut)), { recursive: true });
+  fs.writeFileSync(chunksOut, chunkLines.join('\n') + '\n');
+  fs.writeFileSync(chunksOut.replace(/\.tsv$/, '.canonical.tsv'), canonChunkLines.join('\n') + '\n');
+}
 if (!quiet) {
   console.log('worldDir      = ' + result.worldDir);
   console.log('regionFiles   = ' + result.regionFiles + '   chunks = ' + result.chunks);
   console.log('digestPayload = ' + digestPayload + '   <- comparable between runs');
+  console.log('digestCanonical= ' + digestCanonical + '   <- payload minus LastUpdate/InhabitedTime');
+  for (const k of Object.keys(bySub)) console.log('  ' + k.padEnd(9) + ' payload=' + bySub[k].digestPayload.slice(0, 16) + ' canonical=' + bySub[k].digestCanonical.slice(0, 16) + ' chunks=' + bySub[k].chunks);
   console.log('digestRaw     = ' + digestRaw + '   <- NOT comparable (region header timestamps)');
   if (levelDat.present) console.log('level.dat     = ' + JSON.stringify(levelDat.scalars || levelDat.error));
 }

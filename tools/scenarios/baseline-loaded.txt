@@ -1,0 +1,44 @@
+# Cava P0-E: LOADED baseline -- fake players + a fixed grid of 200 zombies.
+# The bots are put in survival so the zombies actually path towards them (that is the
+# pathfinding load); resistance+regeneration keep the load alive for the whole window.
+#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/baseline-loaded.txt -Name baseline-loaded
+[pre]
+restore base-a
+loadpack 200
+[steps]
+ready 300
+sleep 10
+cmd gamerule doDaylightCycle false
+cmd time set 18000
+cmd difficulty normal
+cmd gamerule doMobSpawning false
+cmd save-off
+cmd player bot01 spawn at 20.5 80 0.5
+cmd player bot02 spawn at 14.5 80 14.5
+cmd player bot03 spawn at 0.5 80 20.5
+cmd player bot04 spawn at -14.5 80 14.5
+cmd player bot05 spawn at -20.5 80 0.5
+cmd player bot06 spawn at -14.5 80 -14.5
+cmd player bot07 spawn at 0.5 80 -20.5
+cmd player bot08 spawn at 14.5 80 -14.5
+sleep 8
+cmd gamemode survival @a
+cmd effect give @a minecraft:resistance 3600 4 true
+cmd effect give @a minecraft:regeneration 3600 4 true
+cmd function cava:spawn_mobs
+sleep 20
+cmd spark tps
+sleep 10
+cmd spark health
+sleep 3
+cmd debug start
+sleep 20
+cmd debug stop
+sleep 5
+cmd spark profiler start --timeout 60 --save-to-file
+sleep 75
+cmd spark tps
+sleep 3
+stop
+[post]
+hash baseline-loaded-final

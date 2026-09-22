@@ -32,7 +32,8 @@ param(
   [switch]$KeepWorld,
   [switch]$PrepareWorld,
   [switch]$SnapshotOnly,
-  [int]$ChunkyRadius = 170
+  [int]$ChunkyRadius = 170,
+  [int]$SettleTicks = 1200
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -109,6 +110,26 @@ if ($PrepareWorld) {
     if ($p -match 'Task finished|Complete|No tasks running|100(.0+)?%') { Write-Host "[parity] chunky: $p"; break }
     Write-Host ("[parity] chunky {0:n0}s: {1}" -f $sw.Elapsed.TotalSeconds, ($p -join ' '))
   }
+  # --- 让自然动力学（落沙/落砾/水流）先跑完并保存 ---
+  # 为什么要这一步：世界哈希是逐 tick 的，自然世界里没落定的沙/砾会在"哪一 tick 落"上产生差异，
+  # 本流第一次 off-a vs off-b 的 533 个 w 差异里就有 minecraft:falling_block#27 @(72.50,-33.00,64.50)。
+  # 先把世界跑热（sprint $SettleTicks）再 save，之后测量的每条腿都从"已落定"的世界出发。
+  if ($SettleTicks -gt 0) {
+    Write-Host "[parity] settle: tick unfreeze + tick sprint $SettleTicks"
+    Rcon 'tick unfreeze' | Out-Null
+    Rcon "tick sprint $SettleTicks" | Out-Null
+    $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw2.Elapsed.TotalSeconds -lt 900) {
+      Start-Sleep -Seconds 5
+      $p2 = Rcon 'tick query'
+      if ($p2 -match 'sprint') { } # 仍在 sprint
+      $gt = Rcon 'time query gametime'
+      if ($gt -match '(d+)') { Write-Host ("[parity] settle gametime={0} ({1:n0}s)" -f $Matches[1], $sw2.Elapsed.TotalSeconds) }
+      $prog = Rcon 'tick query'
+      break
+    }
+    Start-Sleep -Seconds 5
+  }
   Write-Host "[parity] save-all: $(Rcon 'save-all flush')"
   Start-Sleep -Seconds 3
   Rcon 'stop' | Out-Null
@@ -118,7 +139,7 @@ if ($PrepareWorld) {
 
 # ---- 2. 场景数据包（幂等）----
 if (-not $PrepareWorld) {
-  & (Join-Path $PSScriptRoot 'make-parity-datapack.ps1') -WorldDir $worldDir -PlatformX 72 -PlatformZ 0 -GroundY 70 | Out-Null
+  & (Join-Path $PSScriptRoot 'make-parity-datapack.ps1') -WorldDir $worldDir -PlatformX 72 -PlatformZ 0 -GroundY 70 -SprintTicks $Ticks | Out-Null
 }
 
 # ---- 3. 起服务端 ----
@@ -157,14 +178,20 @@ if (-not $ready.Ready) { throw "服务端没起来：$($ready.Reason)" }
 Write-Host ("[parity] READY after {0:n1}s" -f $ready.Seconds)
 
 # ---- 4. 布场 + 精确推进 ----
-$setup = Rcon 'function cava:scenario'
-Write-Host "[parity] > function cava:scenario -> $setup"
-$sp = Rcon "tick sprint $Ticks"
-Write-Host "[parity] > tick sprint $Ticks"
-Write-Host "[parity] 等采样侧采满 $Ticks tick 并停服…"
-if (-not $srv.Process.WaitForExit($ExitTimeoutSec * 1000)) {
-  Write-Host '[parity] !! 超时未退出，强制杀'
-  $srv.Process.Kill(); $srv.Process.WaitForExit(30000)
+# 场景与 sprint 都在 #minecraft:load 里（见 make-parity-datapack.ps1 的注释），
+# 所以这里**什么都不发**，只等采样侧采满 $Ticks 后自动停服。
+Write-Host "[parity] 场景与 tick sprint 由数据包 load 函数发出；等采样侧采满 $Ticks tick 并停服…"
+$swWait = [System.Diagnostics.Stopwatch]::StartNew()
+while (-not $srv.Process.HasExited -and $swWait.Elapsed.TotalSeconds -lt $ExitTimeoutSec) {
+  Start-Sleep -Seconds 5
+  $srv.Process.Refresh()
+}
+if (-not $srv.Process.HasExited) {
+  Write-Host '[parity] !! 超时未退出，RCON stop 后强杀'
+  Rcon 'stop' | Out-Null
+  Start-Sleep -Seconds 5
+  $srv.Process.Refresh()
+  if (-not $srv.Process.HasExited) { $srv.Process.Kill(); $srv.Process.WaitForExit(30000) }
 }
 $srv.Process.Refresh()
 Write-Host "[parity] exit=$($srv.Process.ExitCode)"

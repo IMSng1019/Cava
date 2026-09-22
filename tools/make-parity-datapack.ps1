@@ -18,6 +18,7 @@ param(
   [int]$PlatformX = 200,
   [int]$PlatformZ = 0,
   [int]$GroundY = 63,
+  [int]$SprintTicks = 0,
   [string]$Name = 'cava-parity'
 )
 $ErrorActionPreference = 'Stop'
@@ -98,6 +99,28 @@ execute if score #t cava_t matches 1 run setblock %PX% %GY1% %PZ% minecraft:air
 schedule function cava:tick_loop 1t
 '@.Replace('%PX%', [string]($px - 2)).Replace('%GY1%', [string]($gy + 1)).Replace('%PZ%', [string]$pz) |
   Set-Content -Encoding ASCII (Join-Path $base 'data\cava\functions\tick_loop.mcfunction')
+
+# --- load 链：freeze -> scenario ->（可选）tick sprint ---
+# 为什么把 scenario 与 sprint **都放进 load 函数**（而不是 RCON 之后再发）：
+# 采样器在 SERVER_STARTED 就开始逐 tick 落盘，而 RCON 到达的时刻相对"第几个采样 tick"是不确定的
+# （实测：off-a 与 off-b 的实体在第 2 tick 就差了 3 只僵尸）。放进 load 函数后，
+# 第 0 个采样 tick 时场景已经在位，sprint 的 600 tick 就是采样器看到的全部内容。
+$loadLines = @('function cava:scenario')
+if ($SprintTicks -gt 0) { $loadLines += "tick sprint $SprintTicks" }
+@'
+# runs from the #minecraft:load tag
+tick freeze
+save-off
+gamerule doDaylightCycle false
+gamerule doWeatherCycle false
+gamerule doMobSpawning false
+gamerule doFireTick false
+gamerule randomTickSpeed 0
+gamerule sendCommandFeedback false
+time set midnight
+weather clear
+'@.Trim() | Set-Content -Encoding ASCII (Join-Path $base 'data\cava\functions\freeze.mcfunction')
+Add-Content -Encoding ASCII (Join-Path $base 'data\cava\functions\freeze.mcfunction') $loadLines
 
 '{"values":["cava:freeze"]}' |
   Set-Content -Encoding ASCII (Join-Path $base 'data\minecraft\tags\functions\load.json')

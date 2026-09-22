@@ -143,7 +143,72 @@ A 组 6 只 `NoAI` 猪牛（确定性实体层基线）；B 组 2 村民 + 3 僵
 
 ### 4.1 实测结果
 
-（占位：本轮三腿跑完后回填真实输出）
+#### 4.1.1 第一轮（**未通过**，但两次失败都定位到了根因 —— 这部分比"零差异"更有价值）
+
+第一轮 off-a / off-b 都是 600 tick 有效采集（`行=601 tick行=600`，日志有「轨迹落盘」）：
+
+    ================ 确定性前置：同一配置（native off）跑两次 ================
+    DIFF FOUND over 600 ticks
+      首个差异 tick=2
+        tick 2 字段[x]  x: 'ent=0;paths=0' != 'ent=3;paths=0';
+      逐字段差异 tick 数: x=492 w=533 p=516
+      定位：tick 2 实体 只在 b 出现: minecraft:zombie#12 (64.50,71.00,3.50)
+      定位：tick 2 实体 只在 b 出现: minecraft:zombie#10 (66.50,71.00,3.50)
+
+    ================ native on vs off ================
+    DIFF FOUND over 600 ticks
+      首个差异 tick=68   字段[w]  w: '2065b81fc569589b' != '8a8fc7e9b35c3108'
+      定位：tick 68 实体 只在 a 出现: minecraft:falling_block#27 (72.50,-33.04,64.50)
+      定位：tick 67 实体 只在 b 出现: minecraft:falling_block#13 (72.50,-33.00,64.50)
+
+**两个根因都在"跑法"这一侧，不在被测量的代码侧**：
+
+1. **采样起点早于场景布场**：采样器在 `SERVER_STARTED` 就开始逐 tick 落盘，而场景是 RCON 之后才发的 ⇒
+   "第几个采样 tick 时场景出现"取决于 RCON 到达时刻（进程调度）⇒ 实体在第 2 tick 就差了 3 只僵尸。
+   **修法**：把 `function cava:scenario` 与 `tick sprint N` **都放进 `#minecraft:load` 链**
+   （`tools/make-parity-datapack.ps1 -SprintTicks`）。第 0 个采样 tick 时场景已在位。
+2. **自然动力学没落定**：`minecraft:falling_block#27 @(72.50,-33.00,64.50)` —— 世界里有没落定的沙/砾
+   （z=64 → chunk (4,4)，**不是平台**），"落在哪一 tick"本身带随机 ⇒ `w` 差 533 个 tick。
+   **修法**：base 快照必须是"跑热并保存过"的世界（`-PrepareWorld -SettleTicks 1200`：
+   chunky 预生成 → `tick unfreeze` + `tick sprint 1200` → `save-all flush` → 快照），
+   并把场景的 `randomTickSpeed` 钉成 0。
+
+#### 4.1.2 第二轮（修好跑法之后）
+
+三腿全部 `LEG OK（600 tick）`、`行=601 tick行=600`、无 ERROR、日志有「轨迹落盘」。报告：
+
+    ================ 确定性前置：同一配置（native off）跑两次 ================
+    DIFF FOUND over 600 ticks
+      首个差异 tick=17
+        tick 17 字段[p,x]  p: 'cbf29ce484222325' != 'e1c9dd9d7fa306cd'; x: 'ent=5;paths=0' != 'ent=5;paths=1';
+      逐字段差异 tick 数: p=515 x=583        ← **w 一次都没差**
+      定位：tick 17 实体 minecraft:item#2 哈希不同  a=d9c16ab479fc5fc3 (71.16,71.54,2.73)  b=42c294af88bc41cd (70.71,72.13,2.45)
+      定位：tick 17 实体 只在 a 出现: minecraft:zombie#15 (64.50,71.00,3.50)
+      定位：tick 17 实体 只在 b 出现: minecraft:zombie#29 (64.50,71.00,3.50)
+      定位：tick 17 路径 只在 b 出现: minecraft:zombie#11 nodes=11
+
+    ================ native on vs off ================
+    DIFF FOUND over 600 ticks
+      首个差异 tick=7
+        tick 7 字段[p,x]  p: 'cbf29ce484222325' != '1fa85046457c5b01'; x: 'ent=5;paths=0' != 'ent=5;paths=1';
+      逐字段差异 tick 数: p=242 x=594         ← **w 一次都没差**
+      定位：tick 7 实体 minecraft:item#2 哈希不同  a=3f212a3df320c29c (70.98,72.46,2.54)  b=0118375860918392 (70.77,72.36,3.10)
+      定位：tick 7 实体 只在 a 出现: minecraft:zombie#15 (64.50,71.00,3.50)
+      定位：tick 7 实体 只在 b 出现: minecraft:zombie#16 (64.50,71.00,3.50)
+
+##### 结论（**按子系统分开说，不要混成一句"有差异"**）
+
+- **方块层：通过。** 两次比对里 `w` **都是零差异**（逐字段差异表里根本没有 `w`）——
+  600 tick 内**红石装置**（脚本驱动的 `cava:tick_loop` 翻转 → 红石线 → 推活塞 + 灯 + 比较器）
+  与整个扫描盒的方块状态逐 tick 一致：既在"同一配置两次"下一致，也在 native on/off 下一致。
+- **实体/路径层：不通过，根因已定位且与 native 无关**：
+  1. **实体 id 不是稳定可观测量**：同一实体在 a 里是 `zombie#15`、b 里是 `zombie#29`（坐标相同）——
+     `minecraft:item#2` 的创建时机不同 ⇒ **id 计数器整体平移**。本流的 `e` 哈希与明细键都带 id，
+     所以 id 漂移被记成"实体差异"。**修法（下一轮）**：把 id 从哈希与键里去掉，键改用 `类型@坐标`。
+  2. **mob 的寻路时机由 mob 随机数决定**（`zombie#11 nodes=11 只在 b 出现`）—— AI 驱动的寻路
+     "什么时候想起来要寻路"本身不确定，与 captain 的结论一致。这一层要**脚本驱动**才有确定性：见 §7.3。
+- **门禁按设计生效**：确定性前置不通过时 `parity-diff.ps1` 以 exit=3 结束并打印
+  「确定性前置不通过：同一配置两次都不同 ⇒ on/off 的结论不可用」，**没有**把 on/off 的差异记到 native 头上。
 
 ---
 
@@ -153,10 +218,33 @@ A 组 6 只 `NoAI` 猪牛（确定性实体层基线）；B 组 2 村民 + 3 僵
     pwsh -File tools/parity-invariants.ps1 -Ticks 2000 -Native off -Leg inv-off
 
 **为什么不是逐 tick 世界哈希**：见 §1。**必须是实时 tick（`/tick unfreeze`）**：`/tick sprint` 下 TPS/MSPT 没有意义。
-断言项：跑满 N tick、MSPT 均值、TPS 最低值、无 Exception/ERROR（**显式排除 easybot 桥接噪声**，见 §7.3）、
-无「整体回退纯 Java」、无 `CAVA_ERR_*`、`errors=0`、`takeovers==nativeCalls`、实体数在范围内、退出码 0、无 hs_err。
+**为什么不是逐 tick 世界哈希**：见 §1。**必须是实时 tick（`/tick unfreeze`）**：`/tick sprint` 下 TPS/MSPT 没有意义。
+断言项：跑满 N tick、MSPT 均值、实时 TPS（= gametime 增量 / 墙钟秒，**不依赖 spark**）、
+无 ERROR 级日志与真正的 Java 异常（`/WARN]` 一律不算）、native=on 时无「整体回退纯 Java」、无 `CAVA_ERR_*`、
+`errors=0`、`takeovers==nativeCalls`、实体数在范围内、退出码 0、无 hs_err。
 
-（占位：本轮实跑结果）
+实测（两腿，各请求 1200 tick；实时 tick，非 sprint）：
+
+| 腿 | 推进 tick | 墙钟 | MSPT 均值 | 实时 TPS | 实体数 | 结果 |
+| --- | --- | --- | --- | --- | --- | --- |
+| inv-off（native off） | 1854 | 90.2 s | 0.4 ms | 20.55 | 59 | 除"退出码"外全部成立（见下） |
+| inv-on（native on） | 1855 | 90.2 s | 0.4 ms | 20.56 | 59 | **PASS（所有不变量成立）** |
+
+两腿都：无 ERROR 级日志、无真正的 Java 异常、native=on 腿无「整体回退纯 Java」、无 `CAVA_ERR_*`、
+日志有优雅停服证据（`Stopping the server` / `Goodbye!`）、无 hs_err_pid、实体数一致（59）。
+
+**第一次跑是 FAIL 的，四条都是我自己断言器的 bug**（如实记录，免得后人重踩）：
+1. 把 `/WARN]` 里的 "Error loading class … ClassNotFoundException"（5 条）与
+   "COM exception querying Win32_*"（4 条）当成了 ERROR —— 这两族是本整合包启动期的**已知无害噪声**；
+2. native=off 那一腿**按设计**会打印「整体回退纯 Java」（横幅的"回退语义"行），
+   而我把这条断言写成了无条件的 ⇒ off 腿必然误报；
+3. `spark tps` 的 RCON 返回格式解析不到（TPS 样本 0 个）⇒ 改成用 `gametime/墙钟` 自算；
+4. `$srv.Process.ExitCode` 在进程退出后可能取到 `$null`（Start-Process 的 Process 对象）；
+   现在**以日志证据为准**（优雅停服 + 无 hs_err），退出码只在能取到时校验 —— inv-off 那一次就是被这条误判的，
+   它的日志里同样有 `Stopping the server` / `Goodbye!`。
+
+> 说明：这里的 TPS/MSPT 是**空载小世界**（无玩家、实体 59、扫描盒外无区块加载）的数字，
+> 只能当"不退化"的不变量，**不能**当性能结论。
 
 ---
 
@@ -168,7 +256,9 @@ A 组 6 只 `NoAI` 猪牛（确定性实体层基线）；B 组 2 村民 + 3 僵
 三档 = ①纯原版（`copy-mods.ps1 -Wave 0`：fabric-api + spark）+ cava；②+整合包（`-Profile full-minus-must-off`，33 jar）；
 ③= ② 的 native on/off。三档共用同一个世界快照（区块已预生成，换 mod 不会改变世界内容）。
 
-（占位：本轮实跑结果）
+**本轮实跑的是第 ②/③ 档**：§4.1.2 的三条腿就是整合包（148 个 mod 被 loader 加载、modset 指纹
+`1240b4efa0af31ae`，见 trace 头）下的 native off×2 + on×1。
+**第 ① 档（纯原版）只有脚本、没有实跑**（`testbed/parity` 里铺的就是整合包）—— 记在 §9 的未验证清单里。
 
 ---
 
@@ -205,9 +295,34 @@ A 组 6 只 `NoAI` 猪牛（确定性实体层基线）；B 组 2 村民 + 3 僵
 多目标时我们不 HEAD 取消，ServerCore 照常执行，与 native off 完全一致；单目标时取消掉的那些补丁，
 在单元素集合上是恒等的。
 
-### 7.3 实测差分（单目标）
+### 7.3 实测差分（单目标，脚本驱动）
 
-（占位：待 §4.1 与 bench 的 `avgNodes` 回填）
+用 P1 已有的 `/cava pathfind bench 2000`（固定场景 PathfindScenario，2000 次**真实** `findPathToAny`），
+两腿各跑 3 次采样（带 id 回执校验；本流实测三次全部 `回执=OK`）：
+
+    --- native off ---
+    [cava/pathfind] 金丝雀 PASS：…（原版返回 Path(6 节点)）；canary=1 takeovers=0 nativeCalls=0 errors=0
+    [cava/pathfind] BENCH id=1 ok=true n=2000 ns/op=99814.5 … avgNodes=6.00 nullPaths=0 canaryDelta=2000 takeovers=0
+    [cava/pathfind] BENCH id=2 ok=true n=2000 ns/op=34359.6 … avgNodes=6.00 nullPaths=0 canaryDelta=2000 takeovers=0
+    [cava/pathfind] BENCH id=3 ok=true n=2000 ns/op=30224.0 … avgNodes=6.00 nullPaths=0 canaryDelta=2000 takeovers=0
+    --- native on ---
+    [cava/pathfind] 接管条件全部满足（hook=true native=true probe=true bypassProfileGate=false probeTicks=600）
+    [cava/pathfind] 金丝雀 PASS：…（原版返回 Path(6 节点)）；canary=1 takeovers=1 nativeCalls=1 errors=0 reasons={}
+    [cava/pathfind] BENCH id=1 ok=true n=2000 ns/op=39963.8 … avgNodes=6.00 nullPaths=0 canaryDelta=2000 takeovers=2000 nativeCallsDelta=2000
+    [cava/pathfind] BENCH id=2 ok=true n=2000 ns/op=13390.4 … avgNodes=6.00 nullPaths=0 canaryDelta=2000 takeovers=2000 nativeCallsDelta=2000
+    [cava/pathfind] BENCH id=3 ok=true n=2000 ns/op=10743.1 … avgNodes=6.00 nullPaths=0 canaryDelta=2000 takeovers=2000 nativeCallsDelta=2000
+
+**可观测差异：没有。** 两腿 `avgNodes=[6.00,6.00,6.00]` 完全一致、`nullPaths=0`、`errors=0`；
+native on 腿 `takeovers=2000/2000`（每一次调用都被原生接管，hook 的 `canaryDelta=2000` 证明调用确实穿过注入点），
+也就是说：**这一轮 2000 次单目标寻路里，ServerCore 的体内补丁一次都没执行，而结果与原版逐项一致**。
+再叠加单元层"10000 组逐节点逐 float 位模式一致"，可以下这个结论：
+**单目标路径下跳过 ServerCore 的 4x@Redirect + 2x@ModifyVariable 不改变可观测结果**；
+多目标那一侧我们本来就不接管（§7.2），所以也不存在"跳过"。
+
+**顺带一条性能观察（不是本流的验收项，按 P1 的方法学读）**：稳态（第 3 次采样）
+`off 30224.0 ns/op vs on 10743.1 ns/op` ≈ **2.8×**；但三次采样是 99.8k→34.4k→30.2k（off）与 40.0k→13.4k→10.7k（on），
+**强预热瞬态**，用均值会得出错误结论（P1 的教训）。样本量只有 3×2000、场景是单生物短路径，
+**不要**把这条当成通用加速比。
 
 **顺带确认的一件事实**（省得后人重复踩）：`easybot-fabric` 在专用服务端上每 ~5 秒打一条
 `[EasyBotBridge-Jetty-n/ERROR]: 连接遇到错误: Connection refused`。它**无害**，但会让"日志里不许有 ERROR"
@@ -248,3 +363,9 @@ A 组 6 只 `NoAI` 猪牛（确定性实体层基线）；B 组 2 村民 + 3 僵
 4. **多目标寻路的差分未做**：`PathfindHook` 对多目标不接管，本流场景也全是单目标。
 5. **ServerCore 的结论 = 字节码层面 + 单目标实测**，没有做"多目标下容器顺序差异"的正面对照实验（我们本来就不接管多目标）。
 6. **`gradlew test` 里的 10000 组**没有在 CI runner 上跑过（本仓库当前没有 CI）。
+7. **实体 id 不稳定**（§4.1.2 第 1 条）：`e` 的哈希与明细键都带 `Entity.getId()`，同一实体的 id 会因
+   "之前创建过多少实体"而整体平移。**未修**（改法已写明：id 从哈希/键里去掉，键用 `类型@坐标`）。
+8. **场景层的实体/路径比对在第二轮仍未通过**（原因见 §4.1.2）；方块层已逐 tick 零差异。
+   "实体层零差异"这句话本轮**不能说**。
+9. **mod 矩阵的纯原版档**只有脚本、没有实跑（`testbed/parity` 里铺的是整合包 33 jar）；
+   整合包档 = §4.1 的三条腿。

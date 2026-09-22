@@ -112,6 +112,8 @@ class MoveBytecodeTruthTest {
         assertEquals(468, MoveStep.HORIZONTAL_VELOCITY_ZERO.bytecodeOffset(), "setVelocity 在 515");
         assertEquals(525, MoveStep.ENTITY_LAND.bytecodeOffset(), "onEntityLand 在 544");
         assertEquals(547, MoveStep.STEPPED_ON.bytecodeOffset(), "onSteppedOn 在 565");
+        assertEquals(568, MoveStep.MOVE_EFFECT_BOOKKEEPING.bytecodeOffset(),
+                "getMoveEffect 守卫在 568；getSteppingPos 在 626，distanceTraveled 记账在 705");
         assertEquals(737, MoveStep.STEP_ON_BLOCK_MAIN.bytecodeOffset(), "stepOnBlock 在 749");
         assertEquals(755, MoveStep.STEP_ON_BLOCK_SECOND.bytecodeOffset(), "stepOnBlock 在 774");
         assertEquals(796, MoveStep.SWIM_EFFECTS.bytecodeOffset(), "playSwimSound 在 819");

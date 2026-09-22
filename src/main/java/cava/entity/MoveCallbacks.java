@@ -101,6 +101,35 @@ public interface MoveCallbacks<S, H> {
     /** 偏移 749/774：{@code Entity.stepOnBlock(...)} 的返回值（决定是否刷新 nextStepSoundDistance）。 */
     boolean stepOnBlock(BlockPos pos, S state, boolean playSounds, boolean emitGameEvents, Vec3d movement);
 
+    /**
+     * 偏移 722（步声守卫 {@code &&} 的右操作数）与 841（{@code else if}）：
+     * {@code steppingState.isAir()}。
+     *
+     * <p><b>为什么是回调而不是拉取</b>：{@code steppingState} 是偏移 636
+     * {@code world.getBlockState(steppingPos)} 解析出来的<b>同一个对象</b>（原版 722/744/770/841
+     * 全部复用该引用）。把它交给回调，对象身份与"只解析一次"的约束就自动成立；
+     * 若改成一个无参拉取，生产实现就得重查一次世界，那是第二份事实来源。
+     */
+    boolean stateIsAir(S state);
+
+    /**
+     * 偏移 785–790 与 803–808：{@code nextStepSoundDistance = calculateNextStepSoundDistance()}。
+     *
+     * <p>两个位置都刷新（步声播放成功 / 没播放但在水里），所以回放不能把它折进
+     * {@link #stepOnBlock} 的返回值里 —— 那样游泳分支就漏了一次写。
+     * 默认空实现：只驱动调用序列的假实现不需要它。
+     */
+    default void refreshNextStepSoundDistance() {
+    }
+
+    /** 偏移 248–274：{@code profiler.pop()}（'move'）+ {@code push('rest')}，在标志位计算之前。 */
+    default void profilerAfterMovement() {
+    }
+
+    /** 偏移 455–467（移除提前返回）与 982–994（正常结束）：{@code profiler.pop()}（'rest'）。 */
+    default void profilerEnd() {
+    }
+
     /** 偏移 811–835：{@code playSwimSound()} + {@code emitGameEvent(GameEvent.SWIM)}。 */
     void onSwimEffects();
 

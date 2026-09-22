@@ -41,6 +41,8 @@ class EventReplayTest {
         boolean alive = true;
         boolean onGround;
         boolean stepOnBlockResult = true;
+        /** 偏移 722/841 的 {@code steppingState.isAir()}（拉取式重构后由回放现问）。 */
+        boolean steppingAir;
         Vec3d velocity = new Vec3d(1.0, -0.5, 2.0);
         MoveFlags lastFlags;
         double lastVelocityX = Double.NaN;
@@ -159,6 +161,17 @@ class EventReplayTest {
         }
 
         @Override
+        public boolean stateIsAir(FakeState state) {
+            calls.add("stateIsAir(" + state.name() + ")");
+            return steppingAir;
+        }
+
+        @Override
+        public void moveEffectBookkeeping(BlockPos steppingPos, FakeState steppingState) {
+            calls.add("bookkeeping(" + steppingState.name() + ")");
+        }
+
+        @Override
         public boolean stepOnBlock(BlockPos pos, FakeState state, boolean playSounds, boolean emitGameEvents,
                 Vec3d movement) {
             calls.add("stepOnBlock(@" + key(pos) + "," + state.name() + ",play=" + playSounds
@@ -199,11 +212,72 @@ class EventReplayTest {
         }
     }
 
-    private static final BlockPos LANDING = new BlockPos(3, 64, 5);
-    private static final BlockPos STEPPING = new BlockPos(3, 65, 5);
-    private static final BlockPos CLIP = new BlockPos(2, 64, 5);
-    private static final BlockPos COLLIDE_A = new BlockPos(3, 64, 6);
-    private static final BlockPos COLLIDE_B = new BlockPos(3, 64, 7);
+    /**
+     * 定值 + <b>可注入事件</b>的源：模拟生产侧的
+     * {@link MoveInputSource#supplyEventsAt}（射线 / 逐格扫描 / 火焰盒由 Java 侧在该步现算）。
+     *
+     * <p>{@code inject} 里的值 = "报告注入几条"，{@code reallyInject=false} 时<b>不真的写日志</b> ——
+     * 那是用来打回执校验的反例。
+     */
+    static final class Supplying implements MoveInputSource {
+        final MoveInputs base;
+        final Map<MoveStep, Integer> inject;
+        final boolean reallyInject;
+        final List<MoveStep> suppliedAt = new ArrayList<>();
+
+        Supplying(MoveInputs base, Map<MoveStep, Integer> inject, boolean reallyInject) {
+            this.base = base;
+            this.inject = inject;
+            this.reallyInject = reallyInject;
+        }
+
+        @Override
+        public int supplyEventsAt(MoveStep step, MoveEventLog log) {
+            Integer n = inject.get(step);
+            if (n == null) {
+                return 0;
+            }
+            suppliedAt.add(step);
+            if (reallyInject) {
+                for (int i = 0; i < n; i++) {
+                    if (step == MoveEventKind.LANDING_RAYCAST_HIT.step()) {
+                        log.add(MoveEventKind.LANDING_RAYCAST_HIT, LANDING.getX(), LANDING.getY(),
+                                LANDING.getZ(), 1);
+                    } else if (step == MoveEventKind.COLLIDING_BLOCK.step()) {
+                        log.add(MoveEventKind.COLLIDING_BLOCK, COLLIDE_A.getX(), COLLIDE_A.getY(),
+                                COLLIDE_A.getZ(), 0);
+                    } else {
+                        log.add(MoveEventKind.FIRE_IN_BOX, 0, 0, 0, 0);
+                    }
+                }
+            }
+            return n;
+        }
+
+        @Override public Vec3d movement() { return base.movement(); }
+        @Override public Vec3d adjusted() { return base.adjusted(); }
+        @Override public double posX() { return base.posX(); }
+        @Override public double posY() { return base.posY(); }
+        @Override public double posZ() { return base.posZ(); }
+        @Override public float fallDistance() { return base.fallDistance(); }
+        @Override public BlockPos landingPos() { return base.landingPos(); }
+        @Override public BlockPos steppingPos() { return base.steppingPos(); }
+        @Override public boolean moveEffectHasAny() { return base.moveEffectHasAny(); }
+        @Override public boolean hasVehicle() { return base.hasVehicle(); }
+        @Override public boolean stepSoundDistanceExceeded() { return base.stepSoundDistanceExceeded(); }
+        @Override public boolean steppingEqualsLanding() { return base.steppingEqualsLanding(); }
+        @Override public boolean moveEffectPlaysSounds() { return base.moveEffectPlaysSounds(); }
+        @Override public boolean moveEffectEmitsGameEvents() { return base.moveEffectEmitsGameEvents(); }
+        @Override public boolean touchingWater() { return base.touchingWater(); }
+        @Override public boolean regionLoaded() { return base.regionLoaded(); }
+        @Override public float velocityMultiplier() { return base.velocityMultiplier(); }
+    }
+
+    static final BlockPos LANDING = new BlockPos(3, 64, 5);
+    static final BlockPos STEPPING = new BlockPos(3, 65, 5);
+    static final BlockPos CLIP = new BlockPos(2, 64, 5);
+    static final BlockPos COLLIDE_A = new BlockPos(3, 64, 6);
+    static final BlockPos COLLIDE_B = new BlockPos(3, 64, 7);
 
     /**
      * 标准场景：水平被挡 + 下落落地 + 两个碰撞格 + 火。
@@ -215,15 +289,15 @@ class EventReplayTest {
      *   => movement.y != adjusted.y     => verticalCollision=true, groundCollision=true
      * </pre>
      */
-    private static MoveInputs standardInputs() {
+    static MoveInputs standardInputs() {
         return new MoveInputs(new Vec3d(1.0, -0.5, 0.0), new Vec3d(1.5, 0.0, 0.0),
                 10.0, 64.0, -2.0,
                 LANDING, STEPPING, 3.0F, 0.6F,
                 true, true, true, false, false,
-                true, false, false, true);
+                true, false, true);
     }
 
-    private static MoveEventLog standardLog() {
+    static MoveEventLog standardLog() {
         MoveEventLog log = new MoveEventLog(16);
         log.add(MoveEventKind.AXIS_CLIP, CLIP.getX(), CLIP.getY(), CLIP.getZ(), MoveEventKind.AXIS_X);
         log.add(MoveEventKind.LANDING_RAYCAST_HIT, LANDING.getX(), LANDING.getY(), LANDING.getZ(), 1);
@@ -233,7 +307,7 @@ class EventReplayTest {
         return log;
     }
 
-    private static Fake standardFake() {
+    static Fake standardFake() {
         return new Fake()
                 .state(LANDING, "landing")
                 .state(STEPPING, "stepping")
@@ -269,6 +343,8 @@ class EventReplayTest {
                 "isOnGround",
                 "onSteppedOn(landing,@3,64,5)",
                 "stateAt(3,65,5)",
+                "bookkeeping(stepping)",
+                "stateIsAir(stepping)",
                 "stepOnBlock(@3,64,5,landing,play=true,emit=false)",
                 "stepOnBlock(@3,65,5,stepping,play=false,emit=true)",
                 "isAlive",
@@ -388,19 +464,45 @@ class EventReplayTest {
         assertTrue(t.strictOk(), t.report());
     }
 
-    /** 该发事件却没发：记进 anomalies 而不是静默。 */
+    /**
+     * <b>回执校验</b>：源在 {@link MoveStep#LANDING_RAYCAST} 报告注入了 1 条射线命中事件，
+     * 日志里却没有 ⇒ 记 {@code anomalies} 而不是静默（"注入与消费不是同一批"会少调一次
+     * {@code onLanding}）。
+     */
     @Test
-    void missingRaycastEventIsReportedWhenTheGuardHolds() {
+    void missingRaycastEventIsReportedWhenSupplyClaimsAHit() {
         Fake fake = standardFake();
         MoveEventLog log = new MoveEventLog(16);
         log.add(MoveEventKind.FIRE_IN_BOX, 0, 0, 0, 0);
-        EventReplay<FakeState, String> replay = new EventReplay<>(fake);
-        EventReplay.Transcript t = replay.replay(standardInputs(), log);
+        MoveInputSource src = new Supplying(standardInputs(),
+                Map.of(MoveStep.LANDING_RAYCAST, 1), false);   // 报告 1 条，但不真的注入
+        EventReplay.Transcript t = new EventReplay<>(fake).replay(src, log);
 
         assertEquals(1, t.anomalies().size(), t.anomalies().toString());
         assertTrue(t.anomalies().get(0).startsWith("MISSING:LANDING_RAYCAST_HIT"));
         assertFalse(t.strictOk());
         assertFalse(fake.calls.contains("onLanding"));
+    }
+
+    /**
+     * 生产形态：三类"内核不产生的事实"由源在该步注入事件，回放照常消费 ——
+     * 于是 {@code strictOk()} 为真，且 {@code onLanding} / 逐格回调 / 火焰分支都被驱动。
+     */
+    @Test
+    void suppliedEventsDriverTheirCallbacksAtTheRightStep() {
+        Fake fake = standardFake();
+        MoveEventLog log = new MoveEventLog(16);   // 只有内核的 AXIS_CLIP；其余靠 supply
+        MoveInputSource src = new Supplying(standardInputs(),
+                Map.of(MoveStep.LANDING_RAYCAST, 1, MoveStep.BLOCK_COLLISION, 2, MoveStep.FIRE_BOX, 1), true);
+        EventReplay.Transcript t = new EventReplay<>(fake).replay(src, log);
+
+        assertEquals(List.of(MoveStep.LANDING_RAYCAST, MoveStep.BLOCK_COLLISION, MoveStep.FIRE_BOX),
+                ((Supplying) src).suppliedAt, "注入必须发生在它自己那一步");
+        assertTrue(fake.calls.contains("onLanding"));
+        assertTrue(fake.calls.contains("onEntityCollision(collideA,@3,64,6)"));
+        assertTrue(fake.calls.contains("onFireStep(true)"));
+        assertTrue(t.strictOk(), t.report());
+        assertEquals(List.of(), t.unconsumed());
     }
 
     /** 多出来的事件（守卫不成立时原生仍发了射线命中）：必须被报出来，不能静默丢。 */
@@ -411,7 +513,7 @@ class EventReplayTest {
         // fallDistance = 0 -> 射线分支整段不执行 -> 那条事件没人消费
         MoveInputs noFall = new MoveInputs(standardInputs().movement(), standardInputs().adjusted(),
                 10.0, 64.0, -2.0, LANDING, STEPPING, 0.0F, 0.6F,
-                true, true, true, false, false, true, false, false, true);
+                true, true, true, false, false, true, false, true);
         EventReplay<FakeState, String> replay = new EventReplay<>(fake);
         EventReplay.Transcript t = replay.replay(noFall, log);
 
@@ -443,7 +545,7 @@ class EventReplayTest {
         Fake fake = standardFake();
         MoveInputs in = new MoveInputs(standardInputs().movement(), standardInputs().adjusted(),
                 10.0, 64.0, -2.0, LANDING, STEPPING, 3.0F, 0.6F,
-                true, true, true, false, false, true, false, false, false);
+                true, true, true, false, false, true, false, false);
         EventReplay<FakeState, String> replay = new EventReplay<>(fake);
         EventReplay.Transcript t = replay.replay(in, standardLog());
 
@@ -458,7 +560,7 @@ class EventReplayTest {
         swim.stepOnBlockResult = false;
         MoveInputs wet = new MoveInputs(standardInputs().movement(), standardInputs().adjusted(),
                 10.0, 64.0, -2.0, LANDING, STEPPING, 3.0F, 0.6F,
-                true, true, true, false, true, true, false, false, true);
+                true, true, true, false, true, true, false, true);
         new EventReplay<>(swim).replay(wet, standardLog());
         assertTrue(swim.calls.contains("onSwimEffects"), swim.calls.toString());
         assertFalse(swim.calls.contains("onAirTravelEffects"));
@@ -466,7 +568,8 @@ class EventReplayTest {
         Fake air = standardFake();
         MoveInputs airborne = new MoveInputs(standardInputs().movement(), standardInputs().adjusted(),
                 10.0, 64.0, -2.0, LANDING, STEPPING, 3.0F, 0.6F,
-                true, true, true, false, false, false, true, false, true);
+                true, true, true, false, false, false, false, true);
+        air.steppingAir = true;
         new EventReplay<>(air).replay(airborne, standardLog());
         assertTrue(air.calls.contains("onAirTravelEffects"), air.calls.toString());
         assertFalse(air.calls.contains("onSwimEffects"));
@@ -479,7 +582,7 @@ class EventReplayTest {
         Fake fake = standardFake();
         MoveInputs riding = new MoveInputs(standardInputs().movement(), standardInputs().adjusted(),
                 10.0, 64.0, -2.0, LANDING, STEPPING, 3.0F, 0.6F,
-                true, true, true, true, false, true, false, false, true);
+                true, true, true, true, false, true, false, true);
         new EventReplay<>(fake).replay(riding, standardLog());
         assertFalse(fake.calls.stream().anyMatch(s -> s.startsWith("stepOnBlock")));
         assertFalse(fake.calls.contains("onSwimEffects"));
@@ -492,7 +595,7 @@ class EventReplayTest {
         Fake fake = standardFake();
         MoveInputs still = new MoveInputs(new Vec3d(0.0, 0.0, 0.0), new Vec3d(0.0, 0.0, 0.0),
                 10.0, 64.0, -2.0, LANDING, STEPPING, 3.0F, 0.6F,
-                false, false, false, false, false, false, true, true, true);
+                false, false, false, false, false, false, true, true);
         MoveEventLog log = new MoveEventLog(4);
         log.add(MoveEventKind.FIRE_IN_BOX, 0, 0, 0, 0);
         EventReplay.Transcript t = new EventReplay<>(fake).replay(still, log);

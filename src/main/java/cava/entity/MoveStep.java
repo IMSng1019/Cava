@@ -80,6 +80,19 @@ public enum MoveStep {
     /** 偏移 547–565：守卫 {@code isOnGround()} → {@code Block.onSteppedOn(World,BlockPos,BlockState,Entity)}。 */
     STEPPED_ON(547, "Block.onSteppedOn(World,BlockPos,BlockState,Entity)", true),
 
+    /**
+     * 偏移 568–735：{@code MoveEffect effect = getMoveEffect();} 的守卫（576/583）与
+     * 分支内的 Java 内部记账（589–705：{@code speed} / {@code getSteppingPos()}（626）/
+     * {@code world.getBlockState}（636）/ {@code canClimb}（645）/ {@code horizontalSpeed} /
+     * {@code distanceTraveled}）。
+     *
+     * <p>本常量是**为拉取时刻**补的：{@code steppingPos}（626）与
+     * {@code distanceTraveled > nextStepSoundDistance}（708–717）都在这一区间里，
+     * 而离它最近的旧常量是 547 / 737，会把拉取时刻记错一格。
+     * 加上它之后 {@link EventReplay} 的拉取轨迹仍然只由 {@link #ordinal()} 决定。
+     */
+    MOVE_EFFECT_BOOKKEEPING(568, "Entity$MoveEffect 守卫 + 分支内记账（589–705）", false),
+
     /** 偏移 737–749：{@code stepOnBlock(落点, 落点状态, playsSounds, 落点==踩踏点, movement)}（私有方法）。 */
     STEP_ON_BLOCK_MAIN(737, "Entity.stepOnBlock(BlockPos,BlockState,Z,Z,Vec3d)", true),
 

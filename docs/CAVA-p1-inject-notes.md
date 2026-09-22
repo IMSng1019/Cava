@@ -17,9 +17,12 @@ bench 里 20000 次真实调用 **canaryDelta=20000/20000**（一次不多、一
 ~~接管条件全部满足~~、~~mirrorFactory=cava.mirror.MirrorFactory instance=true impl=cava.mirror.RegionMirror~~、
 ~~nativeCalls=5201 reasons={native-unimplemented=5201} errors=0~~。
 
-**唯一还挡着"第一次真实接管"的，是原生内核的保守返回**：~~cava_pathfind~~ 仍返回
-~~CAVA_ERR_UNIMPLEMENTED~~（P1 内核流/A 的 ~~CAVA_PF_*~~ 位对齐尚未回执）⇒ ~~takeovers=0~~。
-这是**当前唯一的阻塞**，且不在本流路径上。
+**内核也已真实接线**：~~takeovers=2000/2000~~、~~nativeCallsDelta=2000~~、~~errors=0~~（§2.6）——
+**第一次真实的原生接管已经拿到**。
+
+**但同世界的 on/off 对比显示：原生当前比 vanilla 慢约 13.9 倍**（452.5 vs 32.6 µs/op）。
+瓶颈**不是原生 A\***，而是**每次求解重推 35³=42875 格的区域**（稳态 ≈300 µs/次，
+而 vanilla 整个求解 ≈33 µs）⇒ 见 §4.6 的 ABI 请求。**这条不解决，打开原生就是净亏。**
 
 ---
 
@@ -171,6 +174,64 @@ D 腿实测（诊断开关见 §3.4）：
 ⇒ **区域推送 → 档案上传 → ~~cava_pathfind~~ → ~~CAVA_ERR_UNIMPLEMENTED~~ → 回退原逻辑 → 原版返回 Path(4 节点)**
 这条链路每一步都真实执行过，且**没有任何异常逃逸**（~~errors=0~~）。
 
+### 2.6 【里程碑】**第一次真实的原生接管 + 同世界 on/off 对比**
+
+环境换成**私有服务端目录** ~~testbed/p1b-bench~~（从 gate-preview 复制、私有端口 25598/25574、
+**世界按同一 seed 重新生成**）。换目录的原因见 §2.8：gate-preview 是**多个 agent 共用**的。
+
+驱动：~~build/cava-p1b/bench-run.ps1~~（**带回执校验**，见 §2.7）。
+
+| 腿 | 系统属性 | n | ns/op 三次 | 均值 | spread | takeovers | nativeCalls |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **native OFF** | ~~-Dcava.pathfind.native=false~~ | 20000 | 43628.5 / 25738.4 / 28495.9 | **32620.9** | 54.8% | 0 | 0 |
+| **native ON** | ~~-Dcava.pathfind.native=true~~ | 2000 | 505478.7 / 421252.7 / 430869.6 | **452533.7** | 18.6% | **2000/2000** | 2000 |
+
+**里程碑**：~~takeovers=2000~~、~~nativeCallsDelta=2000~~、~~canaryDelta=2000/2000~~、~~errors=0~~ ——
+**每一次调用都被原生接管**，而且 ~~bypassProfileGate=false~~（没有任何诊断开关参与）。
+探针那次也是 ~~金丝雀 PASS ... canary=1 takeovers=1 nativeCalls=1 errors=0 reasons={}~~。
+
+**⚠️ 但原生现在比 vanilla 慢约 13.9 倍**（452.5 / 32.6）。原因在日志里直接可见 ——
+每次求解都要重推一个 35³ 的窗口，**稳态每推一次 ≈ 300 µs**，而 vanilla **整个求解**只要 ~33 µs：
+
+    [cava/mirror] 区域推送 #1    35x35x35=42875 cells 填=2435us 分配拷贝=1369us 上传=2216us 总=6104us
+    [cava/mirror] 区域推送 #4000 35x35x35=42875 cells 填=280us  分配拷贝=34us    上传=2us    总=320us
+    [cava/mirror] 区域推送 #6000 35x35x35=42875 cells 填=268us  分配拷贝=30us    上传=2us    总=303us
+
+⇒ **瓶颈不是原生 A*，而是「每次求解重推整个长方体」这条 ABI 模型**（见 §4.6 的请求）。
+按 captain 的要求：**这不是最终性能结论**，只是「当前窗口策略 + 当前区域 ABI」下的事实。
+
+### 2.7 测量驱动的可靠性（**我自己踩的两个坑，已修**）
+
+captain 要求：**宁可少采几次，也不要让无效采样混进平均值**。为此做了两层：
+
+**（1）模组侧：可校验回执**（~~PathfindBench~~，已进仓库）
+- 每次 bench 有单调递增的 ~~id~~；
+- **无论成功失败都打印恰好一行** ~~[cava/pathfind] BENCH id=<n> ok=<true|false> ...~~
+  （~~ok~~ 的判据是 ~~canaryDelta == n~~，即「每一次调用都真的穿过了注入点」）；
+- 失败路径（~~no-mob~~ / ~~busy~~ / 异常）**也留行** ⇒ **缺行 = 命令真的没跑**，不再有歧义；
+- ~~/cava pathfind stats~~ 报 ~~benchRuns= / benchSeq=~~；并发 bench 会被拒绝（不打无效样本）。
+
+**（2）驱动侧：只认日志回执**（~~build/cava-p1b/bench-run.ps1~~，工作产物）
+发完 RCON 命令后**轮询日志**等 ~~BENCH id=<下一个>~~，校验 ~~ok=true~~ 与 id 单调；
+拿不到回执就报 ~~SAMPLE INVALID~~ 并重试/剔除，绝不进平均值。
+
+**两个真实事故（都是这份驱动自己犯的）**：
+1. **固定 sleep 后杀服务端**：20000 次 × 430 µs ≈ 8.6 s 的采样在 5 s 时被杀 ⇒
+   日志没有 BENCH 行、~~nativeCalls~~ 也没涨，**看起来像「命令没执行」**。
+   （captain 一开始也怀疑是 ~~tools/rcon.ps1~~；实测根因在我这边。）
+2. **回执匹配到上一轮的陈旧行**：第一版用 ~~Select-String | Select-Object -Last 1~~ 匹配 ~~BENCH id=1~~，
+   于是 3 次采样全部匹配到**同一行**，报出 3 个「VALID」且 ~~ns/op~~ **完全相同** —— 
+   这个「三次一模一样」就是无效采样的指纹。修法：先数日志里已有的 BENCH 行数，只接受**新增**的行，
+   并把 id 校验改成**单调下限**（用等式曾误杀过两个好样本）。
+
+### 2.8 环境坑：~~testbed/gate-preview~~ 是**多 agent 共用**的
+
+实测 15:46:36 另一个 agent 在同一个目录、同一份 ~~server.properties~~ 上起了自己的服务端
+（留下 ~~takeover-run.log~~，并把 ~~server.properties~~ 的修改时间刷成 15:46:44），
+我的采样进程随即被挤掉（RCON ~~connection refused~~、BENCH 行始终不出现）。
+**这不是模组崩溃**：目录里**没有任何 ~~hs_err_pid*.log~~**（JVM 硬崩溃一定会留）。
+⇒ 需要可信测量时，**必须用私有目录 + 私有端口**（~~testbed/p1b-bench~~，25598/25574）。
+
 ---
 
 ## 3. 设计要点与**踩到的坑**（都可复现）
@@ -307,6 +368,26 @@ captain 复核后认定**根因是他的契约设计错了**（不是 A 的实�
 现在只有一条路：~~MobInputs.build(mob, maker)~~ 产出 ~~MobProfileData~~ →
 ~~mirror.uploadProfileForSolve(handle, seg -> profile.writeTo(seg, 0))~~。
 **不存在"两个生产者"，也不需要互斥桥。**
+
+### 4.6 ⚠ **新的头号请求：区域 ABI 的「每次重推整个长方体」是当前瓶颈**
+
+~~cava_region_upload~~ 的模型是「一次推一个有界长方体」，而注入流每次求解前都必须重推
+（区域是每次求解的输入）。在 ~~maxRange=16~~ 的真实场景下，正确性要求窗口至少 ±ceil(maxRange)+1
+（见 ~~RegionWindow~~ 的推导），于是**每次求解 memcpy 42875 个 state id**：
+
+    [cava/mirror] 区域推送 #4000 35x35x35=42875 cells=42875 填=280us 分配拷贝=34us 上传=2us 总=320us
+    （对照：vanilla 整个 findPathToAny ≈ 33 µs）
+
+**请求（给 captain / 镜像流 / 原生流，任选其一，都不在本流路径上）**：
+1. **增量/脏标记模型**：~~cava_region_upload~~ 改成「只推变化的方块」或用「区域句柄 + 失效范围」，
+   让镜像侧可以跨求解复用（A 的 ~~pushReusingSameTick~~ / ~~onBlockChanged~~ 已经是这个方向，
+   但它不在冻结接口 ~~RegionSource.push(minX..dimZ)~~ 里，注入流够不到）；
+2. **或者把「窗口」交给镜像侧决定**：注入流只给 (start, target, maxRange, budget)，
+   由镜像侧用它自己的区段缓存决定推什么；
+3. **或者缩小窗口语义**：如果内核能接受「区域外 = 不可通行」而不是「区域外 = 无碰撞空气」，
+   窗口就能按节点预算而非 maxRange 来定，体积小一个数量级。
+
+**在 1/2/3 任一落地之前，打开原生路径都是净亏**（当前实测 13.9×）。
 
 ### 4.5 其他接口请求
 

@@ -44,7 +44,37 @@ public final class PathfindBench {
 
     private static final Logger LOG = LoggerFactory.getLogger("cava/pathfind");
 
+    /**
+     * bench 的**可校验回执**机制（captain 2026-09-22 要求）。
+     *
+     * <p>动机（本机实测的事故）：我用固定 sleep 后杀服务端的脚本驱动 bench，
+     * 20000 次 × 430 µs ≈ 8.6 s 的采样在 5 s 时就被杀了 ⇒ 日志里没有 BENCH 行、
+     * {@code nativeCalls} 也没涨，看起来像"命令没执行"。**如果这种无效采样混进平均值，
+     * 任何性能结论都是噪声。** 所以：
+     * <ul>
+     *   <li>每次 bench 有单调递增的 {@code id}；</li>
+     *   <li>**无论成功失败都打印一行** {@code BENCH id=... ok=...}（失败也有行 ⇒ 缺行 = 命令真的没跑）；</li>
+     *   <li>{@code /cava pathfind stats} 报 {@code benchRuns=}，驱动方可据此判断命令有没有被派发。</li>
+     * </ul>
+     */
+    private static final java.util.concurrent.atomic.AtomicLong BENCH_SEQ =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong BENCH_DONE =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicBoolean BENCH_RUNNING =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     private PathfindBench() {
+    }
+
+    /** 已完成的 bench 次数（回执校验用）。 */
+    public static long benchRuns() {
+        return BENCH_DONE.get();
+    }
+
+    /** 已派发的 bench 序号（诊断用）。 */
+    public static long benchSeq() {
+        return BENCH_SEQ.get();
     }
 
     private static final java.util.concurrent.atomic.AtomicBoolean REGISTERED =
@@ -94,7 +124,8 @@ public final class PathfindBench {
     }
 
     private static int stats(ServerCommandSource source) {
-        String line = "[cava/pathfind] " + PathfindHook.INSTANCE.stats() + " | " + PathfindSwitches.describe()
+        String line = "[cava/pathfind] benchRuns=" + BENCH_DONE.get() + " benchSeq=" + BENCH_SEQ.get()
+                + " | " + PathfindHook.INSTANCE.stats() + " | " + PathfindSwitches.describe()
                 + " | " + PathfindMirrorBridge.describe();
         LOG.info(line);
         source.sendFeedback(() -> Text.literal(line), false);
@@ -111,13 +142,25 @@ public final class PathfindBench {
     }
 
     private static int bench(ServerCommandSource source, int count) {
+        long id = BENCH_SEQ.incrementAndGet();
+        if (!BENCH_RUNNING.compareAndSet(false, true)) {
+            // 并发 bench 会互相污染（同一只生物、同一份统计）⇒ 明确拒绝，不打无效样本
+            String busy = "[cava/pathfind] BENCH id=" + id + " ok=false reason=busy";
+            LOG.warn(busy);
+            source.sendError(Text.literal(busy));
+            return 0;
+        }
         MinecraftServer server = source.getServer();
         ServerWorld world = server.getOverworld();
         Object[] found = PathfindScenario.findOrCreateMob(world);
         MobEntity mob = (MobEntity) found[0];
         boolean created = Boolean.TRUE.equals(found[1]);
         if (mob == null) {
-            source.sendError(Text.literal("[cava/pathfind] bench：找不到也无法创建可用的生物"));
+            String bad = "[cava/pathfind] BENCH id=" + id + " ok=false reason=no-mob n=" + count;
+            LOG.warn(bad);
+            source.sendError(Text.literal(bad));
+            BENCH_DONE.incrementAndGet();
+            BENCH_RUNNING.set(false);
             return 0;
         }
         try {
@@ -126,6 +169,7 @@ public final class PathfindBench {
             }
             long canaryBefore = PathfindHook.INSTANCE.canaryCount();
             long takeoversBefore = PathfindHook.INSTANCE.takeovers();
+            long nativeBefore = PathfindHook.INSTANCE.nativeCalls();
             long t0 = System.nanoTime();
             long nodes = 0;
             int nulls = 0;
@@ -140,16 +184,27 @@ public final class PathfindBench {
             long dt = System.nanoTime() - t0;
             long canaryDelta = PathfindHook.INSTANCE.canaryCount() - canaryBefore;
             long takeovers = PathfindHook.INSTANCE.takeovers() - takeoversBefore;
+            long nativeDelta = PathfindHook.INSTANCE.nativeCalls() - nativeBefore;
             double nsPerOp = (double) dt / (double) count;
+            // ok 的判据：**每一次调用都真的穿过了注入点**（canaryDelta == n）。
+            // 这是回执校验的核心：驱动方只要读到 ok=true 且 id 对得上，这次采样就是有效的。
+            boolean ok = canaryDelta == count;
             String line = String.format(java.util.Locale.ROOT,
-                    "[cava/pathfind] BENCH n=%d ns/op=%.1f totalMs=%.1f avgNodes=%.2f nullPaths=%d "
-                            + "canaryDelta=%d(expect %d) takeovers=%d | %s | %s",
-                    count, nsPerOp, dt / 1.0e6, (double) nodes / (double) count, nulls,
-                    canaryDelta, count, takeovers, PathfindSwitches.describe(), PathfindHook.INSTANCE.stats());
+                    "[cava/pathfind] BENCH id=%d ok=%s n=%d ns/op=%.1f totalMs=%.1f avgNodes=%.2f nullPaths=%d "
+                            + "canaryDelta=%d expect=%d takeovers=%d nativeCallsDelta=%d | %s",
+                    id, ok, count, nsPerOp, dt / 1.0e6, (double) nodes / (double) count, nulls,
+                    canaryDelta, count, takeovers, nativeDelta, PathfindSwitches.describe());
             LOG.info(line);
             source.sendFeedback(() -> Text.literal(line), false);
-            return canaryDelta == count ? 1 : 0;
+            BENCH_DONE.incrementAndGet();
+            return ok ? 1 : 0;
+        } catch (Throwable t) {
+            // **失败也必须留下回执行**，否则"缺行"无法区分"命令没跑"和"跑挂了"
+            LOG.error("[cava/pathfind] BENCH id=" + id + " ok=false reason=exception n=" + count, t);
+            BENCH_DONE.incrementAndGet();
+            return 0;
         } finally {
+            BENCH_RUNNING.set(false);
             if (created) {
                 mob.discard();
             }

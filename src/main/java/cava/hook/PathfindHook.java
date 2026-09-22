@@ -302,14 +302,7 @@ public final class PathfindHook {
             }
             count("flags-gate-bypassed");
         }
-        // (4) 区域窗口（保守策略，见 RegionWindow）
-        RegionWindow.Window window = RegionWindow.compute(mob.getBlockX(), mob.getBlockY(), mob.getBlockZ(),
-                maxRange, world.getBottomY(), world.getTopY(), PathfindSwitches.maxRegionBlocks());
-        if (window == null) {
-            count("window-rejected");
-            return null;
-        }
-        // (5) 原版节点预算（oracle spec 4.1）
+        // (4) 原版节点预算（oracle spec 4.1）
         int budget = (int) ((float) range * followRange);
         if (budget <= 0) {
             count("budget-nonpositive");
@@ -320,9 +313,13 @@ public final class PathfindHook {
         nativeLock.lock();
         try {
             long t0 = System.nanoTime();
+            // 窗口策略归**镜像侧**（captain 2026-09-22 裁决，契约 pushForSolve）：
+            // 实测"注入流每次自己算并重推 35³=42875 格"≈320 µs/次，而 vanilla 整个求解只要 ≈33 µs
+            // ⇒ 打开原生反而慢 13.9 倍。现在只给起点/终点/体型，推什么、要不要复用由镜像侧决定。
             try {
-                mirror.push(window.minX(), window.minY(), window.minZ(),
-                        window.dimX(), window.dimY(), window.dimZ());
+                mirror.pushForSolve(mob.getBlockX(), mob.getBlockY(), mob.getBlockZ(),
+                        target.getX(), target.getY(), target.getZ(),
+                        profile.width, profile.height, profile.safeFallDistance);
             } catch (RegionSource.MirrorUnavailableException e) {
                 count("mirror-unavailable");
                 return null;

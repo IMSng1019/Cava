@@ -16,8 +16,6 @@ package cava.hook;
  *       <td>SERVER_STARTED（或首个 tick）后主动触发一次目标方法，断言金丝雀计数 +1。</td></tr>
  *   <tr><td>{@code cava.pathfind.probe.ticks}</td><td>600</td>
  *       <td>探测最长等待多少个服务端 tick（等世界/生物就绪）。超时 = 计数为 0 的失败路径。</td></tr>
- *   <tr><td>{@code cava.pathfind.maxRegionBlocks}</td><td>8000000</td>
- *       <td>单次区域推送的体积上限（方块数）；超过就回退原逻辑（不做部分推送）。</td></tr>
  * </table>
  *
  * <p>为什么不把开关放进 {@code config/cava.json}：那需要改 {@code cava/CavaConfig.java}（不是本流的文件）。
@@ -33,8 +31,8 @@ public final class PathfindSwitches {
     public static final String PROP_PROBE = "cava.pathfind.probe";
     /** 金丝雀探测的最长等待 tick 数。 */
     public static final String PROP_PROBE_TICKS = "cava.pathfind.probe.ticks";
-    /** 区域推送体积上限（方块数）。 */
-    public static final String PROP_MAX_REGION_BLOCKS = "cava.pathfind.maxRegionBlocks";
+    // 说明：原来还有一个 -Dcava.pathfind.maxRegionBlocks（注入流自己算区域窗口时的体积上限）。
+    // 契约加了 pushForSolve 之后**窗口策略归镜像侧**，注入流不再算窗口 ⇒ 该开关已删除。
     // 说明：原来这里有一个 -Dcava.mirror.class=<实现类名>（注入流靠反射按名字找实现）。
     // captain 2026-09-22 加了契约入口 cava.mirror.MirrorFactory 之后，**它已删除** ——
     // "靠反射猜实现类"被实测证明会伪装成"子系统缺失"（reasons={mirror-missing=20201}）。
@@ -52,8 +50,6 @@ public final class PathfindSwitches {
      */
     public static final String PROP_BYPASS_PROFILE_GATE = "cava.pathfind.diagnostic.bypassProfileGate";
 
-    /** {@link #PROP_MAX_REGION_BLOCKS} 的默认值。 */
-    public static final long DEFAULT_MAX_REGION_BLOCKS = 8_000_000L;
     /** {@link #PROP_PROBE_TICKS} 的默认值。 */
     public static final int DEFAULT_PROBE_TICKS = 600;
 
@@ -77,10 +73,6 @@ public final class PathfindSwitches {
 
     public static int probeTicks() {
         return (int) readLong(PROP_PROBE_TICKS, DEFAULT_PROBE_TICKS);
-    }
-
-    public static long maxRegionBlocks() {
-        return readLong(PROP_MAX_REGION_BLOCKS, DEFAULT_MAX_REGION_BLOCKS);
     }
 
     /** 见 {@link #PROP_BYPASS_PROFILE_GATE}：**仅供诊断**。 */
@@ -130,7 +122,6 @@ public final class PathfindSwitches {
                 + " native=" + nativeTakeoverEnabled()
                 + " probe=" + probeEnabled()
                 + " bypassProfileGate=" + bypassProfileGate()
-                + " probeTicks=" + probeTicks()
-                + " maxRegionBlocks=" + maxRegionBlocks();
+                + " probeTicks=" + probeTicks();
     }
 }

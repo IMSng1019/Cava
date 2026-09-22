@@ -121,6 +121,25 @@ Java 的 `MemoryLayout` 镜像、以及**两侧算出的 `layout_hash_sum`**。�
 > 为什么两套都要：如果只把"人给的字段表"抄进硬编码表，**两张表会照同一份错理解一起错**，测试反而"通过"。
 > 只有机械表能抓住 `CavaPathNode` 漏字段那一类。**"测试通过"不等于"理解正确"。**
 
+### 本轮附带修掉的一个"假绿"（值得单独记）
+
+`cava.ffm.PathfindAbiTest` 的 6 个用例在**每一次** `gradlew test` 里都是 **skipped**：
+测试任务强制 `cava.native.enabled=false`，于是 `tryOpen()` 返回 `DISABLED_BY_FLAG`，整类命中 assumption。
+**构建一直是绿的，但整个原生 ABI 一次都没被测到 —— "绿"不等于"测过"。**
+
+修法：测试任务把两个开关**成对**决定（工作区里有 `natives/windows-x64/cava.dll` 就打开原生并指过去；
+没有就关掉原生、跑纯 Java 回退）。两条路都实测过：
+
+    有 dll  -> PathfindAbiTest ran=6 skipped=0 ；NativeFallbackTest skipped
+    无 dll  -> NativeFallbackTest ran=2 skipped=0 ；PathfindAbiTest skipped
+
+### 验证这类事情时的一个陷阱（我自己先踩了一次）
+
+我第一次验"无 dll"是直接把 dll 改名后跑 `gradlew test` —— **结论是错的**，
+因为 **Gradle configuration cache 复用了 dll 还在时算出的那个决定**。
+**凡是依赖"配置期文件是否存在"的验证，必须加 `--no-configuration-cache` 重跑**，
+否则你测的是缓存，不是代码。（我是用一个临时测试打印测试 JVM 真正看到的系统属性才确认这一点的。）
+
 ### 已知且可接受的弱点
 `layout_hash` 公式**不区分字段数/形状相同的结构体**：`CavaPathNode` 与 `CavaCollisionBox` 的
 hash 都是 `0x250ECBE1`。所以**哈希只做"整体漂移"的粗筛**，真正的护栏是**逐字段全表比对**。

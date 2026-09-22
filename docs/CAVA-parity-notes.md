@@ -9,7 +9,7 @@
 
 | 层 | 形态 | 结果 |
 | --- | --- | --- |
-| **单元层** | Java → FFM → **C ABI** → 原生内核 vs oracle 参照实现，10000 组向量 | **ZERO DIFF over 10000 cases**（本机 ~4 s） |
+| **单元层** | Java → FFM → **C ABI** → 原生内核 vs oracle 参照实现，10000 组向量 | **ZERO DIFF over 10000 cases**（本机 ~4 s；**在实体 ABI 冻结后的 DLL 上复验过**：`java_sum=0x1c12265e`、14 个结构体） |
 | 单元层（C++ 侧对照） | `cava_pathfind_vectors.exe`（现场重编译）直接调 `solve()`，10000 组全字段逐位 | **mismatches=0** |
 | 单元层（负控制） | 故意把 `CAN_SWIM` 填到错误的 caps 位 | **检出 126 处差异 / 11 组** ⇒ 比对器不是瞎的 |
 | **场景层** | 私有测试服 + 脚本化合成场景，native off×2 与 on×1，逐 tick NDJSON 比对 | 见 §4.1（真实数字） |
@@ -107,7 +107,11 @@
     ZERO DIFF over 10000 cases
 
 **腿 3（负控制）**：`-Dcava.parity.selftest.wrongCaps=true` 把 `CAN_SWIM` 填到 `1<<2`，
-输出 `负控制结果: PASS（检出 126 处差异，首个 nodeCount）`。
+输出 `负控制结果: PASS（检出 N 处差异，首个 nodeCount）`。
+**N 随内核版本变化**：在 15:44 那个 DLL 上是 **126 处**；在实体 ABI 冻结之后重编的 DLL
+（`java_sum=0x1c12265e`、14 个结构体）上是 **20 处**。判据只有一个：**必须 > 0**。
+⚠️ 负控制腿**必须跑够组数**（首个敏感组是 #1281）：只跑前 50 组会得到"零差异"，
+从而把"比对器是瞎的"这个错误结论报出来 —— 本机实测踩过一次，现在固定跑 `max(maxCases, 2500)`。
 
 **CI 化**：`src/test/java/cava/parity/PathfindVectorParityTest.java` 被现有的 `gradlew test` 自动收集
 （**没有改 build.gradle**）。实测 `build/test-results/test/TEST-cava.parity.PathfindVectorParityTest.xml`：
@@ -369,3 +373,6 @@ native on 腿 `takeovers=2000/2000`（每一次调用都被原生接管，hook �
    "实体层零差异"这句话本轮**不能说**。
 9. **mod 矩阵的纯原版档**只有脚本、没有实跑（`testbed/parity` 里铺的是整合包 33 jar）；
    整合包档 = §4.1 的三条腿。
+10. **本轮单元层结论是在两代 ABI 上各测一次**：P1 的 9 结构体 DLL（`java_sum=0x6975cbf9`）与
+   实体 ABI 冻结后的 14 结构体 DLL（`java_sum=0x1c12265e`），两次都是 10000 组 ZERO DIFF。
+   但**路径内核若在实体流里被动过，本流的数字就不再代表当前 HEAD** —— 复跑一条命令即可（`tools/parity-unit.ps1`）。

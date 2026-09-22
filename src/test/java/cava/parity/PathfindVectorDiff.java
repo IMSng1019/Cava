@@ -1192,7 +1192,10 @@ public final class PathfindVectorDiff {
             String key = "cava.parity.selftest.wrongCaps";
             System.setProperty(key, "true");
             System.out.println("---- 负控制：-D" + key + "=true（CAN_SWIM 填到 1<<2 而不是 1<<6）----");
-            Result bad = run(shardList.get(0), maxCases, false, false);
+            // 负控制腿**必须跑够组数**：这个错误喂入的指纹是"126 处 / 11 组"，首个敏感组是 #1281
+            // （场景 MIXED + 会游泳的 mob + 水格）。只跑前 50 组会得到"零差异"，
+            // 从而把"比对器是瞎的"这个错误结论报出来 —— 本机实测踩过一次。
+            Result bad = run(shardList.get(0), Math.max(maxCases, 2500), false, false);
             System.clearProperty(key);
             boolean detected = !bad.zeroDiff();
             negativeOk = detected;

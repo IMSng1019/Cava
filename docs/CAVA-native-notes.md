@@ -231,6 +231,46 @@ RESULT: PASS   exit 0
 无参运行 `cava_fp_probe.exe`（CTest 就是这么调的）**不写任何文件**，只打印 SKIP 提示，
 避免测试运行悄悄改写 git 里的黄金向量。
 
+### 5.4 「cava_selftest 退出码 1」事件复核（captain 广播 #3 的 P0-B 项）
+
+**结论：当前无法复现，且证据表明那是一次共享产物被并发覆盖造成的假失败，不是实现缺陷。**
+
+三条独立复核（全部实测，2026-09-22 本轮）：
+
+1. **P0-D 当时用的那个 exe 现在直接跑就是全绿**（没有重新编译它）：
+
+~~~
+$env:PATH = 'C:\mingw64\bin;J:\mc\Cava\natives\windows-x64;' + $env:PATH
+& 'J:\mc\Cava\build\native-mingw\native\tests\cava_test_cava_selftest.exe'
+...
+=== SUMMARY: 67 passed, 0 failed ===
+RESULT: PASS
+EXITCODE=0
+~~~
+
+   同一批次另外两个 exe（`build\native\native\tests\…`、`build\recon\linktest\…`）同样是 67 passed / exit 0；
+   只有 `build\native-p0d-mingw\…` 那个还是 `0xc0000135`（STATUS_DLL_NOT_FOUND，即它当时是在**没有静态运行库**的
+   DLL 上链的，见 7.2）。
+
+2. **用 P0-A 的 CMake 旗标 + 宏 + 链接模型（C++20、exe 只编测试文件、链 `cava.dll` 的导入库）
+   在`native/build/p0b-shared/`下重造一对一致产物，跑出来 67/67、exit 0** ——
+   即「CMake 链路本身」不会导致失败。
+
+3. 三种本机构建（c++17 / c++20 / CAVA_SAFE=1）各 67/67，见 5.1。
+
+**最可能的原因**：13:51→13:53 之间 `natives\windows-x64\cava.dll` 被两个流先后覆盖
+（captain 广播 #3 的「决定 3」记录了同一时段 116933B → 114904B 的两次写入）。
+CTest 的 exe 是**按名字**从 `natives\windows-x64\` 加载 DLL 的，覆盖瞬间加载到的映像与链 exe 时用的导入库
+不是同一份，于是出现「ABI 段通过、后续段失败」这种错位失败。
+换成一致产物后同一批 exe 全部全绿，与该解释一致。
+
+**给 captain 的回填建议**：把上面第 1 条的完整输出贴进 `docs/CAVA-p0-acceptance.md` 的 3.2 节即可结案；
+若要**权威的 ctest 输出**，请在「同一时刻只有一个流跑原生构建」的前提下（决定 3）跑一次
+`ctest --test-dir build/native-mingw --output-on-failure`，并把 P0-A 的静态运行库修复（7.2）先落地 ——
+否则 exe 仍然依赖 `C:\mingw64\bin` 里的三个 DLL。P0-B 不主动往 `natives/` 写（遵守决定 3）。
+
+---
+
 ---
 
 ## 6. fp_probe 结论（B4，本节是 P0 最重要的证据）

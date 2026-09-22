@@ -47,10 +47,33 @@ public final class CavaBindings {
     public static final String SYM_BITS_OF_DOUBLE = "cava_bits_of_double";
     public static final String SYM_DOUBLE_OF_BITS = "cava_double_of_bits";
 
-    /** 全部必须存在（缺一个就回退纯 Java）。 */
+    // ---- P1：生物寻路 + 镜像侧 ABI ----
+    /** {@code int32_t cava_pathfind(int64_t, const CavaPathRequest*, CavaPathNode*, int32_t cap)}。 */
+    public static final String SYM_PATHFIND = "cava_pathfind";
+    /** {@code int32_t cava_mob_profile_upload(int64_t, const CavaMobProfile*)}。 */
+    public static final String SYM_MOB_PROFILE_UPLOAD = "cava_mob_profile_upload";
+    /** {@code int32_t cava_mob_profile_clear(int64_t)}。 */
+    public static final String SYM_MOB_PROFILE_CLEAR = "cava_mob_profile_clear";
+    /** {@code int32_t cava_state_table_upload(int64_t, const CavaStateRecord*, int32_t, const CavaCollisionBox*, int32_t)}。 */
+    public static final String SYM_STATE_TABLE_UPLOAD = "cava_state_table_upload";
+    /** {@code int32_t cava_region_upload(int64_t, int32 维度 x3, int32 原点 x3, const int32_t*, int32_t)}。 */
+    public static final String SYM_REGION_UPLOAD = "cava_region_upload";
+    /** {@code int32_t cava_region_clear(int64_t)}。 */
+    public static final String SYM_REGION_CLEAR = "cava_region_clear";
+    /** {@code int32_t cava_region_state_id_at(int64_t, int32_t, int32_t, int32_t, int32_t*)}。 */
+    public static final String SYM_REGION_STATE_ID_AT = "cava_region_state_id_at";
+
+    /**
+     * 全部必须存在（缺一个就 {@link NativeStatus#LOAD_FAILED} → 整体回退纯 Java）。
+     *
+     * <p>P1 的 7 个符号也在必需列表里：ABI 是一个整体，少一个入口整个库就不该被用；
+     * 而且结构体数量变化本来就会让布局自检的 entry_count 对不上。
+     */
     public static final List<String> REQUIRED_SYMBOLS = List.of(
             SYM_BUILD_ID, SYM_ABI_TOUCH, SYM_ABI_VERSION, SYM_LAYOUT_REPORT,
-            SYM_OPEN, SYM_CLOSE, SYM_D2I_SAT, SYM_D2L_SAT, SYM_BITS_OF_DOUBLE, SYM_DOUBLE_OF_BITS);
+            SYM_OPEN, SYM_CLOSE, SYM_D2I_SAT, SYM_D2L_SAT, SYM_BITS_OF_DOUBLE, SYM_DOUBLE_OF_BITS,
+            SYM_PATHFIND, SYM_MOB_PROFILE_UPLOAD, SYM_MOB_PROFILE_CLEAR, SYM_STATE_TABLE_UPLOAD,
+            SYM_REGION_UPLOAD, SYM_REGION_CLEAR, SYM_REGION_STATE_ID_AT);
 
     /** 原生调用抛出任何 Throwable 时的包装（Numeric/CavaNative 会捕获它并回退）。 */
     public static final class CallFailure extends RuntimeException {
@@ -78,6 +101,13 @@ public final class CavaBindings {
     private final MethodHandle hD2lSat;
     private final MethodHandle hBitsOfDouble;
     private final MethodHandle hDoubleOfBits;
+    private final MethodHandle hPathfind;
+    private final MethodHandle hMobProfileUpload;
+    private final MethodHandle hMobProfileClear;
+    private final MethodHandle hStateTableUpload;
+    private final MethodHandle hRegionUpload;
+    private final MethodHandle hRegionClear;
+    private final MethodHandle hRegionStateIdAt;
 
     private CavaBindings(Path libraryPath, String lookupKind, Arena lookupArena, Linker linker, SymbolLookup lookup)
             throws NativeLibrary.Failure {
@@ -112,6 +142,28 @@ public final class CavaBindings {
                 FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_DOUBLE));
         this.hDoubleOfBits = downcall(linker, lookup, SYM_DOUBLE_OF_BITS,
                 FunctionDescriptor.of(ValueLayout.JAVA_DOUBLE, ValueLayout.JAVA_LONG));
+
+        // P1：全部是指针/标量参数。(指针,长度) 同源由调用方（CavaNative 的封装）负责。
+        this.hPathfind = downcall(linker, lookup, SYM_PATHFIND,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+        this.hMobProfileUpload = downcall(linker, lookup, SYM_MOB_PROFILE_UPLOAD,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
+        this.hMobProfileClear = downcall(linker, lookup, SYM_MOB_PROFILE_CLEAR,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG));
+        this.hStateTableUpload = downcall(linker, lookup, SYM_STATE_TABLE_UPLOAD,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+        this.hRegionUpload = downcall(linker, lookup, SYM_REGION_UPLOAD,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG,
+                        ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
+                        ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
+                        ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+        this.hRegionClear = downcall(linker, lookup, SYM_REGION_CLEAR,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG));
+        this.hRegionStateIdAt = downcall(linker, lookup, SYM_REGION_STATE_ID_AT,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG,
+                        ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
     }
 
     private static MethodHandle downcall(Linker linker, SymbolLookup lookup, String symbol, FunctionDescriptor desc) {
@@ -248,6 +300,91 @@ public final class CavaBindings {
             return (double) hDoubleOfBits.invokeExact(bits);
         } catch (Throwable t) {
             throw new CallFailure(SYM_DOUBLE_OF_BITS, t);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // P1：生物寻路 + 镜像侧 ABI（全部是指针/标量，无按值结构体）
+    // ------------------------------------------------------------------
+
+    /**
+     * {@code cava_pathfind}：返回值 >0 = 节点数；0 = 无路径；<0 = 错误码。
+     *
+     * <p>{@code req} 必须是 {@link CavaLayouts#PATH_REQUEST} 的实例，
+     * {@code out} 必须是 {@code allocateArray(PATH_NODE, cap)} 的数组 ——
+     * **绝不能用 {@code arena.allocate(JAVA_INT, n)}**（那是「一个 int、值 n」，只有 4 字节）。
+     */
+    public int pathfind(long handle, MemorySegment req, MemorySegment out, int cap) {
+        try {
+            return (int) hPathfind.invokeExact(handle, req, out, cap);
+        } catch (Throwable t) {
+            throw new CallFailure(SYM_PATHFIND, t);
+        }
+    }
+
+    /** {@code cava_mob_profile_upload}：非法字段（width&lt;=0 / NaN 等）→ {@code CAVA_ERR_ARG} 且不改动已有档案。 */
+    public int mobProfileUpload(long handle, MemorySegment profile) {
+        try {
+            return (int) hMobProfileUpload.invokeExact(handle, profile);
+        } catch (Throwable t) {
+            throw new CallFailure(SYM_MOB_PROFILE_UPLOAD, t);
+        }
+    }
+
+    /** {@code cava_mob_profile_clear}：幂等。 */
+    public int mobProfileClear(long handle) {
+        try {
+            return (int) hMobProfileClear.invokeExact(handle);
+        } catch (Throwable t) {
+            throw new CallFailure(SYM_MOB_PROFILE_CLEAR, t);
+        }
+    }
+
+    /**
+     * {@code cava_state_table_upload}：一次性上传方块状态表。
+     *
+     * <p>{@code records} = {@code allocateArray(STATE_RECORD, recordCount)}，
+     * {@code boxes} = {@code allocateArray(COLLISION_BOX, boxCount)}（boxCount 可为 0，此时传 null 或空数组）。
+     */
+    public int stateTableUpload(long handle, MemorySegment records, int recordCount,
+                               MemorySegment boxes, int boxCount) {
+        try {
+            return (int) hStateTableUpload.invokeExact(handle, records, recordCount, boxes, boxCount);
+        } catch (Throwable t) {
+            throw new CallFailure(SYM_STATE_TABLE_UPLOAD, t);
+        }
+    }
+
+    /**
+     * {@code cava_region_upload}：把 {@code dim_x*dim_y*dim_z} 个 state id 推进原生区域缓存。
+     *
+     * <p>索引顺序 = {@code ((y*dim_z)+z)*dim_x+x}（x 最快、y 最慢）。
+     * {@code ids} 必须是 {@code allocateArray(JAVA_INT, idCount)}。
+     */
+    public int regionUpload(long handle, int dimX, int dimY, int dimZ,
+                            int originX, int originY, int originZ, MemorySegment ids, int idCount) {
+        try {
+            return (int) hRegionUpload.invokeExact(handle, dimX, dimY, dimZ, originX, originY, originZ, ids, idCount);
+        } catch (Throwable t) {
+            throw new CallFailure(SYM_REGION_UPLOAD, t);
+        }
+    }
+
+    /** {@code cava_region_clear}：幂等。 */
+    public int regionClear(long handle) {
+        try {
+            return (int) hRegionClear.invokeExact(handle);
+        } catch (Throwable t) {
+            throw new CallFailure(SYM_REGION_CLEAR, t);
+        }
+    }
+
+    /** {@code cava_region_state_id_at}：{@code outStateId} = {@code arena.allocate(JAVA_INT)}（一个 int）。 */
+    public int regionStateIdAt(long handle, int x, int y, int z, MemorySegment outStateId) {
+        try {
+            return (int) hRegionStateIdAt.invokeExact(handle, x, y, z, outStateId);
+        } catch (Throwable t) {
+            throw new CallFailure(SYM_REGION_STATE_ID_AT, t);
         }
     }
 

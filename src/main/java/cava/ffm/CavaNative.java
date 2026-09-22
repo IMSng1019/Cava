@@ -1,6 +1,7 @@
 package cava.ffm;
 
 import java.lang.foreign.Arena;
+import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Path;
@@ -31,6 +32,17 @@ public final class CavaNative {
     /** 系统属性：false = 完全不加载原生库。 */
     public static final String PROP_ENABLED = "cava.native.enabled";
 
+    /**
+     * 原生不可用（{@code status != OPEN}）时，所有 P1 入口返回的统一回退信号。
+     *
+     * <p>取值在 ABI 的错误码区间（-1..-7）之外，Java 侧自有码从 -100 起，
+     * 调用方只需判断 {@code rc < 0} 即回退原逻辑；想区分"原生没开"与"原生报错"时比这个常量。
+     */
+    public static final int ERR_NATIVE_UNAVAILABLE = -100;
+
+    /** 原生调用抛异常（已记录一次日志）时的回退信号。 */
+    public static final int ERR_CALL_FAILED = -101;
+
     private static final Logger LOG = LoggerFactory.getLogger("cava/native");
     private static final CavaNative INSTANCE = new CavaNative();
 
@@ -56,9 +68,7 @@ public final class CavaNative {
     private int nativeEntryCount = 0;
     private long touchCount = -1;
     private long javaLayoutSum = 0;
-    private long javaLayoutSumBytes = 0;
     private long nativeLayoutSum = -1;
-    private boolean layoutByteWiseVariant = false;
     private String fieldTable = "";
     private Path libraryPath;
     private String libraryInfo = "(未加载)";
@@ -149,16 +159,8 @@ public final class CavaNative {
         return javaLayoutSum;
     }
 
-    public long javaLayoutSumBytes() {
-        return javaLayoutSumBytes;
-    }
-
     public long nativeLayoutSum() {
         return nativeLayoutSum;
-    }
-
-    public boolean layoutByteWiseVariant() {
-        return layoutByteWiseVariant;
     }
 
     public String fieldTable() {
@@ -214,9 +216,9 @@ public final class CavaNative {
             LOG.info("[cava/native] {} —— 这是正常路径，走纯 Java", detail);
             return false;
         }
-        javaLayoutSum = LayoutCheck.javaSide().sumU32();
-        javaLayoutSumBytes = LayoutCheck.javaSide().sumBytes();
-        fieldTable = LayoutCheck.javaSide().fieldTable();
+        LayoutCheck.JavaSide javaSide = LayoutCheck.javaSide();
+        javaLayoutSum = javaSide.sumU32();
+        fieldTable = javaSide.fieldTable();
 
         // Java 侧自身的一致性（与 C 编译器期望的 offsetof 比对）——不依赖原生库
         List<String> selfProblems = CavaLayouts.checkAgainstCAbi();
@@ -262,8 +264,7 @@ public final class CavaNative {
         buildFlags = report.buildFlags();
         buildIdHash = report.buildIdHash();
         nativeEntryCount = rc;
-        LayoutCheck.Result lr = LayoutCheck.compare(LayoutCheck.javaSide(), report);
-        layoutByteWiseVariant = lr.useByteWiseSum();
+        LayoutCheck.Result lr = LayoutCheck.compare(javaSide, report);
         if (!lr.ok()) {
             status = NativeStatus.LAYOUT_MISMATCH;
             detail = String.join("; ", lr.problems());
@@ -271,23 +272,15 @@ public final class CavaNative {
             return false;
         }
         for (String note : lr.notes()) {
-            LOG.warn("[cava/native] [协商] {}", note);
+            LOG.warn("[cava/native] {}", note);
         }
-        LOG.info("[cava/native] 布局自检通过：native_entries={} java_sum=0x{} native_sum(per-entry u32 sum)=0x{}\n{}",
+        LOG.info("[cava/native] 布局自检通过：native_entries={} java_sum=0x{} native_sum(per-entry sum)=0x{}\n{}",
                 nativeEntryCount, Long.toHexString(lr.sumToSendInOpenParams()),
                 Long.toHexString(sumOfReportHashes(report)), fieldTable);
 
-        // cava_open：先用协商出的变体；若原生用另一种变体算和，会返回 CAVA_ERR_LAYOUT，再试另一种
-        long primarySum = lr.sumToSendInOpenParams();
-        long alternateSum = layoutByteWiseVariant ? javaLayoutSum : javaLayoutSumBytes;
-        int openRc = openOnce(b, arena, primarySum, report);
-        if (openRc == CavaLayouts.CAVA_ERR_LAYOUT && primarySum != alternateSum) {
-            LOG.warn("[cava/native] cava_open 返回 CAVA_ERR_LAYOUT（layout_hash_sum 变体不符），改用另一种变体重试一次");
-            openRc = openOnce(b, arena, alternateSum, report);
-            if (openRc == CavaLayouts.CAVA_OK) {
-                layoutByteWiseVariant = !layoutByteWiseVariant;
-            }
-        }
+        // 唯一权威公式（cava_abi.h 2026-09-22 裁定）已经定死，不再做变体协商
+        long layoutSum = lr.sumToSendInOpenParams();
+        int openRc = openOnce(b, arena, layoutSum);
         if (openRc != CavaLayouts.CAVA_OK) {
             status = openRc == CavaLayouts.CAVA_ERR_LAYOUT ? NativeStatus.LAYOUT_MISMATCH
                     : openRc == CavaLayouts.CAVA_ERR_ABI_VERSION ? NativeStatus.ABI_MISMATCH : NativeStatus.OPEN_FAILED;
@@ -301,10 +294,10 @@ public final class CavaNative {
             LOG.error("[cava/native] {}", detail);
             return false;
         }
-        if (nativeLayoutSum != primarySum && nativeLayoutSum != alternateSum) {
+        if (nativeLayoutSum != javaLayoutSum) {
             status = NativeStatus.LAYOUT_MISMATCH;
             detail = "cava_open 里原生 layout_hash_sum=" + Long.toHexString(nativeLayoutSum)
-                    + " 与 Java 侧 0x" + Long.toHexString(primarySum) + " / 0x" + Long.toHexString(alternateSum) + " 都不等";
+                    + " 与 Java 侧 0x" + Long.toHexString(javaLayoutSum) + " 不等";
             LOG.error("[cava/native] {}", detail);
             return false;
         }
@@ -314,7 +307,7 @@ public final class CavaNative {
         return true;
     }
 
-    private int openOnce(CavaBindings b, Arena arena, long layoutSum, LayoutCheck.NativeReport report) {
+    private int openOnce(CavaBindings b, Arena arena, long layoutSum) {
         // 注意 JDK 21 的分配语义：arena.allocate(layout) = 一个该 layout 的实例；
         // 数组必须 arena.allocateArray(layout, count)。这里全是单实例，且 (指针,长度) 同源（同一 arena）。
         MemorySegment params = arena.allocate(CavaLayouts.OPEN_PARAMS);
@@ -387,6 +380,135 @@ public final class CavaNative {
     }
 
     // ------------------------------------------------------------------
+    // P1 薄封装：**status != OPEN 时一律返回回退信号**，调用方不必自己判断状态
+    // ------------------------------------------------------------------
+
+    /**
+     * 分配数组的唯一正确写法（JDK 21 实测陷阱）：
+     * {@code arena.allocate(JAVA_INT, 10)} 是「一个 int、值 10」，**只有 4 字节**；
+     * 把它当数组交给原生写越界会把 JVM 打成段错误。数组一律走这里（= {@code allocateArray}）。
+     */
+    public static MemorySegment allocateArray(Arena arena, MemoryLayout element, long count) {
+        return arena.allocateArray(element, count);
+    }
+
+    /**
+     * {@code cava_pathfind}：&gt;0 = 节点数；0 = 无路径；&lt;0 = 错误码；
+     * {@link #ERR_NATIVE_UNAVAILABLE} = 原生不可用（必须回退原逻辑）。
+     *
+     * @param req 容量 ≥ {@code sizeof(CavaPathRequest)} 的段（用 {@link CavaLayouts#PATH_REQUEST} 分配）
+     * @param out 容量 = {@code cap} 个 {@link CavaLayouts#PATH_NODE} 的数组（{@link #allocateArray}）
+     */
+    public int pathfind(long handle, MemorySegment req, MemorySegment out, int cap) {
+        CavaBindings b = bindingsIfOpen();
+        if (b == null) {
+            return ERR_NATIVE_UNAVAILABLE;
+        }
+        try {
+            return b.pathfind(handle, req, out, cap);
+        } catch (Throwable t) {
+            onNativeCallFailure(CavaBindings.SYM_PATHFIND, t);
+            return ERR_CALL_FAILED;
+        }
+    }
+
+    /** {@code cava_mob_profile_upload}：非法字段（width&lt;=0 / NaN 等）→ {@code CAVA_ERR_ARG}，且不改动已有档案。 */
+    public int mobProfileUpload(long handle, MemorySegment profile) {
+        CavaBindings b = bindingsIfOpen();
+        if (b == null) {
+            return ERR_NATIVE_UNAVAILABLE;
+        }
+        try {
+            return b.mobProfileUpload(handle, profile);
+        } catch (Throwable t) {
+            onNativeCallFailure(CavaBindings.SYM_MOB_PROFILE_UPLOAD, t);
+            return ERR_CALL_FAILED;
+        }
+    }
+
+    /** {@code cava_mob_profile_clear}：幂等；未上传过也算成功。 */
+    public int mobProfileClear(long handle) {
+        CavaBindings b = bindingsIfOpen();
+        if (b == null) {
+            return ERR_NATIVE_UNAVAILABLE;
+        }
+        try {
+            return b.mobProfileClear(handle);
+        } catch (Throwable t) {
+            onNativeCallFailure(CavaBindings.SYM_MOB_PROFILE_CLEAR, t);
+            return ERR_CALL_FAILED;
+        }
+    }
+
+    /**
+     * {@code cava_state_table_upload}：一次性上传方块状态表。
+     *
+     * @param records {@link #allocateArray}(arena, {@link CavaLayouts#STATE_RECORD}, recordCount)
+     * @param boxes   {@link #allocateArray}(arena, {@link CavaLayouts#COLLISION_BOX}, boxCount)；boxCount==0 时传 {@code MemorySegment.NULL}
+     */
+    public int stateTableUpload(long handle, MemorySegment records, int recordCount,
+                                MemorySegment boxes, int boxCount) {
+        CavaBindings b = bindingsIfOpen();
+        if (b == null) {
+            return ERR_NATIVE_UNAVAILABLE;
+        }
+        try {
+            return b.stateTableUpload(handle, records, recordCount, boxes, boxCount);
+        } catch (Throwable t) {
+            onNativeCallFailure(CavaBindings.SYM_STATE_TABLE_UPLOAD, t);
+            return ERR_CALL_FAILED;
+        }
+    }
+
+    /**
+     * {@code cava_region_upload}：把 {@code dimX*dimY*dimZ} 个 state id 推进原生区域缓存
+     * （索引顺序 {@code ((y*dimZ)+z)*dimX+x}，x 最快、y 最慢）。
+     *
+     * @param ids {@link #allocateArray}(arena, ValueLayout.JAVA_INT, idCount) —— 必须与 idCount 同源
+     */
+    public int regionUpload(long handle, int dimX, int dimY, int dimZ,
+                            int originX, int originY, int originZ, MemorySegment ids, int idCount) {
+        CavaBindings b = bindingsIfOpen();
+        if (b == null) {
+            return ERR_NATIVE_UNAVAILABLE;
+        }
+        try {
+            return b.regionUpload(handle, dimX, dimY, dimZ, originX, originY, originZ, ids, idCount);
+        } catch (Throwable t) {
+            onNativeCallFailure(CavaBindings.SYM_REGION_UPLOAD, t);
+            return ERR_CALL_FAILED;
+        }
+    }
+
+    /** {@code cava_region_clear}：幂等。 */
+    public int regionClear(long handle) {
+        CavaBindings b = bindingsIfOpen();
+        if (b == null) {
+            return ERR_NATIVE_UNAVAILABLE;
+        }
+        try {
+            return b.regionClear(handle);
+        } catch (Throwable t) {
+            onNativeCallFailure(CavaBindings.SYM_REGION_CLEAR, t);
+            return ERR_CALL_FAILED;
+        }
+    }
+
+    /** {@code cava_region_state_id_at}：{@code outStateId} = {@code arena.allocate(ValueLayout.JAVA_INT)}（一个 int）。 */
+    public int regionStateIdAt(long handle, int x, int y, int z, MemorySegment outStateId) {
+        CavaBindings b = bindingsIfOpen();
+        if (b == null) {
+            return ERR_NATIVE_UNAVAILABLE;
+        }
+        try {
+            return b.regionStateIdAt(handle, x, y, z, outStateId);
+        } catch (Throwable t) {
+            onNativeCallFailure(CavaBindings.SYM_REGION_STATE_ID_AT, t);
+            return ERR_CALL_FAILED;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 报告
     // ------------------------------------------------------------------
 
@@ -398,7 +520,6 @@ public final class CavaNative {
                 + " java_sum=0x" + Long.toHexString(javaLayoutSum)
                 + " native_sum=0x" + Long.toHexString(nativeLayoutSum)
                 + " entries=" + nativeEntryCount
-                + (layoutByteWiseVariant ? " layout_hash=byte-wise(协商)" : "")
                 + " handle=" + handle;
     }
 
@@ -418,11 +539,9 @@ public final class CavaNative {
                 .append(" platform=").append(platformName(platform)).append(" build_flags=0x").append(Integer.toHexString(buildFlags))
                 .append(" build_id_hash=0x").append(Long.toHexString(buildIdHash)).append(System.lineSeparator());
         sb.append("  布局自检        : ").append(status == NativeStatus.LAYOUT_MISMATCH ? "失败" : "通过")
-                .append("  java_sum(u32)=0x").append(Long.toHexString(javaLayoutSum))
-                .append(" java_sum(bytes)=0x").append(Long.toHexString(javaLayoutSumBytes))
+                .append("  java_sum=0x").append(Long.toHexString(javaLayoutSum))
                 .append(" native_sum=0x").append(Long.toHexString(nativeLayoutSum))
-                .append(" entries=").append(nativeEntryCount)
-                .append(layoutByteWiseVariant ? "  [逐字节变体]" : "").append(System.lineSeparator());
+                .append(" entries=").append(nativeEntryCount).append(System.lineSeparator());
         sb.append("  cava_abi_touch  : ").append(touchCount).append("（=1 表示原生代码确实执行过）").append(System.lineSeparator());
         sb.append("  句柄            : ").append(handle).append(System.lineSeparator());
         sb.append("  回退语义        : ").append(available() ? "不适用（原生可用）" : "整体回退纯 Java（所有钩子不介入）").append(System.lineSeparator());

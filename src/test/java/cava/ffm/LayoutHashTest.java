@@ -10,9 +10,13 @@ import org.junit.jupiter.api.Test;
 /**
  * 布局与布局哈希的回归测试。
  *
- * <p>期望值来自 **C 编译器实测**（MinGW g++ 15.2，用 cava_abi.h 打 offsetof/sizeof/alignof，
- * 见 docs/CAVA-java-notes.md 的实测输出），不是手推的。任何人改动 cava_abi.h 或
- * {@link CavaLayouts} 都会在这里立刻炸出来。
+ * <p>期望值有两个来源，都不是手推的：
+ * <ol>
+ *   <li>C 编译器实测：MinGW g++ 15.2 用 {@code cava_abi.h} 打 offsetof/sizeof/alignof；</li>
+ *   <li>真实 {@code cava.dll} 实测：{@code cava_layout_report()} + {@code cava_open()}
+ *       在本机算出同一个 {@code layout_hash_sum}（见 docs/CAVA-java-notes.md）。</li>
+ * </ol>
+ * 任何人改动 cava_abi.h / {@link CavaLayouts} / native 侧 kLayouts 都会在这里立刻炸出来。
  */
 class LayoutHashTest {
 
@@ -27,6 +31,13 @@ class LayoutHashTest {
         assertStruct("CavaLayoutReport", 34848, 8, new long[]{0, 4, 8, 12, 16, 20, 24, 32});
         assertStruct("CavaOpenParams", 32, 8, new long[]{0, 4, 8, 16, 24});
         assertStruct("CavaOpenResult", 24, 8, new long[]{0, 4, 8, 16});
+        // P1 追加的 5 个（2026-09-22 随 ABI 登记）
+        assertStruct("CavaPathRequest", 56, 8, new long[]{0, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52});
+        assertStruct("CavaPathNode", 32, 4, new long[]{0, 4, 8, 12, 16, 20, 24, 28});
+        assertStruct("CavaMobProfile", 192, 8,
+                new long[]{0, 104, 112, 120, 128, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184});
+        assertStruct("CavaStateRecord", 20, 4, new long[]{0, 4, 8, 12, 16});
+        assertStruct("CavaCollisionBox", 24, 4, new long[]{0, 4, 8, 12, 16, 20});
     }
 
     private static void assertStruct(String name, long size, long align, long[] offsets) {
@@ -45,15 +56,25 @@ class LayoutHashTest {
 
     @Test
     void layoutHashesAreStable() {
-        // 与 C 桩（native/src 之外的测试桩，逐字段 offsetof/sizeof 喂同一个 FNV-1a）实测一致
         LayoutCheck.JavaSide java = LayoutCheck.javaSide();
-        // int -> 无符号 long 再比，避免 0x8.. 开头的哈希被符号扩展
-        assertEquals(0xF837804DL, Integer.toUnsignedLong(java.structs().get(0).hashU32()), "CavaLayoutEntry hash(u32)");
-        assertEquals(0xE9FFC021L, Integer.toUnsignedLong(java.structs().get(1).hashU32()), "CavaLayoutReport hash(u32)");
-        assertEquals(0x7FDE7499L, Integer.toUnsignedLong(java.structs().get(2).hashU32()), "CavaOpenParams hash(u32)");
-        assertEquals(0xFF344829L, Integer.toUnsignedLong(java.structs().get(3).hashU32()), "CavaOpenResult hash(u32)");
-        assertEquals(0x6149FD30L, java.sumU32(), "layout_hash_sum(u32, 契约 2.3)");
-        assertEquals(0xDB2A07EDL, java.sumBytes(), "layout_hash_sum(bytes, 头文件注释变体)");
+        long[] expected = {
+                0xF837804DL, // CavaLayoutEntry
+                0xE9FFC021L, // CavaLayoutReport
+                0x7FDE7499L, // CavaOpenParams
+                0xFF344829L, // CavaOpenResult
+                0xE566F98DL, // CavaPathRequest
+                0x0DCFFE65L, // CavaPathNode
+                0x9C6C98CDL, // CavaMobProfile
+                0x53797229L, // CavaStateRecord
+                0x250ECBE1L, // CavaCollisionBox
+        };
+        assertEquals(expected.length, java.structs().size(), "导出结构体个数");
+        for (int i = 0; i < expected.length; i++) {
+            // int -> 无符号 long 再比，避免 0x8.. 开头的哈希被符号扩展
+            assertEquals(expected[i], Integer.toUnsignedLong(java.structs().get(i).hashU32()),
+                    java.structs().get(i).name() + " layout_hash");
+        }
+        assertEquals(0x6975CBF9L, java.sumU32(), "layout_hash_sum（9 个结构体；真实 cava.dll 算出同值）");
     }
 
     @Test
@@ -65,12 +86,10 @@ class LayoutHashTest {
         assertEquals(32, entries.offset());
         assertEquals(64L * 544L, entries.size());
         assertTrue(report.fieldCount() <= CavaLayouts.LAYOUT_MAX_FIELDS);
-    }
-
-    @Test
-    void byteWiseVariantDiffers() {
-        // 两个变体必须真的不同，否则「自动协商」没有意义
-        LayoutCheck.JavaSide java = LayoutCheck.javaSide();
-        assertTrue(java.sumU32() != java.sumBytes());
+        // CavaMobProfile.penalty[26] 也是一个字段
+        CavaLayouts.Struct profile = CavaLayouts.STRUCTS.get(6);
+        assertEquals("penalty", profile.fields().get(0).name());
+        assertEquals(0, profile.fields().get(0).offset());
+        assertEquals(26L * 4L, profile.fields().get(0).size());
     }
 }

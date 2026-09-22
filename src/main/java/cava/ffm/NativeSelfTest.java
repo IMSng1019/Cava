@@ -1,5 +1,9 @@
 package cava.ffm;
 
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemoryLayout;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.nio.file.Path;
 import java.util.Locale;
 
@@ -70,8 +74,8 @@ public final class NativeSelfTest {
         }
         LayoutCheck.JavaSide java = LayoutCheck.javaSide();
         System.out.print(java.fieldTable());
-        line("layout_hash_sum(u32, 契约 2.3)      = 0x" + Long.toHexString(java.sumU32()) + "  (" + java.sumU32() + ")");
-        line("layout_hash_sum(bytes, 头文件注释)  = 0x" + Long.toHexString(java.sumBytes()) + "  (" + java.sumBytes() + ")");
+        line("layout_hash_sum (唯一权威公式)      = 0x" + Long.toHexString(java.sumU32()) + "  (" + java.sumU32() + ")"
+                + "  [" + java.structs().size() + " 个结构体]");
 
         // ---- 打开 ----
         CavaNative native_ = CavaNative.get();
@@ -111,10 +115,9 @@ public final class NativeSelfTest {
         line("--- [3] cava_open ---");
         line("status            : " + native_.status());
         line("handle            : " + native_.handle());
-        line("java_layout_sum   : 0x" + Long.toHexString(native_.javaLayoutSum())
-                + "  (bytes 变体 0x" + Long.toHexString(native_.javaLayoutSumBytes()) + ")");
-        line("native_layout_sum : 0x" + Long.toHexString(native_.nativeLayoutSum()));
-        line("layout 变体       : " + (native_.layoutByteWiseVariant() ? "byte-wise（协商）" : "u32（契约 2.3）"));
+        line("java_layout_sum   : 0x" + Long.toHexString(native_.javaLayoutSum()));
+        line("native_layout_sum : 0x" + Long.toHexString(native_.nativeLayoutSum())
+                + (native_.javaLayoutSum() == native_.nativeLayoutSum() ? "  (一致)" : "  **不一致**"));
         line("库文件            : " + native_.libraryInfo());
 
         // ---- 步骤 4：数值差分 ----
@@ -152,6 +155,30 @@ public final class NativeSelfTest {
                     fmt(v), nbits, jbits, fmt(round), ok ? "ok" : "MISMATCH"));
         }
 
+        // ---- 步骤 6：P1 新 ABI 冒烟（不喂有效数据，只看错误码是否安全、JVM 不崩） ----
+        line("");
+        line("--- [6] P1 ABI 冒烟（cava_pathfind / mob_profile / state_table / region） ---");
+        try (Arena arena = Arena.ofShared()) {
+            long h = native_.handle();
+            MemorySegment req = arena.allocate(CavaLayouts.PATH_REQUEST);
+            MemorySegment out = CavaNative.allocateArray(arena, CavaLayouts.PATH_NODE, 64);
+            MemorySegment prof = arena.allocate(CavaLayouts.MOB_PROFILE);
+            MemorySegment oneInt = arena.allocate(ValueLayout.JAVA_INT);
+            line("  mob_profile_clear()          -> " + err(native_.mobProfileClear(h)));
+            line("  pathfind(未上传档案)         -> " + err(native_.pathfind(h, req, out, 64)) + "   期望 <0");
+            // 全 0 档案 = width/height = 0，按 ABI 必须 CAVA_ERR_ARG
+            line("  mob_profile_upload(全 0)     -> " + err(native_.mobProfileUpload(h, prof)) + "   期望 CAVA_ERR_ARG");
+            prof.set(ValueLayout.JAVA_FLOAT, CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("width")), Float.NaN);
+            prof.set(ValueLayout.JAVA_FLOAT, CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("height")), 1.0f);
+            line("  mob_profile_upload(NaN 宽)   -> " + err(native_.mobProfileUpload(h, prof)) + "   期望 CAVA_ERR_ARG");
+            line("  region_clear()               -> " + err(native_.regionClear(h)));
+            int rcAt = native_.regionStateIdAt(h, 0, 0, 0, oneInt);
+            line("  region_state_id_at(0,0,0)    -> " + err(rcAt) + "   out_state_id="
+                    + (rcAt == CavaLayouts.CAVA_OK ? oneInt.get(ValueLayout.JAVA_INT, 0) : "(未写出)") + "   [空区域应为 -1]");
+            line("  state_table_upload(空表)     -> " + err(native_.stateTableUpload(h, MemorySegment.NULL, 0, MemorySegment.NULL, 0)));
+            line("  pathfind(伪造句柄)           -> " + err(native_.pathfind(0xDEADBEEFL, req, out, 64)) + "   期望 <0 且 JVM 存活");
+            line("  JVM 存活 = true（若这段没跑完就说明原生入口崩了）");
+        }
         line("");
         line("layout 明细（原生报告逐字段核对通过后打印 Java 侧表）:");
         System.out.println(native_.layoutDetail());
@@ -161,6 +188,11 @@ public final class NativeSelfTest {
 
     private static String fmt(double v) {
         return Double.toString(v);
+    }
+
+    /** 错误码 → "CAVA_OK (0)" 这种可读形式。 */
+    private static String err(int rc) {
+        return CavaLayouts.errorName(rc) + " (" + rc + ")";
     }
 
     private static String orNone(String v) {

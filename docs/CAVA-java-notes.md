@@ -134,7 +134,7 @@ Java 侧（`CavaLayouts` 用手写 `MemoryLayout` + `byteOffset(PathElement.grou
 | `CavaOpenResult` | `0xFF344829` | `0xDEBEF5D9` |
 | **`layout_hash_sum`** | **`0x6149FD30`** (1632238896) | `0xDB2A07ED` (3676964845) |
 
-**⚠ 契约内部有歧义（需要 native 侧对齐）**：
+**⚠ 契约内部有歧义 —— 已裁定（2026-09-22，`cava_abi.h`；见 §10.3）：唯一权威公式 = 逐 u32 变体，逐字节变体废除。**
 - 契约 §2.3 写的是「每个字段喂 4 个 u32：offset 低 32、size 低 32、offset 高 32、size 高 32」→ `0x6149FD30`；
 - `cava_abi.h` 的注释写的是「对每个字段依次喂入 (offset:u32, size:u32) 的**小端字节**」→ 逐字节 FNV → `0xDB2A07ED`。
 
@@ -288,7 +288,7 @@ TraceDiff 零差异 / 首个差异 tick 与字段 / 行数不同 / 头行不同�
 4. 世界哈希的性能/正确性：从未在真实服务端跑过（只跑过单测）。
 5. 黄金轨迹端到端（同存档两次运行 → `ZERO DIFF`）：**未做**，需要 P0-F 的真实服务端。
 6. `Arena`/`libraryLookup` 的 arena 泄漏：按设计保留到进程结束，**未做压力验证**（每进程只 open 一次，风险低）。
-7. 布局哈希变体二选一：**待 captain/native 侧拍板**（§4.2）。
+7. ~~布局哈希变体二选一~~ **已裁定（2026-09-22）**：唯一权威公式 = 逐 u32 变体；逐字节变体废除，Java 侧协商代码已删除（§10.3）。
 
 ---
 
@@ -309,5 +309,117 @@ TraceDiff 零差异 / 首个差异 tick 与字段 / 行数不同 / 头行不同�
    }
    ```
    （P0-C 只保证 `TraceDiff.main` 可用；任务怎么定义听 P0-A/captain 的。）
-3. 确认 §4.2 的布局哈希变体（u32 vs 逐字节），并让 native 侧按同一个实现，然后我删掉协商代码。
+3. ~~确认 §4.2 的布局哈希变体~~ 已裁定并落地（§10.3）：Java 侧只保留逐 u32 变体，协商代码已删除。
+   仅剩一处措辞要改：头文件「喂 1 字节」的说法应按 §10.3 改成「喂 1 个 uint32」。
 4. 确认 §6.1 的「固定扫描盒 + 空段跳过」是否可作为 P0/P1 的世界哈希定义写进契约 §4.2。
+---
+
+## 10. P1 追加：寻路 / 镜像 ABI 的 FFM 绑定（2026-09-22，P0-C 第二轮）
+
+### 10.1 新增的 7 个绑定（`cava.ffm.CavaBindings`）
+
+| 符号 | descriptor（`FunctionDescriptor.of` 的返回/参数顺序） |
+| --- | --- |
+| `cava_pathfind` | `(JAVA_LONG, ADDRESS, ADDRESS, JAVA_INT) → JAVA_INT` |
+| `cava_mob_profile_upload` | `(JAVA_LONG, ADDRESS) → JAVA_INT` |
+| `cava_mob_profile_clear` | `(JAVA_LONG) → JAVA_INT` |
+| `cava_state_table_upload` | `(JAVA_LONG, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT) → JAVA_INT` |
+| `cava_region_upload` | `(JAVA_LONG, JAVA_INT×6, ADDRESS, JAVA_INT) → JAVA_INT` |
+| `cava_region_clear` | `(JAVA_LONG) → JAVA_INT` |
+| `cava_region_state_id_at` | `(JAVA_LONG, JAVA_INT×3, ADDRESS) → JAVA_INT` |
+
+全部是标量/指针参数，**没有按值结构体、没有 (指针,长度) 对**，不涉及 JDK 21 的分配陷阱。
+7 个符号都进了 `REQUIRED_SYMBOLS`：少一个 → `LOAD_FAILED` → 整体回退纯 Java。
+
+`CavaNative` 的薄封装（`pathfind` / `mobProfileUpload` / `mobProfileClear` / `stateTableUpload` /
+`regionUpload` / `regionClear` / `regionStateIdAt`）**在 `status != OPEN` 时一律返回回退信号**，
+调用方不需要自己判断状态：
+
+| 常量 | 值 | 含义 |
+| --- | --- | --- |
+| `CavaNative.ERR_NATIVE_UNAVAILABLE` | `-100` | 原生没开（DISABLED_BY_FLAG / RESOURCE_MISSING / ABI / LAYOUT 不符 …） |
+| `CavaNative.ERR_CALL_FAILED` | `-101` | 原生调用抛异常（按符号只记一次 ERROR 日志） |
+
+ABI 自己的错误码是 -1..-7，Java 侧自有码从 -100 起；调用方判 `rc < 0` 即回退原逻辑。
+`CavaNative.allocateArray(arena, layout, count)` 是数组分配的唯一推荐入口 —— 专为挡住
+`arena.allocate(JAVA_INT, n)`（「一个 int、值 n」，只有 4 字节）这个段错误陷阱。
+
+### 10.2 真实原生库实测（`natives/windows-x64/cava.dll`，P0-B 构建产物）
+
+> 注：P0-B 在并行重建这个 DLL，所以 `cava_build_id()` 字符串每次可能不同（实测见过两种写法）；
+> 不变的判据是 `cava_open` 的 `sent_sum == result.native_layout_sum == 0x6975cbf9` 与 `SELF-TEST: PASS`。
+
+- `cava_build_id()` = `cava 0.1.0 win-x64 mingw-gcc-15.2.0 O2/fwrapv/ffp-contract=off safe=0 asan=0 ubsan=0`
+- `cava_open`：`sent_sum=0x6975cbf9 rc=CAVA_OK result.native_layout_sum=0x6975cbf9 handle=4294967297`
+
+`NativeSelfTest` 步骤 [6] 的 P1 冒烟（真实 DLL）：
+
+```
+  mob_profile_clear()          -> CAVA_OK (0)
+  pathfind(未上传档案)         -> CAVA_ERR_ARG (-4)   期望 <0
+  mob_profile_upload(全 0)     -> CAVA_ERR_ARG (-4)   期望 CAVA_ERR_ARG
+  mob_profile_upload(NaN 宽)   -> CAVA_ERR_ARG (-4)   期望 CAVA_ERR_ARG
+  region_clear()               -> CAVA_OK (0)
+  region_state_id_at(0,0,0)    -> CAVA_OK (0)   out_state_id=-1   [空区域应为 -1]
+  state_table_upload(空表)     -> CAVA_OK (0)
+  pathfind(伪造句柄)           -> CAVA_ERR_NULL (-3)   期望 <0 且 JVM 存活
+  JVM 存活 = true
+```
+
+JUnit（`junit-platform-console-standalone 1.10.2` + `-Dcava.native.path=<真实 dll>`）：
+
+```
+[ 33 tests successful ]  [ 0 failed ]  [ 0 skipped ]
+  PathfindAbiTest: invalidProfileIsRejected / pathfindWithoutProfileIsRejected /
+                   stateTableAndRegionRoundTrip / regionUploadRejectsBadDims /
+                   forgedHandleNeverCrashes / openStateIsConsistent   全 ✔
+```
+
+不带原生库再跑一次（同一条命令，去掉 `-Dcava.native.path`）：
+
+```
+NativeFallbackTest: wrappersReturnFallbackSignal ✔   numericFallsBackToJava ✔   （2/2）
+PathfindAbiTest:    容器 aborted（= skip，不是静默通过）
+```
+
+`-Dcava.native.enabled=false` + **有效 DLL 存在**时：`status=DISABLED_BY_FLAG`、日志里**没有任何 ERROR**、
+`NativeSelfTest exit 0`。
+
+正向路径也被真实执行过：`state_table_upload(1 条记录)` → `region_upload(1×1×1, id=7)` →
+`region_state_id_at(0,0,0)` 返回 **7**；`region_clear()` 之后同一查询 `out_state_id = -1`。
+
+### 10.3 布局哈希：变体争议已裁定（协商代码已删除）
+
+`cava_abi.h`（2026-09-22）把**逐 u32 变体**定为唯一权威公式并废除「逐字节」变体。
+Java 侧实测 `layout_hash_sum = 0x6975CBF9`（9 个结构体），与真实 DLL 的
+`cava_layout_report()` / `cava_open()` 完全一致 → 已删除 `LayoutCheck.layoutHashBytes`、
+`useByteWiseSum` 与 `CavaNative` 的双变体重试逻辑。
+
+9 个结构体的 `layout_hash`（u32，Java 侧 = 原生侧）：
+
+| 结构体 | hash | 结构体 | hash |
+| --- | --- | --- | --- |
+| CavaLayoutEntry | `0xF837804D` | CavaPathRequest | `0xE566F98D` |
+| CavaLayoutReport | `0xE9FFC021` | CavaPathNode | `0x0DCFFE65` |
+| CavaOpenParams | `0x7FDE7499` | CavaMobProfile | `0x9C6C98CD` |
+| CavaOpenResult | `0xFF344829` | CavaStateRecord | `0x53797229` |
+| | | CavaCollisionBox | `0x250ECBE1` |
+
+⚠ **一处请 captain 顺手改的文档措辞**：头文件那段「对 (uint32_t)offset **喂 1 字节** …… 即每个字段固定 4 次
+`h ^= byte; h *= PRIME`」按字面读是「每字段 4 次、每次只异或该 u32 的**最低字节**」，那样**算不出** 0x6975CBF9
+（例如 size=256 会退化成 0）。实际两侧用的都是**整个 32 位值参与异或**（`h ^= (uint32)v; h *= PRIME`），
+`0x6975CBF9` 正是它的结果。建议改成「对 offset/size 各喂 1 个 **uint32**（不截断成字节）」。
+
+### 10.4 本地跑测试的两条环境提示（P1 流发现，我复核有效）
+
+- `%TEMP%` 在沙箱外会让 `@TempDir` 全挂：把 `TMP`/`TEMP`（Gradle 再加 `java.io.tmpdir`）指到工作区内
+  （例如 `build\tmp`）。
+- `gradlew ... --no-watch-fs` 可消掉沙箱里的 `File watcher server ... error = 5` 噪声。
+
+### 10.5 未验证（P1 追加部分）
+
+- `cava_pathfind` 的**正向**数值语义（节点序列、g/f 位模式）不归我验证 —— 那是 P1 流的 10060 例差分测试。
+  我这里只验证到「ABI 边界 + 错误码 + 不崩」。
+- `region_upload` 的**上限**（原生侧区域容量上限）未测：我只测了 1×1×1 与非法维度。
+- 真实服务器里 `Cava` 启动路径（config → tryOpen → 横幅）仍未在服务端实跑过（等 P0-D 的门禁）。
+

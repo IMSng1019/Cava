@@ -17,29 +17,29 @@ import java.util.List;
  *     h ^= (uint32)((offset >> 32) & 0xFFFFFFFF); h *= 0x01000193
  *     h ^= (uint32)((size   >> 32) & 0xFFFFFFFF); h *= 0x01000193
  * </pre>
- * {@code layout_hash_sum} = 4 个结构体 layout_hash 的 uint32 无符号加法（回绕）。
+ * {@code layout_hash_sum} = 全部导出结构体 layout_hash 的 uint32 无符号加法（回绕）。
  *
- * <p><b>变体协商</b>：cava_abi.h 的注释把同一条公式又描述成「对每个字段依次喂入
- * (offset:u32, size:u32) 的小端字节」，那是**逐字节** FNV-1a，与契约 2.3 的逐 u32 版本
- * 结果不同。P0 两个流并行开发，Java 侧两种都算：以契约 2.3 的 {@link #layoutHashU32} 为准，
- * 若原生返回的每个 entry.layout_hash 都等于逐字节变体，则自动改用逐字节变体的和去
- * {@code cava_open}（并在日志里明确告警）。字段偏移/大小是逐个比对的，与哈希变体无关，
- * 所以这个协商不会削弱安全性。
+ * <p><b>唯一权威公式（2026-09-22 裁定）</b>：cava_abi.h 已明确废除早期的「逐字节」变体。
+ * 本实现与原生 {@code native/src/cava_layout.cpp} 逐字段一致 —— 交叉验证值：
+ * 9 个结构体 {@code layout_hash_sum == 0x6975CBF9}（Java 侧与真实 cava.dll 的
+ * {@code cava_layout_report} + {@code cava_open} 都算出同值，实测）。
+ *
+ * <p>数组字段算**一个**字段；填充（{@code paddingLayout}）不是字段，但已经从后续字段的偏移里体现。
  */
 public final class LayoutCheck {
 
     private LayoutCheck() {
     }
 
-    /** Java 侧单个结构体的布局视图 + 两种哈希。 */
-    public record StructInfo(String name, long size, long align, List<CavaLayouts.Field> fields, int hashU32, int hashBytes) {
+    /** Java 侧单个结构体的布局视图 + 布局哈希。 */
+    public record StructInfo(String name, long size, long align, List<CavaLayouts.Field> fields, int hashU32) {
         public int fieldCount() {
             return fields.size();
         }
     }
 
     /** Java 侧完整结果。 */
-    public record JavaSide(List<StructInfo> structs, long sumU32, long sumBytes, String fieldTable) {
+    public record JavaSide(List<StructInfo> structs, long sumU32, String fieldTable) {
     }
 
     /** 原生 CavaLayoutEntry 解析结果。 */
@@ -55,12 +55,12 @@ public final class LayoutCheck {
      * 比对结果。
      *
      * @param problems 真问题（任一非空 => {@code ok == false} => 整体回退纯 Java）
-     * @param notes    不是问题但必须让用户看见的说明（例如哈希变体协商）
+     * @param notes    不是问题但必须让用户看见的说明（当前为空，保留给后续 ABI 演进）
      */
-    public record Result(boolean ok, JavaSide java, NativeReport report, boolean useByteWiseSum,
-                         List<String> problems, List<String> notes) {
+    public record Result(boolean ok, JavaSide java, NativeReport report, List<String> problems, List<String> notes) {
+        /** 应该填进 {@code CavaOpenParams.layout_hash_sum} 的值。 */
         public long sumToSendInOpenParams() {
-            return useByteWiseSum ? java.sumBytes() : java.sumU32();
+            return java.sumU32();
         }
     }
 
@@ -74,7 +74,7 @@ public final class LayoutCheck {
         return h;
     }
 
-    /** 契约 2.3 的逐 u32 版本（P0 主用）。 */
+    /** 唯一权威公式：每个字段按声明顺序做 4 次 {@code h ^= (uint32)v; h *= PRIME}。 */
     public static int layoutHashU32(List<CavaLayouts.Field> fields) {
         int h = CavaLayouts.FNV_OFFSET_BASIS_32;
         for (CavaLayouts.Field f : fields) {
@@ -82,23 +82,6 @@ public final class LayoutCheck {
             h = mix(h, (int) (f.size() & 0xFFFFFFFFL));
             h = mix(h, (int) ((f.offset() >>> 32) & 0xFFFFFFFFL));
             h = mix(h, (int) ((f.size() >>> 32) & 0xFFFFFFFFL));
-        }
-        return h;
-    }
-
-    /** cava_abi.h 注释描述的逐字节版本：(offset:u32, size:u32) 的小端字节。 */
-    public static int layoutHashBytes(List<CavaLayouts.Field> fields) {
-        int h = CavaLayouts.FNV_OFFSET_BASIS_32;
-        for (CavaLayouts.Field f : fields) {
-            h = mixBytes(h, f.offset() & 0xFFFFFFFFL);
-            h = mixBytes(h, f.size() & 0xFFFFFFFFL);
-        }
-        return h;
-    }
-
-    private static int mixBytes(int h, long v32) {
-        for (int i = 0; i < 4; i++) {
-            h = mix(h, (int) ((v32 >>> (8 * i)) & 0xFF));
         }
         return h;
     }
@@ -116,28 +99,25 @@ public final class LayoutCheck {
     // Java 侧
     // ------------------------------------------------------------------
 
-    /** 算 Java 侧的 4 个结构体 (offset,size) 表与两种 layout_hash_sum。 */
+    /** 算 Java 侧全部结构体的 (offset,size) 表与 layout_hash_sum。 */
     public static JavaSide javaSide() {
         List<StructInfo> structs = new ArrayList<>(CavaLayouts.STRUCTS.size());
         for (CavaLayouts.Struct s : CavaLayouts.STRUCTS) {
-            structs.add(new StructInfo(s.name(), s.size(), s.align(), s.fields(),
-                    layoutHashU32(s.fields()), layoutHashBytes(s.fields())));
+            structs.add(new StructInfo(s.name(), s.size(), s.align(), s.fields(), layoutHashU32(s.fields())));
         }
-        long[] u32 = new long[structs.size()];
-        long[] bytes = new long[structs.size()];
+        long[] hashes = new long[structs.size()];
         for (int i = 0; i < structs.size(); i++) {
-            u32[i] = structs.get(i).hashU32();
-            bytes[i] = structs.get(i).hashBytes();
+            hashes[i] = structs.get(i).hashU32();
         }
-        return new JavaSide(List.copyOf(structs), unsignedSum32(u32), unsignedSum32(bytes), fieldTable(structs));
+        return new JavaSide(List.copyOf(structs), unsignedSum32(hashes), fieldTable(structs));
     }
 
     /** 每字段 (offset,size) 的可读表（任务 C3 要求打日志）。 */
     public static String fieldTable(List<StructInfo> structs) {
         StringBuilder sb = new StringBuilder();
         for (StructInfo s : structs) {
-            sb.append(String.format("  %-17s size=%-6d align=%d fields=%-2d hash_u32=0x%08X hash_bytes=0x%08X%n",
-                    s.name(), s.size(), s.align(), s.fieldCount(), s.hashU32(), s.hashBytes()));
+            sb.append(String.format("  %-17s size=%-6d align=%d fields=%-2d hash=0x%08X%n",
+                    s.name(), s.size(), s.align(), s.fieldCount(), s.hashU32()));
             for (CavaLayouts.Field f : s.fields()) {
                 sb.append(String.format("      %-16s offset=%-6d size=%-6d%n", f.name(), f.offset(), f.size()));
             }
@@ -198,9 +178,6 @@ public final class LayoutCheck {
                     + "（每加一个导出结构体都要在 CavaLayouts 登记）");
         }
 
-        int matchedU32 = 0;
-        int matchedBytes = 0;
-        int matchedStructs = 0;
         boolean[] seen = new boolean[java.structs().size()];
         for (int i = 0; i < report.entries().size(); i++) {
             NativeEntry e = report.entries().get(i);
@@ -220,22 +197,12 @@ public final class LayoutCheck {
                 continue;
             }
             seen[matchIndex] = true;
-            matchedStructs++;
             if (e.structAlign() != match.align()) {
                 problems.add(match.name() + ": struct_align=" + e.structAlign() + " 期望 " + match.align());
             }
-            boolean u32 = (e.layoutHash() == match.hashU32());
-            boolean bytes = (e.layoutHash() == match.hashBytes());
-            if (u32) {
-                matchedU32++;
-            }
-            if (bytes) {
-                matchedBytes++;
-            }
-            if (!u32 && !bytes) {
+            if (e.layoutHash() != match.hashU32()) {
                 problems.add(match.name() + ": layout_hash=0x" + Integer.toHexString(e.layoutHash())
-                        + " 与 Java 侧 0x" + Integer.toHexString(match.hashU32())
-                        + " (u32) / 0x" + Integer.toHexString(match.hashBytes()) + " (bytes) 都不等");
+                        + " 与 Java 侧 0x" + Integer.toHexString(match.hashU32()) + " 不等");
             }
             for (int k = 0; k < match.fieldCount(); k++) {
                 CavaLayouts.Field f = match.fields().get(k);
@@ -250,15 +217,6 @@ public final class LayoutCheck {
                 problems.add("Java 结构体 " + java.structs().get(j).name() + " 在原生 report 里没有对应 entry");
             }
         }
-
-        boolean allU32 = matchedStructs > 0 && matchedU32 == matchedStructs;
-        boolean allBytes = matchedStructs > 0 && matchedBytes == matchedStructs;
-        boolean byteWise = !allU32 && allBytes;
-        if (byteWise) {
-            // 不是失败：字段 (offset,size) 已逐个核对通过，只是哈希变体不同 —— 记录并自动改用对的那个和
-            notes.add("原生侧 layout_hash 用的是 cava_abi.h 注释里的「逐字节」变体（契约 2.3 是逐 u32 变体）；"
-                    + "字段偏移表已逐个核对通过，Java 侧自动改用逐字节变体的 layout_hash_sum");
-        }
-        return new Result(problems.isEmpty(), java, report, byteWise, List.copyOf(problems), List.copyOf(notes));
+        return new Result(problems.isEmpty(), java, report, List.copyOf(problems), List.copyOf(notes));
     }
 }

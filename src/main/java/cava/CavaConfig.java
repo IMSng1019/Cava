@@ -53,9 +53,32 @@ public final class CavaConfig {
     /** P0 的三个子系统 id。 */
     public static final List<String> SUBSYSTEMS = List.of("pathfind", "entity", "redstone");
 
+    /**
+     * 「子系统 × mod」的默认归属条目（W2-兼容层）。
+     *
+     * <p>这张表的 mod 集合必须与 {@code cava.compat.CompatTable} 的重叠点集合一致 ——
+     * 由 {@code CompatConfigTest#perModDefaultsCoverCompatTable()} 强制。
+     * 这里刻意不放 {@code cava.compat} 的引用：{@code cava.compat} 依赖 {@code cava.CavaConfig}，
+     * 反向依赖会成环。
+     */
+    private static final Map<String, List<String>> PER_MOD_DEFAULTS = defaultPerMod();
+
+    private static Map<String, List<String>> defaultPerMod() {
+        Map<String, List<String>> m = new LinkedHashMap<>();
+        m.put("lithium", List.of("pathfind", "entity", "redstone"));
+        m.put("servercore", List.of("pathfind", "entity"));
+        m.put("vmp", List.of("entity"));
+        m.put("carpet", List.of("redstone"));
+        m.put("carpet-tis-addition", List.of("redstone", "entity"));
+        return m;
+    }
+
     private final Path path;
     private boolean nativeEnabled = true;
     private final Map<String, Ownership> ownership = new LinkedHashMap<>();
+    private final Map<String, Map<String, Ownership>> perMod = new LinkedHashMap<>();
+    private boolean compatAutoDeferOnRule = true;
+    private final List<String> compatRuleFiles = new ArrayList<>();
     private int parityTicks;
     private String parityTrace = "";
     private String parityLabel = "";
@@ -66,6 +89,13 @@ public final class CavaConfig {
         this.path = path;
         for (String id : SUBSYSTEMS) {
             ownership.put(id, Ownership.AUTO);
+        }
+        for (Map.Entry<String, List<String>> e : PER_MOD_DEFAULTS.entrySet()) {
+            Map<String, Ownership> m = new LinkedHashMap<>();
+            for (String sub : e.getValue()) {
+                m.put(sub, Ownership.AUTO);
+            }
+            perMod.put(e.getKey(), m);
         }
     }
 
@@ -98,6 +128,34 @@ public final class CavaConfig {
                 Object v = m.get(id);
                 if (v instanceof String s) {
                     ownership.put(id, Ownership.parse(s));
+                }
+            }
+        }
+        Object perModObj = root.get("perMod");
+        if (perModObj instanceof Map<?, ?> pm) {
+            for (Map.Entry<?, ?> e : pm.entrySet()) {
+                String modId = String.valueOf(e.getKey());
+                Map<String, Ownership> slot = perMod.computeIfAbsent(modId, k -> new LinkedHashMap<>());
+                if (e.getValue() instanceof Map<?, ?> sm) {
+                    for (Map.Entry<?, ?> se : sm.entrySet()) {
+                        if (se.getValue() instanceof String s) {
+                            slot.put(String.valueOf(se.getKey()), Ownership.parse(s));
+                        }
+                    }
+                }
+            }
+        }
+        Object compatObj = root.get("compat");
+        if (compatObj instanceof Map<?, ?> m) {
+            if (m.get("autoDeferOnRule") instanceof Boolean b) {
+                compatAutoDeferOnRule = b;
+            }
+            if (m.get("ruleFiles") instanceof List<?> list) {
+                compatRuleFiles.clear();
+                for (Object o : list) {
+                    if (o instanceof String s && !s.isBlank()) {
+                        compatRuleFiles.add(s.trim());
+                    }
                 }
             }
         }
@@ -142,6 +200,26 @@ public final class CavaConfig {
             sb.append(++i < ownership.size() ? ",\n" : "\n");
         }
         sb.append("  },\n");
+        sb.append("  \"perMod\": {\n");
+        int mi = 0;
+        for (Map.Entry<String, Map<String, Ownership>> e : perMod.entrySet()) {
+            sb.append("    \"").append(e.getKey()).append("\": {");
+            int si = 0;
+            for (Map.Entry<String, Ownership> s : e.getValue().entrySet()) {
+                sb.append(si++ == 0 ? " " : ", ").append('"').append(s.getKey()).append("\": \"")
+                        .append(s.getValue().jsonName()).append('"');
+            }
+            sb.append(e.getValue().isEmpty() ? "}" : " }");
+            sb.append(++mi < perMod.size() ? ",\n" : "\n");
+        }
+        sb.append("  },\n");
+        sb.append("  \"compat\": {\n");
+        sb.append("    \"autoDeferOnRule\": ").append(compatAutoDeferOnRule).append(",\n");
+        sb.append("    \"ruleFiles\": [");
+        for (int fi = 0; fi < compatRuleFiles.size(); fi++) {
+            sb.append(fi == 0 ? "" : ", ").append('"').append(compatRuleFiles.get(fi)).append('"');
+        }
+        sb.append("]\n  },\n");
         sb.append("  \"parity\": {\n");
         sb.append("    \"trace\": \"").append(parityTrace).append("\",\n");
         sb.append("    \"ticks\": ").append(parityTicks).append(",\n");
@@ -173,6 +251,61 @@ public final class CavaConfig {
 
     public void setOwnership(String id, Ownership value) {
         ownership.put(id, value);
+    }
+
+    // ------------------------------------------------------------------
+    // W2-兼容层：按子系统 × 按 mod 的归属覆盖
+    // ------------------------------------------------------------------
+
+    /**
+     * 「子系统 × mod」级别的归属。
+     *
+     * <p>优先级：{@code perMod[mod][subsystem]}（非 AUTO）&gt; {@code ownership[subsystem]}。
+     * 两边都是 AUTO 时由兼容层按本轮既定决策解算。
+     */
+    public Ownership ownership(String subsystem, String modId) {
+        Map<String, Ownership> m = perMod.get(modId);
+        if (m != null) {
+            Ownership o = m.get(subsystem);
+            if (o != null && o != Ownership.AUTO) {
+                return o;
+            }
+        }
+        return ownership(subsystem);
+    }
+
+    /** 显式设置「子系统 × mod」的覆盖。 */
+    public void setOwnership(String subsystem, String modId, Ownership value) {
+        perMod.computeIfAbsent(modId, k -> new LinkedHashMap<>()).put(subsystem, value);
+    }
+
+    /** 只读视图：mod -> (子系统 -> 覆盖)。 */
+    public Map<String, Map<String, Ownership>> perMod() {
+        Map<String, Map<String, Ownership>> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Map<String, Ownership>> e : perMod.entrySet()) {
+            out.put(e.getKey(), java.util.Collections.unmodifiableMap(new LinkedHashMap<>(e.getValue())));
+        }
+        return java.util.Collections.unmodifiableMap(out);
+    }
+
+    /** 告警规则是否强制对应子系统让位（默认 true；false = 只告警不动归属）。 */
+    public boolean compatAutoDeferOnRule() {
+        return compatAutoDeferOnRule;
+    }
+
+    public void setCompatAutoDeferOnRule(boolean v) {
+        this.compatAutoDeferOnRule = v;
+    }
+
+    /** 显式指定的规则快照文件（优先级高于自动探测的候选路径）。 */
+    public List<String> compatRuleFiles() {
+        return java.util.Collections.unmodifiableList(new ArrayList<>(compatRuleFiles));
+    }
+
+    public void addCompatRuleFile(String file) {
+        if (file != null && !file.isBlank()) {
+            compatRuleFiles.add(file.trim());
+        }
     }
 
     public int parityTicks() {
@@ -273,6 +406,9 @@ public final class CavaConfig {
             if (c == '{') {
                 return object();
             }
+            if (c == '[') {
+                return array();
+            }
             if (c == '"') {
                 return string();
             }
@@ -284,6 +420,38 @@ public final class CavaConfig {
                 return null;
             }
             return number();
+        }
+
+        /**
+         * 数组（W2-兼容层补）。
+         *
+         * <p>原来只支持「对象 / 字符串 / 整数 / 布尔 / null」，但真实 {@code fabric.mod.json}
+         * 一定有数组（{@code authors} / {@code mixins} / {@code depends} 的某些形态），
+         * 缺了它兼容层连一个 mod 都读不出来（实测：整合包 49 个 jar 探测到 0 个）。
+         */
+        java.util.List<Object> array() {
+            expect('[');
+            java.util.List<Object> list = new java.util.ArrayList<>();
+            skipWs();
+            if (peek() == ']') {
+                pos++;
+                return list;
+            }
+            while (true) {
+                skipWs();
+                list.add(value());
+                skipWs();
+                char c = peek();
+                if (c == ',') {
+                    pos++;
+                    continue;
+                }
+                if (c == ']') {
+                    pos++;
+                    return list;
+                }
+                throw new IllegalArgumentException("数组里期望 ',' 或 ']' @" + pos);
+            }
         }
 
         String string() {
@@ -367,6 +535,17 @@ public final class CavaConfig {
             own.append(e.getKey()).append('=').append(e.getValue().jsonName()).append("  ");
         }
         lines.add(own.toString());
+        StringBuilder pm = new StringBuilder("perMod 覆盖     : ");
+        for (Map.Entry<String, Map<String, Ownership>> e : perMod.entrySet()) {
+            pm.append(e.getKey()).append("={");
+            int i = 0;
+            for (Map.Entry<String, Ownership> s : e.getValue().entrySet()) {
+                pm.append(i++ == 0 ? "" : ",").append(s.getKey()).append('=').append(s.getValue().jsonName());
+            }
+            pm.append("} ");
+        }
+        lines.add(pm.toString().trim());
+        lines.add("compat          : autoDeferOnRule=" + compatAutoDeferOnRule + " ruleFiles=" + compatRuleFiles);
         lines.add("parity          : trace=\"" + parityTrace + "\" ticks=" + parityTicks
                 + " label=\"" + parityLabel + "\" worldRadius=" + parityWorldRadius);
         return lines;

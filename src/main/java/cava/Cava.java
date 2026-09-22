@@ -1,5 +1,6 @@
 package cava;
 
+import cava.compat.CompatReport;
 import cava.ffm.CavaNative;
 import cava.parity.TickSampler;
 import cava.subsystem.CavaSubsystem;
@@ -60,17 +61,26 @@ public class Cava implements ModInitializer {
         registry.register(new EntitySubsystem());
         registry.register(new RedstoneSubsystem());
 
+        // W2-兼容层：探测 mod / 规则 → 解算归属 → 出一张可 grep 的报告，并把让位落到子系统上
+        CompatReport compat = CompatReport.collectInGame(config, gameDir, String.valueOf(nat.status()),
+                modVersion("minecraft"), modVersion("fabricloader"));
+        for (String line : compat.lines()) {
+            LOGGER.info(line);
+        }
+
         if (!nativeOpen) {
             registry.disableAll("native 不可用（" + nat.status() + "）：整体回退纯 Java");
         } else {
+            int deferred = compat.applyDeferrals(registry);
+            LOGGER.info("[cava] 兼容层：{} 个子系统按归属让位（{}）", deferred, compat.deferSubsystems());
             for (CavaSubsystem s : registry.all()) {
-                if (config.ownership(s.id()) == CavaConfig.Ownership.DEFER) {
+                if (config.ownership(s.id()) == CavaConfig.Ownership.DEFER && s.enabled()) {
                     s.disable("config/cava.json ownership=defer（让位给其它 mod）");
                 }
             }
         }
 
-        printBanner(nat, registry);
+        printBanner(nat, registry, compat);
 
         TickSampler.init();
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
@@ -86,7 +96,7 @@ public class Cava implements ModInitializer {
         });
     }
 
-    private void printBanner(CavaNative nat, SubsystemRegistry registry) {
+    private void printBanner(CavaNative nat, SubsystemRegistry registry, CompatReport compat) {
         StringBuilder sb = new StringBuilder();
         sb.append(System.lineSeparator()).append("  ################ Cava ").append(VERSION)
                 .append("  （Java 21 预览版 FFM + C++ 原生；P0 骨架，未注入任何游戏逻辑） ################");
@@ -104,6 +114,13 @@ public class Cava implements ModInitializer {
             sb.append(String.format("    %-9s %-14s %-8s %-8s %s%n", s.id(),
                     config.ownership(s.id()).jsonName(), s.enabled(), s.hooksInstalled(),
                     s.disabledReason().isEmpty() ? (s.enabled() ? "正常" : "P0 骨架（无钩子）") : s.disabledReason()));
+        }
+        sb.append("  兼容层归属（CAVA-COMPAT|v1|* 的简表；完整行见上面的日志）").append(System.lineSeparator());
+        for (String line : compat.summaryLines()) {
+            sb.append(line).append(System.lineSeparator());
+        }
+        for (String w : compat.warnings()) {
+            sb.append("  [WARN] ").append(w).append(System.lineSeparator());
         }
         sb.append("  ################################################################################");
         LOGGER.info(sb.toString());

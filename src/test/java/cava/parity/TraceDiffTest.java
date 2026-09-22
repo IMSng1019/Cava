@@ -77,6 +77,98 @@ class TraceDiffTest {
         assertTrue(r.report().contains("mods 指纹不同"));
     }
 
+    // ------------------------------------------------------------------
+    // 头行驱动的排除规则（captain 的确定性结论要求）+ detail 差异定位
+    // ------------------------------------------------------------------
+
+    private static String headerMeta(String label, boolean nativeOn, String excl, String incl) {
+        return "{\"t\":\"h\",\"v\":1,\"label\":\"" + label + "\",\"native\":" + nativeOn
+                + ",\"mods\":\"deadbeefdeadbeef\",\"mc\":\"1.20.4\",\"cava\":\"0.1.0\",\"seed\":1,\"startTick\":0"
+                + ",\"radius\":4,\"spawnExcl\":3,\"excl\":\"" + excl + "\",\"incl\":\"" + incl + "\""
+                + ",\"hash\":\"dims=overworld;w=blocks;e=entity-pos-bits;p=navstate\"}";
+    }
+
+    private static String tickFull(long k, String w, String e) {
+        return "{\"t\":\"k\",\"k\":" + k + ",\"w\":\"" + w + "\",\"e\":\"" + e
+                + "\",\"p\":null,\"bt\":null,\"nt\":null,\"x\":null}";
+    }
+
+    @Test
+    void headerMetaIsParsed() {
+        TraceDiff.Header h = TraceDiff.parseHeader(headerMeta("x", true, "entities", ""));
+        assertEquals("4", h.radius());
+        assertEquals("3", h.spawnExcl());
+        assertTrue(h.excludesEntities());
+        assertTrue(h.excludes("entities"));
+    }
+
+    /** 契约 4.2 的默认：**e 不参与比对**（实体层本质不确定）；显式 --entities 才比。 */
+    @Test
+    void entitiesAreExcludedByDefault() throws IOException {
+        List<String> a = List.of(headerMeta("a", false, "entities", ""), tickFull(0, "aaaa", "1111"));
+        List<String> b = List.of(headerMeta("b", true, "entities", ""), tickFull(0, "aaaa", "2222"));
+        TraceDiff.Result r = TraceDiff.diff(write("ea.ndjson", a), write("eb.ndjson", b));
+        assertTrue(r.zeroDiff(), r.report());
+        assertTrue(r.report().contains("ZERO DIFF over 1 ticks"), r.report());
+        assertTrue(r.report().contains("e 未参与比对"), r.report());
+
+        TraceDiff.Result forced = TraceDiff.diff(tmp.resolve("ea.ndjson"), tmp.resolve("eb.ndjson"), Boolean.TRUE);
+        assertFalse(forced.zeroDiff(), "--entities 时必须报 e 的差异");
+        assertEquals(1L, forced.diffCounts().get("e"));
+    }
+
+    /** 头行 incl=entities（脚本化合成场景采集时）⇒ e 参与比对。 */
+    @Test
+    void headerInclEnablesEntities() throws IOException {
+        List<String> a = List.of(headerMeta("a", false, "", "entities"), tickFull(0, "aaaa", "1111"));
+        List<String> b = List.of(headerMeta("b", true, "", "entities"), tickFull(0, "aaaa", "2222"));
+        TraceDiff.Result r = TraceDiff.diff(write("ia.ndjson", a), write("ib.ndjson", b));
+        assertFalse(r.zeroDiff());
+        assertEquals(1L, r.diffCounts().get("e"));
+    }
+
+    /** 旧 trace（没有 excl/incl 键）也必须按契约默认排除 entities。 */
+    @Test
+    void legacyHeaderStillExcludesEntities() throws IOException {
+        List<String> a = List.of(header("a", false), tickFull(0, "aaaa", "1111"));
+        List<String> b = List.of(header("b", true), tickFull(0, "aaaa", "2222"));
+        TraceDiff.Result r = TraceDiff.diff(write("la.ndjson", a), write("lb.ndjson", b));
+        assertTrue(r.zeroDiff(), r.report());
+    }
+
+    /** detail-*.ndjson 必须把差异定位到**实体键 / 区块坐标**。 */
+    @Test
+    void detailLocalizesEntityAndChunk() throws IOException {
+        write("da.ndjson", List.of(headerMeta("da", false, "entities", ""), tickFull(0, "aaaa", "1111"),
+                tickFull(1, "bbbb", "1111")));
+        write("db.ndjson", List.of(headerMeta("db", true, "entities", ""), tickFull(0, "aaaa", "1111"),
+                tickFull(1, "cccc", "1111")));
+        write("detail-da.ndjson", List.of("{\"t\":\"h-detail\"}",
+                "{\"t\":\"d\",\"k\":1,\"ent\":[[\"minecraft:zombie#45\",\"1111\",\"(200.50,64.00,-3.50)\"]],"
+                        + "\"paths\":[],\"dc\":[[\"minecraft:overworld:4,-1\",\"dead\"]]}"));
+        write("detail-db.ndjson", List.of("{\"t\":\"h-detail\"}",
+                "{\"t\":\"d\",\"k\":1,\"ent\":[[\"minecraft:zombie#45\",\"9999\",\"(200.60,64.00,-3.50)\"]],"
+                        + "\"paths\":[],\"dc\":[[\"minecraft:overworld:4,-1\",\"beef\"]]}"));
+
+        TraceDiff.Result r = TraceDiff.diff(tmp.resolve("da.ndjson"), tmp.resolve("db.ndjson"));
+        assertFalse(r.zeroDiff());
+        assertEquals(1, r.firstDiffTick());
+        String rep = r.report();
+        assertTrue(rep.contains("minecraft:zombie#45"), rep);
+        assertTrue(rep.contains("minecraft:overworld:4,-1"), rep);
+        assertTrue(rep.contains("(200.50,64.00,-3.50)"), rep);
+    }
+
+    /** 没有 detail 文件时必须**明说**不能定位，而不是假装定位到了。 */
+    @Test
+    void missingDetailIsReportedHonestly() throws IOException {
+        List<String> a = List.of(headerMeta("na", false, "entities", ""), tickFull(0, "aaaa", "1111"));
+        List<String> b = List.of(headerMeta("nb", true, "entities", ""), tickFull(0, "bbbb", "1111"));
+        TraceDiff.Result r = TraceDiff.diff(write("na.ndjson", a), write("nb.ndjson", b));
+        assertFalse(r.zeroDiff());
+        assertTrue(r.report().contains("没有 detail 明细文件"), r.report());
+    }
+
     @Test
     void parsesNullsAndNumbers() {
         String line = tick(7, "abc");

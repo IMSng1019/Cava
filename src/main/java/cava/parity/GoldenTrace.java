@@ -21,6 +21,24 @@ public final class GoldenTrace implements Closeable {
     /** 轨迹格式版本（写进头）。 */
     public static final int VERSION = 1;
 
+    /**
+     * 头行的**排除/包含范围**（captain 的确定性结论要求：排除范围必须写进 trace 头才算可复现）。
+     *
+     * <p>这是对契约 4.2 头行字段的**追加**（不是修改）：原有 8 个键一个不动，新增
+     * {@code radius / spawnExcl / excl / incl / hash} 五个键。老 trace 仍然能被解析
+     * （{@link cava.parity.TraceDiff} 按键取值，缺键=null）。
+     *
+     * @param radius            世界哈希扫描半径（区块）
+     * @param spawnExclRadius   世界哈希排除的出生点方形半径（区块）；0 = 不排除
+     * @param excl              逗号分隔的"默认不比对"字段（如 {@code entities}）
+     * @param incl              逗号分隔的"显式比对"字段
+     * @param hashDefs          各哈希字段的定义（人读，防止把 p 当成"调用级"节点序列）
+     */
+    public record Meta(int radius, int spawnExclRadius, String excl, String incl, String hashDefs) {
+        /** 契约默认：半径 8、排除出生点 3 区块、默认排除 entities。 */
+        public static final Meta DEFAULT = new Meta(8, 3, "entities", "", "w=blocks;e=entities;p=navstate");
+    }
+
     private final Path path;
     private final Writer writer;
     private long written;
@@ -31,25 +49,56 @@ public final class GoldenTrace implements Closeable {
         this.writer = writer;
     }
 
-    /** 打开 {@code <dir>/trace-<label>.ndjson} 并写头行。 */
+    /** 打开 {@code <dir>/trace-<label>.ndjson} 并写头行（契约默认 Meta）。 */
     public static GoldenTrace open(Path dir, String label, String mods, String mcVersion, String cavaVersion,
                                    long seed, long startTick, boolean nativeOn) throws IOException {
+        return open(dir, label, mods, mcVersion, cavaVersion, seed, startTick, nativeOn, Meta.DEFAULT);
+    }
+
+    /** 打开 {@code <dir>/trace-<label>.ndjson} 并写头行（含排除范围）。 */
+    public static GoldenTrace open(Path dir, String label, String mods, String mcVersion, String cavaVersion,
+                                   long seed, long startTick, boolean nativeOn, Meta meta) throws IOException {
         Files.createDirectories(dir);
         Path file = dir.resolve("trace-" + sanitize(label) + ".ndjson");
         Writer w = new BufferedWriter(Files.newBufferedWriter(file, StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE), 1 << 16);
         GoldenTrace t = new GoldenTrace(file, w);
-        StringBuilder sb = new StringBuilder(256);
-        sb.append("{\"t\":\"h\",\"v\":").append(VERSION)
-                .append(",\"label\":").append(json(label))
-                .append(",\"native\":").append(nativeOn)
-                .append(",\"mods\":").append(json(mods))
-                .append(",\"mc\":").append(json(mcVersion))
-                .append(",\"cava\":").append(json(cavaVersion))
-                .append(",\"seed\":").append(seed)
-                .append(",\"startTick\":").append(startTick)
-                .append('}');
-        t.writeLine(sb.toString());
+        t.writeLine(header(label, mods, mcVersion, cavaVersion, seed, startTick, nativeOn, meta));
+        return t;
+    }
+
+    /**
+     * 头行 JSON（契约 4.2 的 8 个键 + {@link Meta} 追加的 5 个键）。
+     * 追加强制理由：captain 的确定性结论要求"排除范围写进 trace 头（可复现）"。
+     */
+    public static String header(String label, String mods, String mcVersion, String cavaVersion,
+                                long seed, long startTick, boolean nativeOn, Meta meta) {
+        Meta m = meta == null ? Meta.DEFAULT : meta;
+        return "{\"t\":\"h\",\"v\":" + VERSION
+                + ",\"label\":" + json(label)
+                + ",\"native\":" + nativeOn
+                + ",\"mods\":" + json(mods)
+                + ",\"mc\":" + json(mcVersion)
+                + ",\"cava\":" + json(cavaVersion)
+                + ",\"seed\":" + seed
+                + ",\"startTick\":" + startTick
+                + ",\"radius\":" + m.radius()
+                + ",\"spawnExcl\":" + m.spawnExclRadius()
+                + ",\"excl\":" + json(m.excl())
+                + ",\"incl\":" + json(m.incl())
+                + ",\"hash\":" + json(m.hashDefs())
+                + '}';
+    }
+
+    /** 打开明细文件 {@code <dir>/detail-<label>.ndjson}（逐实体哈希 + 区块增量哈希，差异定位用）。 */
+    public static GoldenTrace openDetail(Path dir, String label, Meta meta) throws IOException {
+        Files.createDirectories(dir);
+        Path file = dir.resolve("detail-" + sanitize(label) + ".ndjson");
+        Writer w = new BufferedWriter(Files.newBufferedWriter(file, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE), 1 << 16);
+        GoldenTrace t = new GoldenTrace(file, w);
+        t.writeLine(header(label, "detail", "", "", 0L, 0L, false, meta)
+                .replace("{\"t\":\"h\"", "{\"t\":\"h-detail\""));
         return t;
     }
 
@@ -83,6 +132,21 @@ public final class GoldenTrace implements Closeable {
                 .append(",\"nt\":").append(neighborUpdates == null ? "null" : neighborUpdates.toString())
                 .append(",\"x\":").append(extra == null ? "null" : json(extra))
                 .append('}');
+        writeLine(sb.toString());
+    }
+
+    /**
+     * 明细行：{@code {"t":"d","k":<tick>,"ent":[[key,hash,note],...],"paths":[...],"dc":[[chunk,hash],...]}}。
+     *
+     * <p>{@code dc} 只写**相对上一 tick 发生变化**的区块 —— 脚本场景（tick freeze/sprint）下它通常是空的；
+     * 一旦有内容，两侧比对就直接给出"哪个区块坐标"这个答案。
+     */
+    public void detailLine(long tick, StringBuilder entities, StringBuilder paths, String chunkDelta) throws IOException {
+        StringBuilder sb = new StringBuilder(512);
+        sb.append("{\"t\":\"d\",\"k\":").append(tick)
+                .append(",\"ent\":[").append(entities == null ? "" : entities).append(']')
+                .append(",\"paths\":[").append(paths == null ? "" : paths).append(']')
+                .append(",\"dc\":[").append(chunkDelta == null ? "" : chunkDelta).append("]}");
         writeLine(sb.toString());
     }
 

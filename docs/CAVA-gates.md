@@ -226,6 +226,48 @@ bench 里 20000 次真实调用 `canaryDelta=20000/20000`（一次不多不少�
 
 > **残留风险（已写明，未消除）**：那 18 个变体是**启发式**，不是穷举；真实服务器上仍需复核。
 
+### P2 第 2 核（broadphase + `pushAwayFrom`）：**技术成功，但不该上线**（2026-09-22）
+
+**这一节的结论是"不做"，而它和"做成了"一样有价值 —— 因为它是实测出来的。**
+
+**技术上是成功的**：区段 broadphase 在真实服务端**真的接管过**（`bpTakeovers=16308 bpFallback=0 bpErrors=0 bpDesync=0`），
+shadow 同 call 对拍 `bpCompared=4025 bpMismatch=0`（对拍另一侧**用原版自己的 `ChunkSectionPos` + `LongAVLTreeSet` 转写**，
+顺带证明位布局没读反）。内核脱离 MC 编译通过、62 checks 全过、跨语言向量 0 不一致。
+
+**但性能净亏**：同 call A/B（4025 样本）**`nativePlan=8933ns` vs `vanillaPlan=2113ns` ⇒ 净亏 ≈ +6.8µs/次**，
+**瓶颈在 FFM 边界不在算法**（本负载平均只访问 ~1 个区段 —— 边界成本摊不开）。
+
+> **所以决定：不上线。** `-Dcava.push.*` 保持 opt-in、默认关。
+> 这与第 1 核（live 净亏 +1.86µs、默认关）是同一个处置：**技术可行 ≠ 值得开**，
+> 而"测出来是亏的就不开"比"为了交付而硬上"正确得多。
+
+**一条必须记住的负面结果**：`pushCalls=0` —— 本整合包里 `MobEntity` 召唤后约 1 秒**被静默移走**
+（`PersistenceRequired`/`Invulnerable`/`NoAI`/`NoGravity` 都挡不住，无死亡消息无 crash）；
+`-Dcava.push.mode=off -Dcava.push.broadphase=off` 下现象**完全相同** ⇒ **与本轮改动无关**。
+矿车走自己的覆写，船没进实体 lookup。
+⇒ **没能构造出"能证明 push 接管不变且更快"的真实负载。**
+
+> **这条比性能数字更重要**：它说明**"实体推挤"这个核在当前整合包上可能根本没有负载**。
+> 任务书把它排在性价比第 2 位是基于"原版在密集区域是 O(n²)"的一般判断，
+> 而**实测负载不支持这个前提**。任何后续要在这上面投入的人，先看这条。
+
+**可证伪金丝雀（又一次能红的测试）**：`-Dcava.push.canary=drop-last-section` 只丢计划里最后一个区段 ⇒
+同场景 `avgDist 7.689 → 3.9915`、`maxDist 8.7001 → 6.9678`、`moved 200 → 183`。
+**原生结果真的进了物理** —— 这比"计数器 +1"强。
+
+**定点真值表又抓到两个真错**：`section_coord` 漏了 `>>4`（SP-1..5 全红）；
+以及一处**测试自己写错**（容量给 64，而内核正确返回了错误码）。
+
+**核 3 射线与核 4 `getOtherEntities`：判定不做，理由已写进文档** ——
+射线是"原生没有世界、`VoxelShape.raycast` 依赖 `getCoordIndex` 的两个子类实现、收益面小一个量级"；
+`getOtherEntities` 是"谓词留 Java 已满足、叶子候选数通常个位数、拷贝成本 > 过滤成本"。
+**"写清为什么不做"是可以接受的交付**，比做一个不可靠的版本好。
+
+**它自己指出的一个结构性缺口（我给裁决）**：`cava/ffm/**` 不在它的授权路径，
+所以三个新符号**无法登记进 `CavaBindings.REQUIRED_SYMBOLS`**，本轮只能自己 `libraryLookup`。
+**这确实是个缺口** —— 缺了 `cava_open` 的 fail-closed 保护。但既然本核**决定不上线**，
+**这个缺口现在不需要补**；等哪天要开这个核，再连同 ABI 提案一起并进 CavaBindings。
+
 ### ✅ P2 `live` 接管达成（2026-09-22）—— 以及它带来的一个**方法论收获**
 
 **结果**：`-Dcava.entity.move=live` 真接管，**144158 次接管、fallback=0、errors=0、overflow=0**。

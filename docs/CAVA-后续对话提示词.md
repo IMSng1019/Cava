@@ -324,9 +324,32 @@ J:/mc/Cava　（Fabric mod 项目；原生代码放 native/；文档在 docs/）
 
 ---
 
-## 附二：本轮已完成的成果（新会话可以直接引用，不必重做）
+## 附二·A：**P0 已完成**（2026-09-22 多代理并行轮，全部有实测证据）
 
-- **环境**：便携版 CMake 3.31.2 已装在工作区内（见通用上下文）；CMakeLists 尚未创建。
+> **新会话先读这三份**：`docs/CAVA-工程接口契约.md`（共享契约）、`docs/CAVA-gates.md`（已通过的门禁与实测坑）、`docs/CAVA-execution-plan.md`（多代理主计划与文件所有权）。
+
+- **`gradlew build` 已可过**（`+ test` 28 单测全绿）。要守住 JDK 21 + `--release 21 --enable-preview`，**Loom 必须 pin `1.17.20`** —— Loom 1.18.x 的 module metadata 要求 **JVM 25**（模板自带 workflow 写 JDK 25 就是迁就它）。CI 已改回 JDK 21。
+- **原生库能编能测**：`CMakeLists.txt` + `native/cmake/{CavaPlatform,CavaFlags}.cmake`；`cmake -S . -B build/native-<流名> -G "MinGW Makefiles" -DCMAKE_MAKE_PROGRAM=C:/mingw64/bin/mingw32-make.exe`；`ctest` **3/3 通过**；产物 `natives/windows-x64/cava.dll`；Windows 全静态运行时（依赖只剩 KERNEL32+msvcrt，代价 2.78MB）。
+- **Java ↔ 原生端到端已通**：`cava.ffm.NativeSelfTest` → `status=OPEN`、`java_layout_sum == native_layout_sum == 0x6149FD30`、`SELF-TEST: PASS`；一键回退 `-Dcava.native.enabled=false` → `DISABLED_BY_FLAG`（INFO 非 ERROR）；缺库 → `RESOURCE_MISSING` 优雅退出。
+- **ABI 守卫逐项实测**（`tools/LayoutGuardProbe.java`）：错误 layout_hash → `CAVA_ERR_LAYOUT`、错误/缺失 ABI 版本 → `CAVA_ERR_ABI_VERSION`，**都在写入句柄之前失败**；`cava_close` 幂等 + 伪造句柄安全。
+- **架构级门已通过**：`javac --release 21 --enable-preview` 编出的 mod（class mini r=65535）能被真实 **Fabric Loader 0.19.5 / MC 1.20.4** 服务端加载并执行，`java.lang.foreign` 可用。**派生硬约束：启动参数必须含 `--enable-native-access=ALL-UNNAMED`。**
+- **ABI 已冻结**（`native/include/cava_abi.h`）：P0 的 `cava_open/close/layout_report/abi_version/build_id/touch/d2i_sat/d2l_sat/bits_*`，P1 的 `CavaPathRequest/CavaPathNode/cava_pathfind`，**镜像侧**的 `cava_state_table_upload/cava_region_upload/cava_region_state_id_at`（**有界长方体区域推送**，不是整块世界镜像）。
+- **Java 侧骨架已就位**：`cava.ffm`（唯一允许出现 `java.lang.foreign` 的包；`cava.native.ffm` **非法**，`native` 是保留字）、`cava.canary`、`cava.subsystem`、`cava.parity`（黄金轨迹 NDJSON + 固定扫描盒世界哈希）、`cava.CavaConfig`。
+- **真测试服能起**：`tools/start-server.ps1` / `tools/copy-mods.ps1`；端口 **25566**（25565 留给别人，踩过冲突）；`testbed/` 已 gitignore。
+
+### 本机实测过的坑（照做可省几小时，细节见 `docs/CAVA-gates.md` 附录与 `docs/CAVA-dev-toolbox.md`）
+1. **PowerShell 是 5.1**：`& java -Dkey=value` 会被解析坏 → JVM 属性走 `$env:JAVA_TOOL_OPTIONS`；`javac -cp "a;b"` 也会坏 → 走 **UTF-8 的 `@argfile`**（ASCII argfile 会把含中文的用户目录名写成 `???`，classpath 静默失效）。
+2. **`Linker.defaultLookup()` 看不到 `System.load()` 进来的 DLL** → 必须回退 `SymbolLookup.libraryLookup(path, arena)`（`cava.ffm.CavaBindings` 已封装，别自己写 defaultLookup）。
+3. **`natives/<平台标签>/` 是共享输出目录**，并发构建会互相覆盖（实测把一次测试打假失败）→ 同时只有一个流能构建原生产物。
+4. **CMake 的 `check_cxx_compiler_flag` 默认用 Debug 探针**，MSVC 下 `/O2` 与 `/RTC1` 冲突 → 误判"不支持 /O2"。已加 `CMAKE_TRY_COMPILE_CONFIGURATION=Release`。
+5. **`javap` 不认 `--enable-preview`**；原版行为的权威来源是 Loom 缓存里那份 **命名** jar（`javap -p -c -classpath <它> <类>`）。
+6. **共享 git index 会竞态**：并行期一律 `git commit -m "..." -- <显式路径>`，不要 `git add`。
+
+---
+
+## 附二·B：上一轮的成果（仍然有效）
+
+- **环境**：便携版 CMake 3.31.2 已装在工作区内（见通用上下文）。
 
 - **注入点清单**：19 个点，含 Yarn 名、intermediary、占用者、策略 —— docs/CAVA-hook-points.md
 - **逐 mod 详解**：49 个 jar，分四个附录（A.1 小众/功能型、A.2 重负载类、A.3 核心优化类、A.4 Carpet 三件套）—— docs/CAVA-服务器模组清单.md

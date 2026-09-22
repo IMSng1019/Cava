@@ -46,6 +46,14 @@ tools/
 .gradle-home/
 testbed/
 
+# CMake build trees
+build/native-*/
+cmake-build-*/
+
+# compiled native artifacts: produced by CMake, shipped inside the jar at build time.
+# never committed -- regenerated per platform (see docs/CAVA-build.md).
+natives/
+
 # 服务端 modpack 参考 jar（174.6 MB / 49 个）—— 明确不入库（用户决定 2026-09-22）。
 # 部署测试服时用脚本从该目录拷贝到 testbed/server/mods/，不要提交。
 优化模组/

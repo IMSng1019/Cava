@@ -96,8 +96,19 @@ Java 侧算出期望值填进 `CavaOpenParams.layout_hash_sum`；原生侧比较
 | `CavaLayoutReport` | 自检报告 |
 | `CavaOpenParams` | open 入参 |
 | `CavaOpenResult` | open 出参 |
+| `CavaPathRequest` | P1 寻路入参（已冻结） |
+| `CavaPathNode` | P1 寻路出参节点（已冻结） |
 
-### 2.4 Java 侧 FFM 三个坑（JDK 21 预览 API，**已实测**）
+### 2.4 P1 寻路 ABI（**已冻结**，`CavaPathRequest` / `CavaPathNode`）
+
+接口形状与常量在 `native/include/cava_abi.h` 里。要点：
+
+- 坐标一律**世界坐标**；`g`/`f` 是 **float**，跨边界原样传位模式，**禁止中途提升为 double**。
+- `cava_pathfind` 返回 `>0` 节点数 / `0` 无路径 / `<0` 错误码；**`cap` 不足返回 `CAVA_ERR_ARG` 且绝不部分写入**。
+- **镜像侧 ABI（区段/方块状态推送）故意留到 P1 真正开工时冻结** —— 它必须由区段镜像与方块状态表的实际实现推导。
+  在它冻结之前，P1 只允许先做「纯算法内核 + 逐位一致性验证」，不得自行发明镜像 ABI。
+
+### 2.5 Java 侧 FFM 三个坑（JDK 21 预览 API，**已实测**）
 
 - **没有 `Linker.Option.critical`**（JDK 22 才有）。不要写。
 - 数组分配是 `arena.allocateArray(layout, count)`。

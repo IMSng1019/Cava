@@ -226,6 +226,41 @@ bench 里 20000 次真实调用 `canaryDelta=20000/20000`（一次不多不少�
 
 > **残留风险（已写明，未消除）**：那 18 个变体是**启发式**，不是穷举；真实服务器上仍需复核。
 
+### 三条"容易读反 / 容易混淆"的原版真值（P2 实体轮，captain 已独立复核）
+
+这三条都是**运行期不会报错、只会让结果与服务器不一致**的类型，所以每条都配了定点用例，而不是靠随机向量。
+
+#### 1. `MathHelper.approximatelyEquals` 的阈值是 `9.999999747378752E-6`，**不是 1e-7**
+
+```
+0: dload_2 ; 1: dload_0 ; 2: dsub ; 3: invokestatic Math.abs:(D)D
+6: ldc2_w  #166   // double 9.999999747378752E-6d
+9: dcmpg ; 10: ifge 17 ; 13: iconst_1 ; 18: ireturn
+```
+
+**最容易犯的错**：把 `1e-7` 当成这个函数的阈值。**`1e-7` 确实存在于 `Entity.move` 里，但它是
+`lengthSquared` 守卫用的另一条常量**，与近似比较无关。两个常量在两个地方、都有用，混起来不会报错。
+
+#### 2. `verticalCollision` 用裸 `!=`，只有 x/z 走近似比较
+
+`Entity.move` 里 `verticalCollision` 的判定是 `dcmpl/ifeq`（裸不等），而 x/z 用的是
+`approximatelyEquals`。**后果**：当 `movement` 与 `adjusted` 相差 `1e-9` 时
+—— **`horizontalCollision = false`、`verticalCollision = true`**。按"三个轴都用近似比较"实现就会错。
+
+#### 3. `Vec3d.equals` / `Box.equals` 用的是 `Double.compare` ⇒ **`-0.0` 不等于 `0.0`**
+
+```
+21: getfield x:D ; 29: invokestatic Double.compare:(DD)I ; 32: ifeq 37 ; 35: iconst_0 ; 36: ireturn
+```
+
+**这条直接决定 VMP 的零位移短路**：VMP 的条件是 `movement.equals(Vec3d.ZERO)`，而 `Vec3d.ZERO` 的分量是 `+0.0`。
+所以**一个分量为 `-0.0` 的 movement 不会命中短路**。用 `== 0.0` 或"数学上等于零"来实现，
+会比现服务器**多跳过**一批移动 —— 逐 tick 差分必爆，而且极难定位。
+
+> **共同教训**：这三条都不是"读错跳转方向"，而是**"两个看起来一样的常量/判定，实际不是一回事"**。
+> 与 P1 那次 `!flag5` 是同一类风险的不同形态。**防御手段也一样：写死调用序列的定点用例**，
+> 因为随机向量是参照实现自己产的，参照实现错了它跟着错。
+
 ### 一条被证伪的担忧（记录下来免得后人重复投入）
 
 注入流担心「档案/区域是每句柄一份可变状态，而寻路跑在工作线程上 ⇒ 只能加锁，并行度=1」，

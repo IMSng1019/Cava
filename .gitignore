@@ -51,6 +51,9 @@ tools/decompiler/
 .gradle-home/
 testbed/
 
+# server/probe runtime logs that land in the repo root when a server's cwd is here
+logs/
+
 # CMake build trees
 build/native-*/
 cmake-build-*/

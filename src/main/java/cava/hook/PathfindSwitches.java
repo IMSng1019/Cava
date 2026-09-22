@@ -42,7 +42,7 @@ public final class PathfindSwitches {
     /**
      * **诊断开关（默认 false，不要在生产开）**：跳过镜像流的 {@code isProfileReadyForSolve} 门禁。
      *
-     * <p>为什么需要它：镜像流（P1-Java-A）的 flags 谓词位尚未就绪时，它会拒绝每一次求解
+     * <p>为什么需要它：镜像流的 {@code isFlagsReadyFor(caps)} 尚未就绪时会拒绝每一次求解
      * （实测 {@code reasons={profile-not-ready=20201}}），于是"区域推送 → 档案上传 →
      * {@code cava_pathfind} → 错误码回退"这条编排链路在真实服务端上**永远走不到**，无法验证。
      *

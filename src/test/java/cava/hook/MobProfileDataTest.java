@@ -1,7 +1,6 @@
 package cava.hook;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import cava.ffm.CavaLayouts;
 import java.lang.foreign.Arena;
@@ -120,20 +119,9 @@ class MobProfileDataTest {
     }
 
     @Test
-    void profileKeyIsStableAndSensitiveToContext() {
-        MobProfileData a = sample();
-        MobProfileData b = sample();
-        assertNotNull(a);
-        // 同一个"档案"必须得到同一个 key（否则 isProfileReadyForSolve 永远 false ⇒ 永远静默回退）
-        long k1 = MobInputs.profileKey(a, MobInputs.MakerKind.LAND);
-        long k2 = MobInputs.profileKey(b, MobInputs.MakerKind.LAND);
-        assertEquals(k1, k2);
-        // 上下文变了必须换 key（否则镜像流会把两个不同 profile 的 flags 混在一起）
-        b.width = 1.4f;
-        org.junit.jupiter.api.Assertions.assertNotEquals(k1, MobInputs.profileKey(b, MobInputs.MakerKind.LAND));
-        org.junit.jupiter.api.Assertions.assertNotEquals(k1, MobInputs.profileKey(a, MobInputs.MakerKind.FLYING));
-        b.width = a.width;
-        b.caps = a.caps | MobInputs.NAV_CAN_OPEN_DOORS;
-        org.junit.jupiter.api.Assertions.assertNotEquals(k1, MobInputs.profileKey(b, MobInputs.MakerKind.LAND));
+    void penaltyMaskCoversAllTwentySixEntries() {
+        // CAVA_PENALTY_ALL_SET 必须正好覆盖 26 项（多一位或少一位都会让惩罚表部分项走默认值）
+        assertEquals((1 << 26) - 1, MobInputs.PENALTY_ALL_SET);
+        assertEquals(MobProfileData.PENALTY_COUNT, Integer.bitCount(MobInputs.PENALTY_ALL_SET));
     }
 }

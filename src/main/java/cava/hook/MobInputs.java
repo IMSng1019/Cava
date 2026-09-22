@@ -136,31 +136,4 @@ public final class MobInputs {
         return caps;
     }
 
-    /**
-     * 档案的**稳定标识**（给 {@code RegionSource.isProfileReadyForSolve}）。
-     *
-     * <p>构成（FNV-1a 64）：{@code [makerKind, caps, width, height, stepHeight]} 的位模式。
-     * 这三条正是原版 {@code getCommonNodeType} 依赖的实体上下文（开门/越栅栏/体型）。
-     *
-     * <p>⚠️ **接口边界请求**：{@code RegionSource} 的 javadoc 说"profileKey 的构成由镜像流决定"，
-     * 但调用方（本流）必须先生成一个值。所以这里把构成写死并**上报 captain/镜像流**：
-     * 两边必须用同一个函数，否则 {@code isProfileReadyForSolve} 永远返回 false（表现为静默回退，不报错）。
-     */
-    public static long profileKey(MobProfileData d, MakerKind kind) {
-        long h = 0xCBF29CE484222325L;   // FNV-1a 64 offset basis
-        h = mix(h, kind.ordinal());
-        h = mix(h, d.caps);
-        h = mix(h, Float.floatToIntBits(d.width));
-        h = mix(h, Float.floatToIntBits(d.height));
-        h = mix(h, Float.floatToIntBits(d.stepHeight));
-        return h;
-    }
-
-    private static long mix(long h, long v) {
-        for (int i = 0; i < 8; i++) {
-            h ^= (v >>> (i * 8)) & 0xFFL;
-            h *= 0x100000001B3L;
-        }
-        return h;
-    }
 }

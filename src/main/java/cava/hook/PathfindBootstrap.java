@@ -36,9 +36,8 @@ public final class PathfindBootstrap {
         try {
             ServerLifecycleEvents.SERVER_STARTED.register(PathfindProbe::onServerStarted);
             ServerTickEvents.END_SERVER_TICK.register(PathfindProbe::onEndTick);
-            LOG.info("[cava/pathfind] 注入体已自举（{}）；{}；{}；{}", PathfindSwitches.describe(),
-                    PathfindMirrorBridge.describe(), PathfindProfileBridge.describe(),
-                    AmphibiousPathNodeMakerAccess.describe());
+            LOG.info("[cava/pathfind] 注入体已自举（{}）；{}；{}", PathfindSwitches.describe(),
+                    PathfindMirrorBridge.describe(), AmphibiousPathNodeMakerAccess.describe());
         } catch (Throwable t) {
             LOG.error("[cava/pathfind] 自举失败（金丝雀与 bench 不可用，但注入点本身仍会回退原逻辑）", t);
         }

@@ -29,8 +29,7 @@ bench 里 20000 次真实调用 **canaryDelta=20000/20000**（一次不多、一
 | ~~src/main/java/cava/mixin/pathfind/AmphibiousPathNodeMakerAccessor.java~~ | ~~@Accessor~~：~~penalizeDeepWater~~（**必须是 accessor，不能用反射**，见 §3.2） |
 | ~~src/main/java/cava/mixin/pathfind/MinecraftServerBootstrapMixin.java~~ | **只做自举**：~~MinecraftServer.<init>~~ HEAD + ~~runServer~~ HEAD（见 §3.1） |
 | ~~src/main/java/cava/hook/PathfindHook.java~~ | 接管编排（取输入 → 镜像 → 原生 → 转换 → 回退） |
-| ~~src/main/java/cava/hook/PathfindMirrorBridge.java~~ | 到 ~~cava.mirror.RegionSource~~ 的窄桥（含按世界构造的 ~~forWorld~~） |
-| ~~src/main/java/cava/hook/PathfindProfileBridge.java~~ | **档案归属桥**：优先镜像流，互斥退化（见 §4.2） |
+| ~~src/main/java/cava/hook/PathfindMirrorBridge.java~~ | 到 ~~cava.mirror.RegionSource~~ 的窄桥：取实例后用**契约方法** ~~bind(ServerWorld)~~ 绑世界（见 §4.3） |
 | ~~src/main/java/cava/hook/MobInputs.java~~ / ~~MobProfileData.java~~ | 从实体抽 ~~CavaMobProfile~~（26 项惩罚表 + ~~CAVA_NAV_*~~） |
 | ~~src/main/java/cava/hook/NativeNodeCodec.java~~ / ~~NativePathBuilder.java~~ | 原生节点 → 原版 ~~Path~~（含 ~~reachesTarget~~ 反语义还原） |
 | ~~src/main/java/cava/hook/PathfindSwitches.java~~ | 全部系统属性开关（含诊断开关） |
@@ -50,10 +49,22 @@ bench 里 20000 次真实调用 **canaryDelta=20000/20000**（一次不多、一
     PS J:\mc\Cava> $env:GRADLE_USER_HOME='J:\mc\Cava\.gradle-home'
     PS J:\mc\Cava> .\gradlew.bat build --console=plain --no-watch-fs
     > Task :build
-    BUILD SUCCESSFUL in 5s          (EXIT=0)
+    BUILD SUCCESSFUL in 3s          (EXIT=0)
 
-（期间实测过一次 ~~139 tests completed, 1 failed, 9 skipped~~，那 1 个失败是本流 ~~RegionWindowTest~~
-的算术笔误，已修。）
+本流 6 个单测类（读 ~~build/test-results/test/TEST-cava.hook.*.xml~~ 实测）：
+
+    cava.hook.AbiPenaltyOrderTest       tests=3 failures=0 errors=0 skipped=0
+    cava.hook.MobProfileDataTest        tests=4 failures=0 errors=0 skipped=0
+    cava.hook.NativeNodeCodecTest       tests=3 failures=0 errors=0 skipped=0
+    cava.hook.PathfindOutcomeTest       tests=4 failures=0 errors=0 skipped=0
+    cava.hook.PathfindSwitchesTest      tests=4 failures=0 errors=0 skipped=0
+    cava.hook.RegionWindowTest          tests=5 failures=0 errors=0 skipped=0
+    HOOK TOTAL                          tests=23 failures=0 errors=0
+    全部（含其它流）                     tests=144 failures+errors=0
+
+（并行期实测过两次**别人路径**导致的红：~~cava/mirror/**~~ 一次 ~~compileJava~~、
+~~src/test/java/cava/mirror/probe/McProbeMain.java~~ 一次 ~~compileTestJava~~；
+都等对方跟上后复跑通过，本流未越界修改。另有一次本流 ~~RegionWindowTest~~ 的算术笔误，已修。）
 
 ### 2.2 金丝雀：真实服务端里真的 +1（**本轮最重要的验收项**）
 
@@ -209,12 +220,28 @@ D 腿实测（诊断开关见 §3.4）：
   **没有任何读取点**（它们是求解器内部量，而求解器已经在原生侧）。
   ⇒ ABI 只导出 x/y/z/heapIndex/g/f/type 对**可观测行为**是够的。
 
-### 3.7 并发：单句柄 = 单份可变状态 ⇒ 必须串行化
+### 3.7 并发：**原生路径假定主线程调用**（我原先的判断被 captain 用 javap 纠正）
 
-~~cava_mob_profile_upload~~ / ~~cava_region_upload~~ 在原生侧是**每个句柄一份**状态，
-而原版寻路跑在 ~~Util.getMainWorkerExecutor()~~ 的**工作线程**上。
-同一句柄并发调用会互相踩踏 ⇒ ~~PathfindHook~~ 用一把 ~~ReentrantLock~~ 串行化
-【镜像推送 + 档案上传 + ~~cava_pathfind~~】。**这是冻结 ABI 的固有约束**，已上报（§4.3）。
+~~cava_mob_profile_upload~~ / ~~cava_region_upload~~ 在原生侧是**每个句柄一份**可变状态。
+我最初以为"寻路跑在 ~~Util.getMainWorkerExecutor()~~ 的工作线程上"，
+captain 复核字节码后否定了这个前提，**他是对的**，本机复核一致：
+
+    javap -p -c net.minecraft.entity.ai.pathing.EntityNavigation
+      181: invokevirtual  // Method PathNodeNavigator.findPathToAny:(Lnet/minecraft/world/chunk/ChunkCache;
+                         //   Lnet/minecraft/entity/mob/MobEntity;Ljava/util/Set;FIF)Lnet/minecraft/entity/ai/pathing/Path;
+    javap -p -c net.minecraft.entity.ai.pathing.MobNavigation
+      ...: invokespecial  // Method EntityNavigation.findPathTo:(Lnet/minecraft/util/math/BlockPos;I)...
+    （1.20.4 Yarn 里**没有** net.minecraft.entity.ai.pathing.PathFinder 这个类）
+
+⇒ ~~EntityNavigation.findPathToAny~~ **直接 invokevirtual** 调导航器，整条链上没有 executor 交接，
+寻路是**同步跑在调用线程（主线程）**上的。
+
+**结论（显式约束，写进契约）**：**原生路径假定主线程调用。**
+- ~~PathfindHook~~ 里那把 ~~ReentrantLock~~ **保留**，但它是**防御性**的（防止将来有 mod 把寻路挪到别的线程），
+  **不是吞吐瓶颈**；
+- **不做**"每线程一个句柄 / 把档案与区域改成 ~~cava_pathfind~~ 入参"这类 ABI 改造 ——
+  那是拿一次高风险变更去换一个不存在的吞吐问题（captain 裁决，我原先的请求 §4.3 第 3 条**撤回**）；
+- 门禁重评条件：**将来若有 mod 把寻路挪到工作线程**，必须重新评估。
 
 ### 3.8 关掉注入体时金丝雀仍然计数
 
@@ -226,31 +253,37 @@ B 腿实测 ~~-Dcava.pathfind.hook=false~~ 时 ~~canaryDelta~~ 仍等于 n，正
 
 ## 4. 跨流接口缺口 / 请求清单
 
-### 4.1 ⚠ **当前唯一的真实阻塞：镜像流的 ~~isProfileReadyForSolve~~ 恒 false**
+### 4.1 原阻塞已由 captain 修契约解决（**等 A 跟进后复测**）
 
-C 腿实测 ~~reasons={profile-not-ready=20201}~~（20000 次 bench + 1 次探测）。
-后果：**即使把 ~~-Dcava.pathfind.native~~ 打开，原生也一次都不会被调用**。
-这不是 bug，是镜像流 flags 谓词位还没就绪时的**正确表现**（宁可回退，也不要跑出语义错的路径）。
-**但这也意味着：在 A 确认「位号已对齐 + 向量重跑通过」之前，原生加速比无从测量。**
+现象（C 腿实测）：~~reasons={profile-not-ready=20201}~~（20000 次 bench + 1 次探测），
+**即使打开 ~~-Dcava.pathfind.native~~，原生也一次都不会被调用**。
 
-### 4.2 重复劳动的处置：档案到底谁推？（**已按互斥方案落地，请 captain 裁决**）
+captain 复核后认定**根因是他的契约设计错了**（不是 A 的实现问题、也不是本流的调用问题）：
+~~CavaMobProfile~~ 需要实体位姿 + 26 项惩罚表，**只有注入点拿得到**，
+所以"镜像流产出档案"的设计**必然恒返回未就绪**。已改 ~~RegionSource~~（captain 提交 ~~6a925ef~~）：
 
-- 冻结接口 ~~RegionSource.uploadProfileForSolve(handle, profileKey)~~ 只说「上传档案以供本次求解」，
-  但**调用方只能给它一个 ~~long profileKey~~，给不了位姿/惩罚表** —— 而那些只有注入点拿得到。
-- 镜像流实际提供了 ~~McMobProfileCapture.of(mob, world)~~ + ~~MobProfiles.define(spec)~~ 注册表。
-- 本流的处置（~~PathfindProfileBridge~~）：**优先走镜像流**（~~of~~ → ~~define~~ → ~~uploadProfileForSolve~~），
-  镜像流不可用时才退化到注入流自带的 ~~MobInputs~~ + ~~CavaNative.mobProfileUpload~~。**两条路互斥**，
-  不会出现「两边各推一份」。
-- **请求 captain 裁决**：档案的权威生产者是谁？若定为镜像流，请把「如何把实体位姿交给镜像流」
-  写进冻结契约（现在的 ~~uploadProfileForSolve(handle, key)~~ 签名表达不了这件事）。
+- 删 ~~isProfileReadyForSolve(profileKey)~~ / ~~uploadProfileForSolve(handle, profileKey)~~；
+- 新增 ~~uploadProfileForSolve(long handle, Consumer<MemorySegment> uploader)~~ —— **注入流填值，镜像流只负责写进原生**；
+- 新增 ~~isFlagsReadyFor(int caps)~~（取代 profileKey 门禁）；
+- 新增 ~~bind(ServerWorld)~~（见 §4.3）。
+
+本流已按新接口改完（~~PathfindHook~~ / ~~PathfindMirrorBridge~~），**等 A 把 ~~RegionMirror~~ 跟到新接口后复测**。
+
+### 4.2 档案的权威生产者 = **注入流**（captain 2026-09-22 裁决）
+
+理由同 §4.1：**只有注入点有位姿与惩罚表**。
+本流据此**删掉了中间层 ~~PathfindProfileBridge~~**（含它"优先走镜像流"的分支）——
+现在只有一条路：~~MobInputs.build(mob, maker)~~ 产出 ~~MobProfileData~~ →
+~~mirror.uploadProfileForSolve(handle, seg -> profile.writeTo(seg, 0))~~。
+**不存在"两个生产者"，也不需要互斥桥。**
 
 ### 4.3 其他接口请求
 
 | # | 给谁 | 请求 |
 | --- | --- | --- |
-| 1 | captain | ~~RegionSource~~ 冻结接口里没有「按世界取镜像」（A 的 ~~RegionMirror.forWorld(ServerWorld)~~）与 ~~pushForSolve(...)~~；本流只能靠反射撞。建议把它们提升为契约的一部分，否则「接口对不上」只能靠运行期回退掩盖 |
-| 2 | P1-Java-A | ~~profileKey~~ 的构成必须两边一致。本流实现的是 FNV-1a 64 over ~~[makerKind, caps, width, height, stepHeight]~~（位模式）。**不一致的表现是「永远静默回退」，不报错** |
-| 3 | captain / P0-B | 单句柄可变状态（档案/区域）与「寻路跑在工作线程」互斥 ⇒ 需要**每线程一个句柄**，或把档案+区域变成 ~~cava_pathfind~~ 的入参，否则原生侧永远只能串行跑，多核优势归零 |
+| 1 | captain | ⚠ **未闭合**：~~bind(ServerWorld)~~ 已进契约、~~forWorld~~ 反射已删，但契约里**仍然没有"如何获得一个 ~~RegionSource~~ 实例"的入口**，而 A 的 ~~RegionMirror~~ 只有 ~~(RegionUploader, StateTableGate)~~ / ~~(RegionReader, RegionUploader, StateTableGate)~~ / ~~static forWorld(ServerWorld)~~。**真实服务端实测（新 jar，~~native=true~~）：~~instance=false boundWorlds=0 reasons={mirror-missing=20201} nativeCalls=0~~** ⇒ 原生整条路径仍然到不了。请求二选一：(A) 契约加 ~~static RegionSource instance()~~（推荐，一行）；(B) 允许保留"只调 ~~forWorld(ServerWorld)~~"的最小兜底。**在回执之前本流保持现状，不会自己加回反射。** |
+| 2 | P1-Java-A | **已作废**：~~profileKey~~ 随旧接口一起删掉了，现在门禁是 ~~isFlagsReadyFor(caps)~~，档案由注入流填值 |
+| 3 | captain / P0-B | **已撤回**（captain 用 javap 纠正了我的前提）：寻路是**同步跑在主线程**的，不存在吞吐问题，不做 ABI 改造。见 §3.7 |
 
 ### 4.4 已确认的 ABI 缺口（不阻塞本轮）
 

@@ -175,9 +175,7 @@ public final class PathfindHook {
         if (PathfindMirrorBridge.getGlobal() == null) {
             out.add("镜像实现未发现（" + PathfindMirrorBridge.describe() + "）");
         }
-        if (!PathfindProfileBridge.mirrorProvidesProfile()) {
-            out.add("镜像流未提供生物档案服务，将使用注入流自带的档案（" + PathfindProfileBridge.describe() + "）");
-        }
+        // 档案的权威生产者是注入流（captain 2026-09-22 裁决），不存在"镜像流是否提供档案"这个问题了
         return out;
     }
 
@@ -288,29 +286,21 @@ public final class PathfindHook {
             count("mirror-missing");
             return null;
         }
-        // 档案归属：**优先镜像流**（captain 冻结接口的语义），只有它不可用时才由注入流自己造。
-        // 两条路互斥 ⇒ 不会出现"两边各推一份档案"。
-        Long mirrorKey = world instanceof net.minecraft.server.world.ServerWorld sw
-                ? PathfindProfileBridge.defineViaMirror(mob, sw) : null;
-        MobProfileData profile = null;
-        long profileKey;
-        if (mirrorKey != null) {
-            profileKey = mirrorKey;
-        } else {
-            profile = MobInputs.build(mob, maker);
-            profileKey = MobInputs.profileKey(profile, kind);
-        }
-        if (!mirror.isProfileReadyForSolve(profileKey)) {
+        // 档案的**权威生产者 = 注入流**（captain 2026-09-22 裁决）：档案里含实体位姿与 26 项惩罚表，
+        // 只有注入点拿得到；镜像流只负责"写进原生"（它持有 handle 与 arena 生命周期）。
+        // ⇒ 没有"两个生产者"，也没有互斥桥。
+        MobProfileData profile = MobInputs.build(mob, maker);
+        if (!mirror.isFlagsReadyFor(profile.caps)) {
             if (!PathfindSwitches.bypassProfileGate()) {
-                count("profile-not-ready");
+                count("flags-not-ready");
                 return null;
             }
             if (profileGateBypassWarned.compareAndSet(false, true)) {
-                LOG.error("[cava/pathfind] ⚠ 诊断开关 -D{}=true 生效：**跳过了镜像流的 profile 就绪门禁**。"
+                LOG.error("[cava/pathfind] ⚠ 诊断开关 -D{}=true 生效：**跳过了镜像流的 flags 就绪门禁**。"
                         + "这只有在 cava_pathfind 保守回退（CAVA_ERR_UNIMPLEMENTED）时才安全；"
                         + "位号对齐后必须关掉。", PathfindSwitches.PROP_BYPASS_PROFILE_GATE);
             }
-            count("profile-gate-bypassed");
+            count("flags-gate-bypassed");
         }
         // (4) 区域窗口（保守策略，见 RegionWindow）
         RegionWindow.Window window = RegionWindow.compute(mob.getBlockX(), mob.getBlockY(), mob.getBlockZ(),
@@ -337,21 +327,13 @@ public final class PathfindHook {
                 count("mirror-unavailable");
                 return null;
             }
-            if (!mirror.uploadProfileForSolve(handle, profileKey)) {
+            // 注入流负责**填值**（每次求解前重推，captain 裁决不得跨 tick 复用），
+            // 镜像流负责把这段内容写进原生（它持有 handle 与 arena 的生命周期）。
+            if (!mirror.uploadProfileForSolve(handle, seg -> profile.writeTo(seg, 0))) {
                 count("profile-upload-refused");
                 return null;
             }
             try (Arena arena = Arena.ofConfined()) {
-                if (profile != null) {
-                    // 退化路径：镜像流没有档案服务，由注入流上传（**每次求解前重推**，captain 裁决）
-                    MemorySegment profSeg = arena.allocate(CavaLayouts.MOB_PROFILE);
-                    profile.writeTo(profSeg, 0);
-                    int prc = nat.mobProfileUpload(handle, profSeg);
-                    if (prc != CavaLayouts.CAVA_OK) {
-                        count("profile-upload-" + CavaLayouts.errorName(prc));
-                        return null;
-                    }
-                }
                 MemorySegment req = arena.allocate(CavaLayouts.PATH_REQUEST);
                 fillRequest(req, target, reachRange, maxRange, budget);
                 MemorySegment out = CavaNative.allocateArray(arena, CavaLayouts.PATH_NODE, cap);

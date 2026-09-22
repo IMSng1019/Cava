@@ -23,7 +23,7 @@
 | # | 用途 | Yarn 类.方法 | intermediary | 签名要点 | 其它 mod 是否也碰 | 冲突性质与策略 |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 寻路主体（接管） | PathNodeNavigator.findPathToAny | method_52 / method_54（Set 版 / Map 版两个重载） | 返回 Path | ServerCore @Redirect×4 + @ModifyVariable×2（改 Map/Set 实现，**无 @Overwrite**，且不可配置） | 无硬冲突：我们 HEAD-cancellable 提前返回后对方补丁自然不执行；语义仍是原版 |
-| 2 | 寻路类型判定 | LandPathNodeMaker.getCommonNodeType / getNodeTypeFromNeighbors / getLandNodeType | method_58 / method_59 / method_23476 | — | Lithium（priority=990，cancellable HEAD）+ @Redirect | **我们不注入这里**（native 自算类型），只需语义对齐 |
+| 2 | 寻路类型判定 | LandPathNodeMaker.getCommonNodeType / getNodeTypeFromNeighbors / getLandNodeType | method_58 / method_59 / method_23476 | — | Lithium（cancellable HEAD + @Redirect；**priority 未核实，别按 990 记**） | **我们不注入这里**（native 自算类型），只需语义对齐 |
 | 3 | 寻路区域视图 | ChunkCache.getBlockState / getFluidState | — | — | Lithium @Overwrite 且新增字段 | **禁止读它的字段/假设布局**；我们用自建区段镜像 |
 | 4 | 导航触发 | EntityNavigation.recalculatePath / startMovingAlong / stop | method_6356 / method_6334 / method_6340 | — | Lithium @Inject（inactive_navigations） | 不需要注入；注意"不活跃生物可能长期不重算路径" |
 | 5 | 建路入口 | MobNavigation.createPath | 待补 | — | ServerCore @Inject HEAD cancellable（受 reduce-sync-loads 控制） | 需适配或让位 |
@@ -34,7 +34,7 @@
 | 10 | 挤压伤害 | LivingEntity.tickCramming | method_6070 | — | Lithium @Redirect（unpushable_cramming） | 可选，后置 |
 | 11 | 射线 | BlockView.clip；（Entity 侧方法名待核实） | 待补 | — | 未发现 | 安全 |
 | 12 | 实体枚举 | EntityView.getOtherEntities / getEntityCollisions | method_8333 / method_8335 / method_20743 | 带 Predicate | Lithium 改 EntityTrackingSection（unpushable_cramming） | 谓词必须留在 Java 侧执行 |
-| 13 | 红石线网取电 | RedstoneWireBlock.getReceivedRedstonePower（Mojang: calculateTargetStrength） | method_27842 | 返回 int | **Lithium @Inject HEAD cancellable（priority=990，整段替换算法）** | **真冲突**：优先用 lithium:options 关掉 mixin.block.redstone_wire；若要共存必须 priority < 990 |
+| 13 | 红石线网取电 | RedstoneWireBlock.getReceivedRedstonePower（Mojang: calculateTargetStrength） | method_27842 | 返回 int | **Lithium @Inject HEAD cancellable（整段替换算法）** —— **勘误（2026-09-22 实读安装 jar）：没有 priority=990，用默认 1000** | **真冲突**：优先用 lithium:options 关掉 mixin.block.redstone_wire |
 | 13b | 红石线网更新（方案 B 才动） | RedstoneWireBlock.update（Mojang: updatePowerStrength） | method_10485 | — | **Alternate Current @Inject HEAD cancellable（事实接管）**；**Carpet fastRedstoneDust @Inject HEAD cancellable（默认关）**；**TIS @ModifyVariable** | **真冲突**：红石只能二选一，检测到它们启用就显式让位。AC 没有关闭机制；AC 还自建 InstantNeighborUpdater，**绕开 ChainRestrictedNeighborUpdater**，挂队列的钩子会漏更新 |
 | 14 | 红石线网更新 | RedstoneWireBlock.update / updateNeighbors / updateOffsetNeighbors | method_10485 / method_10479 / method_27844 | — | Lithium 只 @Redirect(Direction.values())，**算法本体未改** | 可安全镜像 |
 | 15 | 二极管取电 | AbstractRedstoneGateBlock.getPower | method_9991 | 返回 int | 9 个 mod 全部 0 命中 | 安全 |
@@ -55,9 +55,11 @@
    - 优先挂在没人 @Overwrite 的方法上（第 17/18 行而不是第 19 行）；
    - 所有注入 **require=0**：找不到注入点不崩，只是不生效；
    - **钩子金丝雀自检**：启动完成后主动触发一次目标方法，确认我们的计数器真的 +1；没触发就禁用该子系统并大声报错。这是防"静默失效"的唯一可靠手段。
-4. **priority 逐点决策，不在同一点竞争。** Mixin 语义是低优先级先应用、**先应用者先执行回调**：想活过别人的 @Overwrite 需要更大；想抢在别人 cancellable HEAD 之前需要更小（Lithium 用 990 抢 Fabric API 的 1000）。两者不可兼得，所以默认做法是**需要独占时直接关掉对方那个 mixin 组**（见第 3 节），而不是打优先级战争。
+4. **priority 逐点决策，不在同一点竞争。** Mixin 语义是低优先级先应用、**先应用者先执行回调**：想活过别人的 @Overwrite 需要更大；想抢在别人 cancellable HEAD 之前需要更小。两者不可兼得，所以默认做法是**需要独占时直接关掉对方那个 mixin 组**（见第 3 节），而不是打优先级战争。
+   > **勘误（2026-09-22）**：本节原先以"Lithium 用 990 抢 Fabric API 的 1000"为例 —— **那个 990 是错的**。
+   > 实读 Lithium 0.12.1 安装 jar：红石那个 mixin 类的常量池里**没有 priority**、`lithium.mixins.json` 里也没有该字段 ⇒ **它用的是默认 1000**。
 
-5. **priority 默认 1000。** 现有优先级地形：Lithium 局部 990 / 1005 / 1100、VMP 1050、C2ME 1100。取 1000 让我们排在 VMP 与 C2ME 之前（行为按原版走），排在 Lithium 的 990 之后（那两处我们本来就选择关掉对方组）。凡是可能被别人 @Overwrite 的方法，要么避开、要么把 priority 提到 >1100——但首选是避开。
+5. **priority 默认 1000。** 现有优先级地形：Lithium 局部 1005 / 1100（**红石那条是默认 1000，不是 990 —— 已勘误**）、VMP 1050、C2ME 1100。取 1000 让我们排在 VMP 与 C2ME 之前（行为按原版走），排在 Lithium 的 990 之后（那两处我们本来就选择关掉对方组）。凡是可能被别人 @Overwrite 的方法，要么避开、要么把 priority 提到 >1100——但首选是避开。
 
 6. **逐点决策的实例（VMP 零位移短路）**：VMP 的 Entity.move HEAD-cancellable（priority 1050）会在零位移时直接取消原版逻辑，**这是行为改变且不可配置**。我们 priority 1000 → 我们先进原生路径、行为回原版；priority >1050 → 跟 VMP 走。默认按原版（1000），并在兼容性报告里写明我们覆盖了它。
 

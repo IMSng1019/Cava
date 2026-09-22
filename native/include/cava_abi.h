@@ -217,6 +217,109 @@ int32_t cava_close(int64_t handle);
 
 /* **不要把 VMP 的 `velocityDirty` 放进这里** —— 那是 VMP 的状态位，不是我们的（契约点名的坑）。*/
 
+/* ------------------------------------------------------------------ */
+/* P2 实体位移：形状表 + 一次求解（已冻结）                              */
+/* ------------------------------------------------------------------ */
+/* 设计权威与逐条理由见 `docs/CAVA-p2-kernel-notes.md` 第 5 节、
+ * 原版语义见 `docs/CAVA-entity-oracle-spec.md`（每条有 javap 字节码行号）。
+ *
+ * 三条语义增量（**不是普通注释，是实现约束**）：
+ *  1. **形状身份用 `shape_token`**：它是 Java 侧 `VoxelShape[]` 的**下标**，原生侧原样回写。
+ *     ⇒ **回放时 `shapes[token]` 是同一个对象引用**，VoxelShape 从不过边界。
+ *     这是"回放必须能取回原始形状对象、否则 mod 覆写过的方块行为会丢"的落地方式。
+ *  2. **`refs[]` 的下标顺序就是原版形状表顺序**（entity → worldborder → blocks）。
+ *     `calculateMaxOffset` 的 1e-7 短路对它敏感，**原生侧绝不重排**。
+ *  3. `kind==CAVA_MSHAPE_STATE` 时，原生侧按 `VoxelShape.offset` 的语义**逐点加方块坐标**
+ *     合成平移点表，并把该形状视为 **EXPLICIT**（`offset()` 返回的永远是 `ArrayVoxelShape`）。*/
+
+#define CAVA_SHAPE_POINTS_FRACTIONAL 0u   /* 点 = i/size（SimpleVoxelShape）*/
+#define CAVA_SHAPE_POINTS_EXPLICIT   1u   /* 点表显式给出（ArrayVoxelShape / offset 之后）*/
+
+#define CAVA_MSHAPE_STATE  0u             /* 几何来自常驻形状表（按 state_id）*/
+#define CAVA_MSHAPE_INLINE 1u             /* 几何来自本次调用的 inline_shapes[] */
+
+#define CAVA_ESHAPE_SRC_ENTITY       0u   /* 来自 entityCollisions（原版放在最前）*/
+#define CAVA_ESHAPE_SRC_WORLD_BORDER 1u   /* 仅当 canCollide(entity, box.stretch(movement)) */
+#define CAVA_ESHAPE_SRC_BLOCK        2u   /* world.getBlockCollisions(...) */
+#define CAVA_ESHAPE_SRC_OTHER        3u
+
+typedef struct CavaShapeRecord {
+    uint32_t points_kind;           /* in: CAVA_SHAPE_POINTS_* */
+    uint32_t point_offset;          /* in: 进 points[] 的 double 下标（EXPLICIT 时有效）*/
+    uint32_t bit_offset;            /* in: 进 bits[] 的 uint64 下标 */
+    uint32_t bit_words;             /* in: 位图 uint64 个数；0 = 空形状 */
+    int32_t  size_x, size_y, size_z;/* in: VoxelSet.getSize(axis) */
+    uint32_t reserved0;             /* in: 必须为 0；使结构体成为 8 x 4 字节、零内部填充 */
+} CavaShapeRecord;
+
+typedef struct CavaMoveShapeRef {
+    int64_t  shape_token;           /* in/out: 不透明身份 = Java 侧 shapes[] 下标，原样回写 */
+    uint32_t kind;                  /* in: CAVA_MSHAPE_* */
+    uint32_t state_id;              /* in: kind==STATE 时有效 */
+    int32_t  block_x, block_y, block_z;  /* in: kind==STATE 时的平移量（也是事件里 block_* 的来源）*/
+    uint32_t source;                /* in: CAVA_ESHAPE_SRC_* —— 三批的处理方式不同 */
+    uint32_t inline_slot;           /* in: kind==INLINE 时有效 */
+    int32_t  reserved0, reserved1, reserved2;  /* in: 必须为 0；零内部/尾部填充 */
+} CavaMoveShapeRef;
+
+typedef struct CavaMoveRequest {
+    int64_t  reserved0;             /* in: 必须为 0（同时把结构体顶到 8 字节对齐）*/
+    double   min_x, min_y, min_z;   /* in: 实体碰撞箱（世界坐标，**未 stretch**）*/
+    double   max_x, max_y, max_z;
+    double   move_x, move_y, move_z;/* in: **已经算好**的位移（travel 的三角函数留在 Java）*/
+    double   step_height;           /* in: Entity.getStepHeight()，f2d 后的值 */
+    uint32_t flags;                 /* in: 保留，必须为 0；非 0 返回 CAVA_ERR_ARG */
+    uint32_t on_ground;             /* in: Entity.isOnGround()，0/1 */
+    int32_t  shape_count;           /* in: refs[] 的长度（与指针同源）*/
+    int32_t  reserved1;             /* in: 必须为 0 */
+} CavaMoveRequest;
+
+typedef struct CavaMoveEvent {
+    int32_t  source;                /* out: 原样回写 CavaMoveShapeRef.source */
+    int32_t  axis;                  /* out: 产生这次 clamp 的求解轴 0/1/2 */
+    int32_t  block_x, block_y, block_z;  /* out: 仅 source==BLOCK 有意义 */
+    int32_t  pass;                  /* out: 内部第几趟（0=纯碰撞,1=抬升,2=竖直探针,3=位移探针,4=落回）*/
+    int32_t  accepted;              /* out: 1 = 该 offset 通过 ±1e-7 守卫并被采纳 */
+    int32_t  cell_x, cell_y, cell_z;/* out: 命中的体素单元（真实下标），差分定位用 */
+    int32_t  reserved0, reserved1;  /* out: 必须为 0；把 shape_token 顶到 48 字节偏移 */
+    int64_t  shape_token;           /* out: 原样回写 —— **回放时用它取回原始 VoxelShape 对象** */
+    double   offset;                /* out: 该形状算出的 d */
+    double   max_dist_before;       /* out: 该形状进入前的 maxDist */
+    double   max_dist_after;        /* out: 该形状之后的 maxDist */
+} CavaMoveEvent;
+
+typedef struct CavaMoveResult {
+    int32_t  status;                /* out: CAVA_OK / CAVA_ERR_* */
+    int32_t  step_used;             /* out: 1 = 最终位移来自台阶分支 */
+    int32_t  event_count;           /* out: 实际写入的事件个数 */
+    int32_t  event_overflow;        /* out: 1 = 事件数组不足、已丢弃 —— **Java 必须回退纯 Java** */
+    double   delta_x, delta_y, delta_z;   /* out: 最终位移（= method_17835 的返回值）*/
+    double   base_x, base_y, base_z;      /* out: 第 0 趟（纯碰撞）结果，诊断用 */
+    double   step_x, step_y, step_z;      /* out: 台阶候选，诊断用 */
+} CavaMoveResult;
+
+/* 形状表：按 state id 索引。id_count 必须与 P1 的 CavaStateRecord 表长度一致。
+ * **与 P1 的 cava_state_table_upload 分开**：P1 存扁平 AABB（寻路用），
+ * P2 存 (点表 + 体素位图)（碰撞求解用）。
+ * cap 不足返回 CAVA_ERR_ARG 且**不改变已有表**。*/
+int32_t cava_shape_table_upload(int64_t handle,
+                                const CavaShapeRecord* records, int32_t record_count,
+                                const double* points, int32_t point_count,
+                                const uint64_t* bits, int32_t bit_word_count);
+
+/* 一次实体位移求解。具体数值写在 out 里；返回值是状态码。
+ * 入口必须校验：句柄有效、req/out 非空、refs 与 ref_count 同源、
+ * 每个 ref 的 state_id < record_count 或 inline_slot < inline_shape_count。
+ * 任一非法 ⇒ 对应错误码，**不写 out、不产生任何副作用**。*/
+int32_t cava_resolve_move(int64_t handle,
+                          const CavaMoveRequest* req,
+                          const CavaMoveShapeRef* refs, int32_t ref_count,
+                          const CavaShapeRecord* inline_shapes, int32_t inline_shape_count,
+                          const double* inline_points, int32_t inline_point_count,
+                          const uint64_t* inline_bits, int32_t inline_bit_word_count,
+                          CavaMoveEvent* events, int32_t event_cap,
+                          CavaMoveResult* out);
+
 /* PathNodeType 的完整序号表 = **Yarn 1.20.4 枚举的 ordinal，逐条从字节码 static{} 读出**
  * （`javap -p -c net.minecraft.entity.ai.pathing.PathNodeType`：每个常量先 push ordinal 再
  * `<init>(String,int,float)`，随后 `putstatic`。低位用 iconst_*，≥6 用 bipush）。

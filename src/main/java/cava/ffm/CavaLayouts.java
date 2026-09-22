@@ -183,6 +183,91 @@ public final class CavaLayouts {
             ValueLayout.JAVA_FLOAT.withName("max_z")
     ).withName("CavaCollisionBox");
 
+    // ------------------------------------------------------------------
+    // P2 实体位移的 5 个结构体（2026-09-22 冻结；native 侧已登记，和值 0x1C12265E）
+    // **必须与 native/src/cava_layout.cpp 的 kLayouts 同时改**。
+    // 布局全部由 C 编译器 offsetof/sizeof 实测，且**零内部填充、零尾部填充**
+    // （每个结构体的字段总字节数恰好等于 sizeof，见 docs/CAVA-p2-kernel-notes.md §5.9）。
+    // ------------------------------------------------------------------
+
+    public static final StructLayout SHAPE_RECORD = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("points_kind"),
+            ValueLayout.JAVA_INT.withName("point_offset"),
+            ValueLayout.JAVA_INT.withName("bit_offset"),
+            ValueLayout.JAVA_INT.withName("bit_words"),
+            ValueLayout.JAVA_INT.withName("size_x"),
+            ValueLayout.JAVA_INT.withName("size_y"),
+            ValueLayout.JAVA_INT.withName("size_z"),
+            ValueLayout.JAVA_INT.withName("reserved0")
+    ).withName("CavaShapeRecord");
+
+    public static final StructLayout MOVE_SHAPE_REF = MemoryLayout.structLayout(
+            ValueLayout.JAVA_LONG.withName("shape_token"),
+            ValueLayout.JAVA_INT.withName("kind"),
+            ValueLayout.JAVA_INT.withName("state_id"),
+            ValueLayout.JAVA_INT.withName("block_x"),
+            ValueLayout.JAVA_INT.withName("block_y"),
+            ValueLayout.JAVA_INT.withName("block_z"),
+            ValueLayout.JAVA_INT.withName("source"),
+            ValueLayout.JAVA_INT.withName("inline_slot"),
+            ValueLayout.JAVA_INT.withName("reserved0"),
+            ValueLayout.JAVA_INT.withName("reserved1"),
+            ValueLayout.JAVA_INT.withName("reserved2")
+    ).withName("CavaMoveShapeRef");
+
+    public static final StructLayout MOVE_REQUEST = MemoryLayout.structLayout(
+            ValueLayout.JAVA_LONG.withName("reserved0"),
+            ValueLayout.JAVA_DOUBLE.withName("min_x"),
+            ValueLayout.JAVA_DOUBLE.withName("min_y"),
+            ValueLayout.JAVA_DOUBLE.withName("min_z"),
+            ValueLayout.JAVA_DOUBLE.withName("max_x"),
+            ValueLayout.JAVA_DOUBLE.withName("max_y"),
+            ValueLayout.JAVA_DOUBLE.withName("max_z"),
+            ValueLayout.JAVA_DOUBLE.withName("move_x"),
+            ValueLayout.JAVA_DOUBLE.withName("move_y"),
+            ValueLayout.JAVA_DOUBLE.withName("move_z"),
+            ValueLayout.JAVA_DOUBLE.withName("step_height"),
+            ValueLayout.JAVA_INT.withName("flags"),
+            ValueLayout.JAVA_INT.withName("on_ground"),
+            ValueLayout.JAVA_INT.withName("shape_count"),
+            ValueLayout.JAVA_INT.withName("reserved1")
+    ).withName("CavaMoveRequest");
+
+    public static final StructLayout MOVE_EVENT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("source"),
+            ValueLayout.JAVA_INT.withName("axis"),
+            ValueLayout.JAVA_INT.withName("block_x"),
+            ValueLayout.JAVA_INT.withName("block_y"),
+            ValueLayout.JAVA_INT.withName("block_z"),
+            ValueLayout.JAVA_INT.withName("pass"),
+            ValueLayout.JAVA_INT.withName("accepted"),
+            ValueLayout.JAVA_INT.withName("cell_x"),
+            ValueLayout.JAVA_INT.withName("cell_y"),
+            ValueLayout.JAVA_INT.withName("cell_z"),
+            ValueLayout.JAVA_INT.withName("reserved0"),
+            ValueLayout.JAVA_INT.withName("reserved1"),
+            ValueLayout.JAVA_LONG.withName("shape_token"),
+            ValueLayout.JAVA_DOUBLE.withName("offset"),
+            ValueLayout.JAVA_DOUBLE.withName("max_dist_before"),
+            ValueLayout.JAVA_DOUBLE.withName("max_dist_after")
+    ).withName("CavaMoveEvent");
+
+    public static final StructLayout MOVE_RESULT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("status"),
+            ValueLayout.JAVA_INT.withName("step_used"),
+            ValueLayout.JAVA_INT.withName("event_count"),
+            ValueLayout.JAVA_INT.withName("event_overflow"),
+            ValueLayout.JAVA_DOUBLE.withName("delta_x"),
+            ValueLayout.JAVA_DOUBLE.withName("delta_y"),
+            ValueLayout.JAVA_DOUBLE.withName("delta_z"),
+            ValueLayout.JAVA_DOUBLE.withName("base_x"),
+            ValueLayout.JAVA_DOUBLE.withName("base_y"),
+            ValueLayout.JAVA_DOUBLE.withName("base_z"),
+            ValueLayout.JAVA_DOUBLE.withName("step_x"),
+            ValueLayout.JAVA_DOUBLE.withName("step_y"),
+            ValueLayout.JAVA_DOUBLE.withName("step_z")
+    ).withName("CavaMoveResult");
+
     /** 一个结构体字段的 (名字, 偏移, 大小)。 */
     public record Field(String name, long offset, long size) {
         @Override
@@ -208,7 +293,12 @@ public final class CavaLayouts {
             struct(PATH_NODE),
             struct(MOB_PROFILE),
             struct(STATE_RECORD),
-            struct(COLLISION_BOX)
+            struct(COLLISION_BOX),
+            struct(SHAPE_RECORD),
+            struct(MOVE_SHAPE_REF),
+            struct(MOVE_REQUEST),
+            struct(MOVE_EVENT),
+            struct(MOVE_RESULT)
     );
 
     private static Struct struct(StructLayout layout) {

@@ -1,16 +1,54 @@
 # Cava 门禁验证记录（captain）
 
 > **每条门禁都必须有本机实测证据。** 这是"架构假设是否成立"的台账，与 `docs/CAVA-baseline.md`（性能基线）分开。
-> 复现脚本：`tools/build-preview-gate.ps1` + `tools/setup-preview-gate-server.ps1`。
+> 复现脚本：`tools/build-preview-gate.ps1`、`tools/setup-preview-gate-server.ps1`、`tools/LayoutGuardProbe.java`。
 
 ---
 
-## 门禁 #5（`docs/CAVA-execution-plan.md`）：**预览版 class 能否被 Fabric Loader 加载并执行**
+## 门禁 #2 + #3：**端到端冒烟（原生库 ↔ Java FFM ↔ 一键回退 ↔ ABI 守卫）→ 全部通过**
 
-**结论：通过（PASS）。**
+**结论：PASS。** 这是 P0 的核心验收：Java 侧的 FFM facade **真的**加载了 C++ 产物、**真的**跑通了布局自检与所有回退路径。
 
-### 为什么这条是架构级门禁
-整个项目的载体假设是「Fabric mod + JDK 21 **预览版 FFM**（必须 `--enable-preview`）」。
+### 证据链（全部实跑，产物为 CMake 构建的 `natives/windows-x64/cava.dll`）
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 原生自测 | `native/tests/build-mingw.ps1` | `SUMMARY: 67 passed, 0 failed` / `RESULT: PASS`（c++17 / c++20 / CAVA_SAFE=1 **三份各 67/0**，exit 0） |
+| CMake+CTest | `cmake --build build/native-captain` + `ctest --test-dir build/native-captain -C Release` | **3/3 passed**（`cava_dll_loadtest` / `cava_fp_probe` / `cava_selftest`），exit 0 |
+| Java 端到端 | `java --enable-preview --enable-native-access=ALL-UNNAMED -cp <classes> cava.ffm.NativeSelfTest` | `status=OPEN`、`handle=4294967297`、**`java_layout_sum = native_layout_sum = 0x6149FD30`**、22 个 double 边界值 ×(d2i,d2l) + 8 个位模式往返**全 ok**、`SELF-TEST: PASS`、exit 0 |
+| 一键回退 | `... cava.ffm.NativeSelfTest disabled` | `status=DISABLED_BY_FLAG`、**INFO 不是 ERROR**、exit 0 |
+| 缺库优雅失败 | `-Dcava.native.path=<不存在>` | `status=RESOURCE_MISSING`、exit 0（不崩） |
+| **ABI 守卫** | `tools/LayoutGuardProbe` | 见下表 |
+
+### ABI 守卫逐项（`tools/LayoutGuardProbe.java`，直连原生 `cava_open`/`cava_close`）
+
+    abi=1  sum=correct        -> status=0    handle=4294967297  native_sum=0x6149FD30   OK
+       close=0  closeAgain=-3  closeForged=-4        （幂等 + 伪造句柄都安全返回错误码）
+    abi=1  sum=wrong          -> status=-2   handle=0           （CAVA_ERR_LAYOUT）      OK
+    abi=2  sum=correct        -> status=-1   handle=0           （CAVA_ERR_ABI_VERSION） OK
+    abi=99 sum=correct        -> status=-1   handle=0           （CAVA_ERR_ABI_VERSION） OK
+    abi=0  sum=correct        -> status=-1   handle=0           （CAVA_ERR_ABI_VERSION） OK
+    abi=1  sum=bytewise-var   -> status=-2   handle=0           （变体被拒绝）           OK
+
+**这一条直接保住"JVM 段错误"这个最大风险**：布局一旦漂移，`cava_open` 在**写入任何句柄之前**就以 `CAVA_ERR_LAYOUT` 失败，
+Java 侧整体回退纯 Java，不会有任何一次原生调用落在错误的结构体上。
+
+### 一个必须记住的实测约束：**`Linker.defaultLookup()` 看不到 `System.load()` 的 DLL**
+
+本机实测：`System.load(绝对路径)` 成功后，`Linker.nativeLinker().defaultLookup()` **查不到** `cava_build_id`/`cava_open`。
+`CavaBindings` 已实现回退 `SymbolLookup.libraryLookup(path, Arena.ofShared())` 并常驻该 arena（实测生效）。
+**P1/P2/P3 任何新增原生调用都必须走这条已封装好的路径，不要自己写 `defaultLookup`。**
+
+### 未验证
+- **MC 侧代码未与真实 MC API 对编**（`cava.Cava` / `cava.parity.TickSampler` / `cava.client.CavaClient`）：
+  P0-C 用手写桩做了语法/类型自检（exit 0），但那**不证明**与真实 API 匹配。需要 `gradlew build` 产出 yarn named jar 后补编。
+- MSVC 构建、Linux x64、CAVA_SAFE 的真实 CMake 构建（P0-B 只手工模拟过）。
+
+---
+
+## 门禁 #5：**预览版 class 能否被 Fabric Loader 加载并执行 → 通过**
+
+**结论：PASS。** 整个项目的载体假设是「Fabric mod + JDK 21 **预览版 FFM**（必须 `--enable-preview`）」。
 如果 Fabric Loader / Mixin 无法处理 class 文件 major 65 + minor 65535（预览版标志），或者运行时拿不到
 `java.lang.foreign`，那么"用 FFM 调 C++"这条路根本不成立，整个方案要重审。**这条必须先验，不能等到 P1。**
 
@@ -54,21 +92,14 @@
 ### 由这条门禁派生的**新的硬约束**
 
 1. **`--enable-native-access=ALL-UNNAMED` 不能省。** 少了它 native downcall 会在运行期被拒。
-   这条要进 P0-A 的 Gradle 运行参数、进 `docs/CAVA-build.md`、进测试服启动脚本（已写进主计划的门禁 2）。
 2. **Fabric Loader 0.19.5 是**"能加载预览版 class 的**已知可用版本**"。以后任何 `loader_version` 变更都要重跑这条门禁。
-3. 预览版 class 可以正常打成 jar、被 Loader 发现、被实例化 —— 所以 **Cava 的 `ModInitializer` 本身可以直接是预览版 class**，
-   不需要为它单独做 classloader 隔离。（Mixin 处理预览版 class **池**的完整验证放在门禁 2 的端到端冒烟里，用真实 Loom 产物跑。）
-
-### 未验证的部分（诚实标注）
-- 本门禁**没有**验证「Mixin 注解处理器 + Loom remap 在预览版 class **池**上是否正常」（见 `docs/CAVA-execution-plan.md` 门禁 2）。
-  本门禁故意只用普通 mod jar + entrypoint，把变量降到最少。
-- 本门禁**没有**验证 49 mod 整合包环境下是否一致（只有纯 Fabric Loader + Minecraft）。
+3. 预览版 class 可以正常打成 jar、被 Loader 发现、被实例化 —— 所以 **Cava 的 `ModInitializer` 本身可以直接是预览版 class**。
 
 ---
 
-## 门禁 #1（构建）：**Loom 版本必须 pin 到 1.17.x**
+## 门禁 #1：**Loom 版本必须 pin 到 1.17.x → 通过**
 
-**结论：通过（已定位根因并由 P0-A 修复）。** 这不是架构假设问题，但会直接让构建失败，所以记在这里。
+**结论：通过（已定位根因并由 P0-A 修复）。**
 
 | 事实 | 证据 |
 | --- | --- |
@@ -78,4 +109,15 @@
 
 **决定**：`gradle.properties` 的 `loom_version` pin 到 **1.17.20**，Gradle 用 **9.7.1**（满足 plugin-api 9.5.0）。
 **推论**：模板自带的 CI workflow 用 JDK 25 是**因为 Loom 1.18 需要 25**；本项目改用 Loom 1.17.x 之后，
-CI 必须把 JDK 固定成 **21**（否则 `--release 21 --enable-preview` 不成立）。
+CI 必须把 JDK 固定成 **21**（否则 `--release 21 --enable-preview` 不成立）。已核对：workflow 里现在是 `java-version: '21'`（temurin）。
+
+---
+
+## 附：本轮 captain 亲自跑出来的三条"环境坑"（都已固化）
+
+1. **PowerShell 5.1 会破坏 `-Dkey=value` 参数**：`& java -Dfoo=bar ...` 实测被解析成 `ClassNotFoundException: /foo=bar`；
+   `javac -cp "a;b"` 实测报 `invalid flag: :`。**解法**：JVM 属性走 `$env:JAVA_TOOL_OPTIONS`；javac 参数走 **`@argfile`（UTF-8 编码！）**。
+   > ASCII argfile 会把含中文的用户目录名写成 `???`，导致 classpath 静默失效（实测报 "package net.fabricmc.api does not exist"）。
+2. **`Linker.defaultLookup()` 看不到 `System.load()` 的库**（见门禁 #2）。
+3. **`natives/<平台标签>/` 是共享输出目录**：实测被两个流先后覆盖（116933B → 114904B → 空 → 2780964B），
+   每次覆盖都会让别人链接到不一致的映像。**同一时刻只有一个流能构建原生产物。**

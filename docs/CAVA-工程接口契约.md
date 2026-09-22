@@ -177,6 +177,7 @@ $java  = 'C:\Program Files\Java\jdk-21\bin\java.exe'
 | `-Dcava.parity.trace` | 空 | 非空 = 黄金轨迹输出目录 |
 | `-Dcava.parity.ticks` | `0` | >0 = 采满这么多 tick 后自动停服并落盘 |
 | `-Dcava.parity.label` | 空 | 运行标签，写进 trace 头 |
+| `-Dcava.parity.world.radius` | `8` | 世界哈希**固定扫描盒**的半径（区块数，覆盖 3 个维度）。两侧必须一致 |
 
 ### 4.2 黄金轨迹：**逐 tick 一行 NDJSON**（`<dir>/trace-<label>.ndjson`）
 
@@ -193,7 +194,10 @@ $java  = 'C:\Program Files\Java\jdk-21\bin\java.exe'
      "p":"<寻路结果哈希 hex16>","bt":"<方块 tick 事件数>","nt":"<邻居更新事件数>",
      "x":"<可选扩展：子系统自检抽样哈希>"}
 
-- `w`：对所有已加载区块的方块状态按 **(dim, x, y, z, stateId)** 排序后逐项 FNV-1a；**禁用对象身份**。
+- `w`：对**固定扫描盒内的所有区块**的方块状态按 **(dim, x, y, z, stateId)** 排序后逐项 FNV-1a；**禁用对象身份**。
+  **扫描盒必须固定、可复现**（默认：以原点为中心、半径 `-Dcava.parity.world.radius` 个区块，默认 8，覆盖 3 个维度；空段跳过）。
+  **不要用"当前已加载区块集合"**：1.20.4 Yarn 没有公开的枚举 API（`threadedAnvilChunkStorage`/`loadedChunks` 都是私有字段），
+  而且已加载集合本身会抖动 → 会产生假差异。两侧必须用同一个扫描盒（由系统属性固定）。
 - `e`：每个实体按 (id, 类型注册名, x/y/z 的 **double 原始位模式**, motion 位模式, yaw/pitch 位模式, onGround)。
 - `p`：本次 tick 内所有寻路调用的 (实体 id, 起点, 终点, 节点数, 逐节点坐标与 f 值位模式) 拼接哈希。
 - **确定性前提**：固定种子、固定 `randomTickSpeed`、关自动保存、单线程、不依赖 wall-clock。

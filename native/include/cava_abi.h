@@ -48,10 +48,22 @@ int32_t cava_abi_version(void);
 /* ------------------------------------------------------------------ */
 /* 布局自检                                                            */
 /* ------------------------------------------------------------------ */
-/* 每个结构体必须提供 cava_layout_<name>(hash*, size*, align*)，返回字段个数。
- * Java 侧用同样的公式算出期望值，任一不等 => 整体回退纯 Java。
- * 公式（必须逐位一致，用 CAVA_LAYOUT_FNV_OFFSET/PRIME 做 32 位 FNV-1a，对
- * 每个字段依次喂入 (offset:u32, size:u32) 的小端字节）——见 cava_layout.c 实现。*/
+/* 每个结构体必须能算出一个 32 位 layout_hash；Java 侧用同样的公式算出期望值，
+ * 任一不等 => 整体回退纯 Java。
+ *
+ * 【唯一权威公式，2026-09-22 裁定】32 位 FNV-1a，对每个字段按声明顺序走满 4 步：
+ *     对 (uint32_t)offset     喂 1 字节
+ *     对 (uint32_t)size       喂 1 字节
+ *     对 (uint32_t)(offset>>32) 喂 1 字节
+ *     对 (uint32_t)(size>>32)   喂 1 字节
+ *   即每个字段固定 4 次 h ^= byte; h *= PRIME（32 位字段的高位补 0 也要走）。
+ *   数组字段算**一个**字段（offset = 数组起点，size = 整个数组的字节数）。
+ * layout_hash_sum = 所有导出结构体 layout_hash 的 uint32 无符号加法（回绕）。
+ *   本机实测值：CavaLayoutEntry=0xF837804D / CavaLayoutReport=0xE9FFC021 /
+ *   CavaOpenParams=0x7FDE7499 / CavaOpenResult=0xFF344829  =>  sum = 0x6149FD30
+ *
+ * 【已废除】早期注释里写的"逐字节"变体（sum=0xDB2A07ED）**不是**契约的一部分：
+ * 原生侧实测会拒绝它（CAVA_ERR_LAYOUT），双变体协商代码将删除。*/
 
 #define CAVA_LAYOUT_MAX_FIELDS 32
 #define CAVA_LAYOUT_REPORT_CAP 64

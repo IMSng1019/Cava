@@ -226,6 +226,57 @@ bench 里 20000 次真实调用 `canaryDelta=20000/20000`（一次不多不少�
 
 > **残留风险（已写明，未消除）**：那 18 个变体是**启发式**，不是穷举；真实服务器上仍需复核。
 
+### ★ 契约 2.3 预言的弱点**真的咬人了**（2026-09-22，P2 接线轮发现）
+
+我在契约 2.3 里写过一条"已知且可接受的弱点"：`layout_hash` 公式**不区分形状相同的结构体**，
+所以 `CavaPathNode` 与 `CavaCollisionBox` 的 hash 相同（都是 `0x250ECBE1`），
+并断言"这不构成安全漏洞，因为真正的护栏是逐字段全表比对"。
+
+**那个断言是对的，但我低估了它的影响面。** P2 冻结后新增的 `CavaShapeRecord`
+（连续 8 个 4 字节字段）与 `CavaPathNode`（同样连续 8 个 4 字节字段）**hash 完全相同 = `0x0DCFFE65`**。
+而 `cava.ffm.LayoutCheck` 当时是用 **(size, field_count) 找第一个匹配的结构体** —— 于是它把
+`CavaShapeRecord` 匹配成了 `CavaPathNode`，**逐字段比对必然失败** ⇒ `cava_open` 返回 `CAVA_ERR_LAYOUT`
+⇒ **整条原生路径不可用**。
+
+**最要命的是它的表现**：`PathfindAbiTest` 作为"需要原生库"的测试**整类 skip**，
+于是 **构建仍然是绿的** —— 又一次"绿 ≠ 测过"。
+
+**修复**：`LayoutCheck` 改成**按下标一一对应**（两侧登记顺序本来就相同），不再靠 (size, field_count) 查找。
+
+> **教训（已写进契约 2.3 的同一处）**：**"哈希碰撞只是粗筛失效"这句话不够** ——
+> 真正的问题是**任何"用哈希或形状去反查结构体身份"的代码都会因此错配**。
+> 所以：**结构体身份只能用下标/名字，绝不能用 (size, field_count) 或 hash 反查。**
+> 同时这也解释了为什么 P0 的 `CavaPathNode`/`CavaCollisionBox` 同值从未出事 —— 当时没有反查代码。
+
+### P2 接线轮的实际成果（prompts/05 第 1 核）
+
+| 项 | 实测 |
+| --- | --- |
+| 原生入口 | `native/src/entity/cava_entity_abi.cpp`；`cava_layout_report` entries=**14** sum=**0x1C12265E** |
+| 单元（真实 DLL） | CVEM 向量灌进 `cava_resolve_move`：**258 例（82 例带事件）0 不一致** |
+| **真实服务端** | `nativeCalls=950000 nativeOk=950000 errors=0 overflow=0`；**与原版私有 `adjustMovementForCollisions(Vec3d)` 逐位比对 941734 次，0 不一致** |
+| 形状表 | 26644 状态 / 21633 有形状 / 208 种不同 `VoxelSet` / 163018 double / 22518 uint64；构建 13.7ms、上传 1.03ms |
+| 日志噪声 | **0 条 `cava/entity` ERROR/WARN** |
+
+**但 `live`（整段替换 `Entity.move`）本轮未交付，且原因是结构性的**：
+`EventReplay` 的输入是**一次性预打包**的 record，而 `move` 里有三处输入**只有回放中途才成立** ——
+`getLandingPos()`(416) 在 `setOnGround`(412) **之后**、`getSteppingPos()`(626) 在 moveEffect 分支内、
+`checkBlockCollision` 扫的是 `setPosition`(218) **之后**的盒子且 `stepSoundBranch` 依赖回放中途写入的 `distanceTraveled`。
+⇒ **真接管要求把回放改成"拉取式"**。`-Dcava.entity.move=live` 现在**显式拒绝 + 一行 INFO**，**不静默走近似实现**。
+
+> **所以"原生接管了实体移动"这句话本轮不成立。** 成立的是"**链路可运行 + 结果与原版逐位相同**"。
+> 这个区分很重要：943 万次比对证明的是**求解正确**，不是**已经替换**。
+
+**性能（诚实结论，当前接线是净亏）**：同一次调用同一份输入的 A/B（941734 次样本）——
+组 refs 1753 ns / 原生调用 761 ns / 原版 532 ns ⇒ **慢约 1.98 µs/次**。
+瓶颈**在 Java 侧不在内核**；且本次观测平均 `refs` 只有 **1.37**（多数是空形状表，原版几乎免费），
+**不能外推到碰撞密集负载**。未做预热分段。
+
+**冻结 ABI 的一条能力边界**：`cava_resolve_move` 只有**一份** `refs[]`，
+而原版台阶分支会用**不同的 `box.stretch` 重跑 `getBlockCollisions` 最多 4 次**。
+本轮因此恒传 `step_height=0` 并在 Java 侧用原版判据预测台阶分支（命中率 0.87%），会进就丢掉原生结果改调原版。
+⇒ **要让原生吃下台阶分支，ABI 需要"每趟一份形状列表"。** 这是已知边界，不是 bug。
+
 ### 差分测试的三层结果（prompts/03，2026-09-22）
 
 | 层 | 命令 | 结果 |

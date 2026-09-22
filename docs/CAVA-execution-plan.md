@@ -87,9 +87,26 @@
 | 6 回填验收台账 | ⏳ | 由 P0-E（基线）与 W2 流补齐后回填 |
 | 7 更新跨会话记忆 | ✅ | `docs/CAVA-后续对话提示词.md` 附二·A |
 
-**仍未闭合的最大缺口**：MC 侧三个文件（`cava.Cava` / `cava.parity.TickSampler` / `cava.client.CavaClient`）
-只做过"手写桩"的类型自检。虽然 `compileJava` 已绿（说明它们能对编 `net.minecraft.*`），
-但**尚未在真实服务端里跑过一次**（启动横幅 + 黄金轨迹），这一条由 W2 差分测试流负责。
+**~~仍未闭合的最大缺口~~ → 已闭合（门禁 #6）**：真实的 `cava-0.1.0.jar` 已在一个真实 Fabric 服务端里
+**与 Lithium / ServerCore / VMP / FerriteCore / Carpet / TIS 同时装载并成功启动**，启动横幅、原生库加载、
+哈希命名落盘、布局自检（`cava_abi_touch()==1` 证明原生真的执行过）、`config/cava.json` 默认值落盘全部实测通过。
+
+**仍未闭合的**：金丝雀 0/3（P0 三个子系统都是 `enabled=false`，按设计），
+以及**黄金轨迹尚未采到**（`-Dcava.parity.trace` 没开）、确定性前置（同存档连续两次一致）未证明。
+
+### P1 的当前交接状态（Wave 2 结束时）
+- **原生内核已完成**：LAND + AMPHIBIOUS，与纯 Java 参照实现 **10060 组逐位一致（0 差异）**，
+  含 `worldHashLow` 与 golden 的 `blocks[]` 逐字节校验（地形重建也正确）。`ctest` 里 `cava_pathfind_vectors` 会跑它。
+- **`cava_pathfind` 目前保守返回 `CAVA_ERR_UNIMPLEMENTED`**，Java 侧按契约回退原逻辑。
+  **这是正确的处置**：它拒绝猜一条"看起来正常但不与原版一致"的路径。
+- **接手前还差三步**（都在 `docs/CAVA-p1-pathfind-notes.md` 第 4/6 节）：
+  1. `cava/ffm/**` 里 `cava_pathfind` / `cava_mob_profile_upload` / `cava_mob_profile_clear` /
+     `cava_state_table_upload` / `cava_region_*` 的 FFM 绑定（归 P0-C，本轮已指派）；
+  2. `cava/mirror/**`（方块状态表 + 区域推送）与 `cava/mixin/pathfind/**`（注入 + 金丝雀）—— **从未落盘**；
+  3. `CAVA_PF_*` 各位的**精确定义**要写进契约（P1 指出它含派生量、且缺 `FENCE_GATE_OPEN` 等）。
+- **待验假设**：`Block.getRawIdFromState(Blocks.AIR.getDefaultState()) == 0`（真实 MC 环境里实测）。
+- **P0-B 已备好**：`cava::detail::lookup/handle_valid`（句柄代际校验，不新增导出符号，槽位复用后旧句柄仍被拒），
+  `cava_pf_abi.cpp` 可直接改用。
 
 ## 6. Wave 2 分流（P0 冒烟通过后立即开）
 

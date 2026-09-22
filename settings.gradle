@@ -1,3 +1,10 @@
+// Cava —— Gradle 设置（文件所有权：P0-A 构建基建流）
+//
+// 构建前置（本机实测，必须）：GRADLE_USER_HOME 必须在工作区内，否则沙箱拒绝写缓存：
+//   $env:GRADLE_USER_HOME = 'J:\mc\Cava\.gradle-home'
+//   .\gradlew.bat build --console=plain
+// 这里故意不写死绝对路径（写死会让别的机器/CI 失败）。细节见 docs/CAVA-p0a-build-infra.md。
+
 pluginManagement {
 	repositories {
 		maven {

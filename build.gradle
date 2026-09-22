@@ -1,14 +1,28 @@
+// Cava —— 构建脚本（文件所有权：P0-A 构建基建流）
+//
+// 硬约束（违反会返工，见 docs/CAVA-工程接口契约.md 与 prompts/00-通用上下文）：
+//   1. Java 21 + --enable-preview。预览 class 版本 65.65535，JDK 22+ 即使带标志也拒绝加载。
+//      javac 要求 options.release 与 --enable-preview 同时给（release=21 + preview）。
+//   2. 原生库编译参数固定 -O2 -fwrapv -ffp-contract=off -fno-fast-math（MSVC: /O2 /fp:strict），
+//      禁 -march=native / -ffast-math / -Ofast —— 这条在根 CMakeLists.txt 里守，不在这里。
+//   3. 运行/测试 JVM 必须带 --enable-preview 与 --enable-native-access=ALL-UNNAMED。
+//
+// 构建前置（本机实测，必须）：
+//   $env:GRADLE_USER_HOME = 'J:\mc\Cava\.gradle-home'   # 沙箱写不进工作区外
+//   .\gradlew.bat build --console=plain
+// 细节见 docs/CAVA-p0a-build-infra.md。
+
 plugins {
 	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
 	id 'maven-publish'
 }
 
+// 预览 + 原生访问标志：run 与 test 的 JVM 都要（少了 --enable-preview，预览 class 直接 UnsupportedClassVersionError）
+def cavaPreviewJvmArgs = ['--enable-preview', '--enable-native-access=ALL-UNNAMED']
+
 repositories {
-	// Add repositories to retrieve artifacts from in here.
-	// You should only use this when depending on other mods because
-	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
-	// See https://docs.gradle.org/current/userguide/declaring_repositories.html
-	// for more information about repositories.
+	// Loom 会自动加 Minecraft / Fabric 仓库；Maven Central 用于纯 Java 单测依赖（JUnit）。
+	mavenCentral()
 }
 
 loom {
@@ -20,17 +34,58 @@ loom {
 			sourceSet sourceSets.client
 		}
 	}
+
+	// 所有 run 配置（client / server / 以后新增的）都套用预览与原生访问标志。
+	// 用 configureEach 而不是逐个点名，避免 Loom 改默认 run 名字时静默失效。
+	runs {
+		configureEach {
+			vmArgs cavaPreviewJvmArgs
+		}
+	}
 }
 
 dependencies {
-	// To change the versions see the gradle.properties file
+	// 版本都在 gradle.properties 里
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
-	// Fabric API. This is technically optional, but you probably want it anyway.
+	// Fabric API（可选依赖，但模板带着）
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// 纯 Java 单测（离线比对器 / 数值工具 / 布局哈希重算），不依赖 MC 运行时。
+	testImplementation "org.junit.jupiter:junit-jupiter:${project.junit_version}"
+	testRuntimeOnly "org.junit.platform:junit-platform-launcher:${project.junit_platform_version}"
 }
+
+java {
+	// 工具链锁 21（gradle.properties 里给了 installations.paths 兜底，见 org.gradle.java.installations.*）
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+
+	// Loom 会把 sourcesJar 挂到 build 上
+	withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+	// 源码里有中文注释，必须显式 UTF-8
+	options.encoding = 'UTF-8'
+	// release 与 --enable-preview 必须成对出现
+	options.release = 21
+	options.compilerArgs += ['--enable-preview']
+}
+
+// ---------------------------------------------------------------------------
+// 资源 / 原生库打包
+// ---------------------------------------------------------------------------
+// 原生库由 CMake 产出到 <repo>/natives/<platform-tag>/（见根 CMakeLists.txt）。
+// 这里只把「当前平台」的动态库打进 jar 的 natives/<platform-tag>/ 下，其它平台要打多平台时
+// 用 -Pcava.platforms=windows-x64,linux-x64 逐个加。
+// import lib (.dll.a/.lib) / .pdb / 目标文件都不进 jar（CMake 已经把 import lib 放到 build/）。
+def cavaNativePlatforms = (providers.gradleProperty('cava.platforms').getOrElse('windows-x64')
+		.split(',')*.trim().findAll { !it.isEmpty() })
+def cavaNativesRoot = layout.projectDirectory.dir('natives')
 
 processResources {
 	def version = project.version
@@ -39,22 +94,107 @@ processResources {
 	filesMatching("fabric.mod.json") {
 		expand "version": version
 	}
+
+	// jar 内路径 = natives/<platform-tag>/cava.dll（Java 侧解压路径见契约 §1 / NativeLibrary.java）
+	def packPlatforms = cavaNativePlatforms.findAll { platform -> cavaNativesRoot.dir(platform).asFile.exists() }
+	if (!packPlatforms.isEmpty()) {
+		from(cavaNativesRoot) {
+			// 注意 from(dir) 是「拷贝这个目录的内容」，所以必须显式 into 'natives'，
+			// 否则 jar 里会变成根目录下的 windows-x64/cava.dll（本机踩过）。
+			into 'natives'
+			packPlatforms.each { platform ->
+				include "${platform}/*.dll", "${platform}/*.so", "${platform}/*.dylib"
+			}
+			duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+		}
+	}
 }
 
-tasks.withType(JavaCompile).configureEach {
-	it.options.release = 17
+tasks.register('cavaNativeStatus') {
+	group = 'cava'
+	description = '打印当前会打进 jar 的原生平台目录'
+	doLast {
+		if (cavaNativePlatforms.isEmpty()) {
+			logger.lifecycle('cava: 没有配置原生平台（-Pcava.platforms=...）')
+			return
+		}
+		cavaNativePlatforms.each { platform ->
+			def dir = cavaNativesRoot.dir(platform).asFile
+			if (!dir.exists()) {
+				logger.lifecycle("cava: natives/${platform}/ 不存在（还没编原生库）")
+			} else {
+				def libs = (dir.listFiles() ?: []).findAll { it.name.endsWith('.dll') || it.name.endsWith('.so') || it.name.endsWith('.dylib') }
+				logger.lifecycle("cava: natives/${platform}/ 有 ${libs.size()} 个动态库: ${libs*.name.join(', ')}")
+			}
+		}
+	}
 }
 
-java {
-	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
-	// if it is present.
-	// If you remove this line, sources will not be generated.
-	withSourcesJar()
-
-	sourceCompatibility = JavaVersion.VERSION_17
-	targetCompatibility = JavaVersion.VERSION_17
+// ---------------------------------------------------------------------------
+// 测试
+// ---------------------------------------------------------------------------
+tasks.withType(Test).configureEach {
+	useJUnitPlatform()
+	// 预览 class 需要 --enable-preview 才能加载
+	jvmArgs cavaPreviewJvmArgs
+	// 单测默认走纯 Java 路径（不需要先编出原生库）；要测原生加载用 -Pcava.native.enabled=true
+	if (project.findProperty('cava.native.enabled') == null) {
+		systemProperty 'cava.native.enabled', 'false'
+	}
+	// 黄金轨迹比对要求确定性：不要并行跑测试
+	maxParallelForks = 1
 }
 
+// TODO(P0-D / p0-java): 契约 §4.3 的 parityDiff 任务（-Pcava.natives=off,on -Pcava.ticks=N）
+// 需要 cava.parity 的运行器类，等 p0-java 给出类名/入口后由 P0-A 在这里注册（build.gradle 归 P0-A）。
+
+// ---------------------------------------------------------------------------
+// 原生构建（可选，默认不参与 build —— 没有 CMake 的机器不该因此失败）
+//   .\gradlew.bat buildNative                              # 用默认工具链（本机 MinGW）
+//   .\gradlew.bat buildNative -Pcava.native.generator="Visual Studio 17 2022"
+// CMake 不在 PATH，默认指向工作区里已解压的便携版（tools/ 已 gitignore）。
+// ---------------------------------------------------------------------------
+def cavaCmakeExe = providers.gradleProperty('cava.cmake')
+		.getOrElse('tools/cmake/cmake-3.31.2-windows-x86_64/bin/cmake.exe')
+// 本机默认工具链 bin（MinGW）：存在就加进子进程 PATH，不存在就完全靠调用者自己的 PATH。
+// 只是「本机便利默认值」，不会影响 build / 别的机器 —— 随时可用 -Pcava.native.bin=... 覆盖。
+def cavaNativeBin = providers.gradleProperty('cava.native.bin').getOrElse('C:/mingw64/bin')
+def cavaNativeBinExists = file(cavaNativeBin).isDirectory()
+def cavaNativeBuildDir = layout.buildDirectory.dir('native').get().asFile
+def cavaNativeGenerator = providers.gradleProperty('cava.native.generator').getOrElse('MinGW Makefiles')
+def cavaNativeBuildType = providers.gradleProperty('cava.native.buildType').getOrElse('Release')
+def cavaNativeCCompiler = providers.gradleProperty('cava.native.cc').getOrElse('')
+def cavaNativeCxxCompiler = providers.gradleProperty('cava.native.cxx').getOrElse('')
+
+tasks.register('cmakeConfigure', Exec) {
+	group = 'cava'
+	description = '配置原生构建目录（CMake configure）'
+	inputs.dir(layout.projectDirectory.dir('native')).withPathSensitivity(PathSensitivity.RELATIVE)
+	inputs.file('CMakeLists.txt')
+	outputs.dir(cavaNativeBuildDir)
+	if (cavaNativeBinExists) {
+		environment 'PATH', "${cavaNativeBin};${System.getenv('PATH')}"
+	}
+	commandLine(([
+			cavaCmakeExe, '-S', projectDir.absolutePath, '-B', cavaNativeBuildDir.absolutePath,
+			'-G', cavaNativeGenerator, "-DCMAKE_BUILD_TYPE=${cavaNativeBuildType}"
+	] + (cavaNativeCCompiler ? ["-DCMAKE_C_COMPILER=${cavaNativeCCompiler}".toString()] : [])
+	  + (cavaNativeCxxCompiler ? ["-DCMAKE_CXX_COMPILER=${cavaNativeCxxCompiler}".toString()] : [])))
+}
+
+tasks.register('buildNative', Exec) {
+	group = 'cava'
+	description = '编译原生库到 <repo>/natives/<platform-tag>/'
+	dependsOn 'cmakeConfigure'
+	if (cavaNativeBinExists) {
+		environment 'PATH', "${cavaNativeBin};${System.getenv('PATH')}"
+	}
+	commandLine cavaCmakeExe, '--build', cavaNativeBuildDir.absolutePath, '--parallel'
+}
+
+// ---------------------------------------------------------------------------
+// 发布 / jar
+// ---------------------------------------------------------------------------
 jar {
 	def projectName = project.name
 	inputs.property "projectName", projectName
@@ -64,7 +204,6 @@ jar {
 	}
 }
 
-// configure the maven publication
 publishing {
 	publications {
 		create("mavenJava", MavenPublication) {
@@ -72,11 +211,7 @@ publishing {
 		}
 	}
 
-	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
 	repositories {
-		// Add repositories to publish to here.
-		// Notice: This block does NOT have the same function as the block in the top level.
-		// The repositories here will be used for publishing your artifact, not for
-		// retrieving dependencies.
+		// 发布目标仓库留空（本项目不发布）
 	}
 }

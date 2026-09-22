@@ -1,8 +1,11 @@
-# Automatically build the project and run any configured tests for every push
-# and submitted pull request. This can help catch issues that only occur on
-# certain platforms or Java versions, and provides a first line of defence
-# against bad commits.
-
+# Cava —— CI（文件所有权：P0-A 构建基建流）
+#
+# 两条关键约束（本机实测，详见 docs/CAVA-p0a-build-infra.md，这里只留结论）：
+#   1. **JDK 固定 21**。项目用 --release 21 + --enable-preview 编译（预览 class 版本 65.65535），
+#      更高的 JDK 即使加 --enable-preview 也拒绝加载预览 class。
+#   2. **Loom 固定 1.17.x**（gradle.properties 里 pin）。更新的 Loom 版本要求更高的 JVM 运行时，
+#      与本项目的 JDK 21 硬约束冲突 —— 模板自带的 workflow 之所以写高版本 JDK 就是这个原因，
+#      已按上面的约束改回 21。换 Loom 前先看文档里那条 module metadata 检查命令。
 name: build
 on: [pull_request, push]
 
@@ -14,17 +17,61 @@ jobs:
         uses: actions/checkout@v6
       - name: validate gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
-      - name: setup jdk
+      - name: setup jdk 21
         uses: actions/setup-java@v5
         with:
-          java-version: '25'
-          distribution: 'microsoft'
+          java-version: '21'
+          distribution: 'temurin'
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
       - name: build
-        run: ./gradlew build
+        run: ./gradlew build --console=plain
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:
           name: Artifacts
           path: build/libs/
+
+  # ---------------------------------------------------------------------------
+  # 原生 5 平台矩阵：**P4 才真做**。本轮只有 windows-x64 真跑，其余 4 个是占位（enabled: false），
+  # 目的是让 CI 结构一次定型：P4 只需把 enabled 改成 true 并补对应交叉工具链。
+  # 交叉编译注意：CMakeLists.txt 用 CMAKE_SYSTEM_PROCESSOR 推平台标签（不是 HOST_*），
+  # 交叉编译时必须在 toolchain file 里正确设置（见 native/cmake/CavaPlatform.cmake）。
+  # ---------------------------------------------------------------------------
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            tag: windows-x64
+            enabled: true
+          - os: ubuntu-24.04
+            tag: linux-x64
+            enabled: false # TODO(P4): gcc + -DCMAKE_SYSTEM_PROCESSOR=x86_64
+          - os: ubuntu-24.04-arm
+            tag: linux-arm64
+            enabled: false # TODO(P4)
+          - os: macos-13
+            tag: macos-x64
+            enabled: false # TODO(P4)
+          - os: macos-14
+            tag: macos-arm64
+            enabled: false # TODO(P4)
+    runs-on: ${{ matrix.os }}
+    if: ${{ matrix.enabled }}
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+      - name: configure native (MSVC x64)
+        run: cmake -S . -B build/native -G "Visual Studio 17 2022" -A x64
+      - name: build native
+        run: cmake --build build/native --config Release --parallel
+      - name: run native tests
+        run: ctest --test-dir build/native --build-config Release --output-on-failure
+      - name: capture native artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: cava-natives-${{ matrix.tag }}
+          path: natives/${{ matrix.tag }}/
+          if-no-files-found: warn

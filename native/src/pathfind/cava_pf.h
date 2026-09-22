@@ -59,33 +59,47 @@ float default_penalty(int32_t type);
 /* ------------------------------------------------------------------ */
 /* 1. 方块状态扩展位                                                    */
 /* ------------------------------------------------------------------ */
-/* cava_abi.h 里已经冻结的 6 位（bit0..bit5）继续按原义使用：
- *   CAVA_SF_SOLID / CAVA_SF_BLOCKS_MOTION / CAVA_SF_FLUID / CAVA_SF_WATER /
- *   CAVA_SF_LAVA / CAVA_SF_OPEN
- * 下面这些位是 **P1 需要的 ABI 扩展**（已在 cava_abi.h 里预留的语义之外，
- * 属于"末尾追加"性质的提案，见 docs/CAVA-p1-pathfind-notes.md 第 "ABI 缺口" 节）。
- * 一位对应 LandPathNodeMaker.getCommonNodeType / adjustNodeType /
- * getNodeTypeFromNeighbors 的一个谓词，**不要重排、不要复用**。*/
+/* 【勘误 + 改号，2026-09-22，P1-Java-A 实测并上报】
+ * 本枚举的**位号**曾经是 P1 内核流自己提案的一套编号（PF_AIR=1<<8 …），
+ * 与 captain 随后冻结进 cava_abi.h 的 CAVA_SF_x 与 CAVA_PF_x 两族宏 **19 个位全部错开**。
+ * 实测对拍（两个文件程序化比对）：bit8 = 头文件 TRAPDOOR / 本文件曾是 AIR；
+ * bit15 = 头文件 RAIL / 曾是 DOOR；bit20 = 头文件 FIRE_DAMAGE / 曾是 FENCE_TAG；
+ * bit25 = 头文件 FIRE / 曾是 PATHFIND_LAND；bit26 = 头文件 WITHER_ROSE / 曾是 WATER_BLOCK。
+ * 也就是说：Java 按冻结头文件填的 flags 会被内核**逐位读错**（空气当活板门、
+ * 铁轨当门、火焰当可通行、凋灵玫瑰当水方块），而且**运行期完全无法发现**
+ * （cava_pathfind 现在返回 UNIMPLEMENTED，没有可观测行为）。
+ *
+ * 处置（**纯改号，零逻辑改动**）：这里不再自定义位号，改为**冻结头文件宏的别名**。
+ * 每个内核谓词在头文件里都有精确对应位：
+ *   PF_AIR              <- CAVA_SF_AIR          （头文件 bit6：isAir）
+ *   PF_DOOR             <- CAVA_SF_DOOR         （头文件 bit7：是门）
+ *   PF_DOOR_OPEN        <- CAVA_SF_OPEN         （头文件 bit5：门/活板门/栅栏门的"开着"）
+ *   PF_FENCE_GATE_OPEN  <- CAVA_SF_OPEN         （栅栏门分支内与上式等价：栅栏门状态上
+ *                                                SF_OPEN <=> state.get(FenceGateBlock.OPEN)）
+ *   其余 15 位 <- 同名 CAVA_PF_*
+ * 头文件里比内核多出的位（FENCE_OR_WALL_CLOSED / DOOR_IRON / FIRE / WITHER_ROSE）
+ * 是**派生位**，Java 侧照填，内核不读。
+ * **头文件是唯一权威，本文件不许再自定编号。** */
 enum : uint32_t {
-    PF_AIR              = 1u << 8,   /* state.isAir() */
-    PF_TRAPDOOR         = 1u << 9,   /* BlockTags.TRAPDOORS || LILY_PAD || BIG_DRIPLEAF */
-    PF_POWDER_SNOW      = 1u << 10,  /* Blocks.POWDER_SNOW */
-    PF_CACTUS_OR_BERRY  = 1u << 11,  /* CACTUS || SWEET_BERRY_BUSH */
-    PF_HONEY            = 1u << 12,  /* HONEY_BLOCK */
-    PF_COCOA            = 1u << 13,  /* COCOA */
-    PF_CAUTIOUS         = 1u << 14,  /* WITHER_ROSE || POINTED_DRIPSTONE */
-    PF_DOOR             = 1u << 15,  /* block instanceof DoorBlock */
-    PF_DOOR_OPEN        = 1u << 16,  /* state.get(DoorBlock.OPEN) */
-    PF_DOOR_HAND        = 1u << 17,  /* getBlockSetType().canOpenByHand() */
-    PF_RAIL             = 1u << 18,  /* block instanceof AbstractRailBlock */
-    PF_LEAVES           = 1u << 19,  /* block instanceof LeavesBlock */
-    PF_FENCE_TAG        = 1u << 20,  /* BlockTags.FENCES */
-    PF_WALL_TAG         = 1u << 21,  /* BlockTags.WALLS */
-    PF_FENCE_GATE       = 1u << 22,  /* block instanceof FenceGateBlock */
-    PF_FENCE_GATE_OPEN  = 1u << 23,  /* state.get(FenceGateBlock.OPEN) */
-    PF_FIRE_DAMAGE      = 1u << 24,  /* LandPathNodeMaker.inflictsFireDamage(state) */
-    PF_PATHFIND_LAND    = 1u << 25,  /* state.canPathfindThrough(view,pos,NavigationType.LAND) */
-    PF_WATER_BLOCK      = 1u << 26   /* state.isOf(Blocks.WATER) */
+    PF_AIR              = CAVA_SF_AIR,          /* state.isAir() */
+    PF_TRAPDOOR         = CAVA_PF_TRAPDOOR,     /* BlockTags.TRAPDOORS || LILY_PAD || BIG_DRIPLEAF */
+    PF_POWDER_SNOW      = CAVA_PF_POWDER_SNOW,  /* Blocks.POWDER_SNOW */
+    PF_CACTUS_OR_BERRY  = CAVA_PF_CACTUS_OR_BERRY, /* CACTUS || SWEET_BERRY_BUSH */
+    PF_HONEY            = CAVA_PF_HONEY,        /* HONEY_BLOCK */
+    PF_COCOA            = CAVA_PF_COCOA,        /* COCOA */
+    PF_CAUTIOUS         = CAVA_PF_CAUTIOUS,     /* WITHER_ROSE || POINTED_DRIPSTONE */
+    PF_DOOR             = CAVA_SF_DOOR,         /* block instanceof DoorBlock */
+    PF_DOOR_OPEN        = CAVA_SF_OPEN,         /* state.get(OPEN) */
+    PF_DOOR_HAND        = CAVA_PF_DOOR_HAND,    /* getBlockSetType().canOpenByHand() */
+    PF_RAIL             = CAVA_PF_RAIL,         /* block instanceof AbstractRailBlock */
+    PF_LEAVES           = CAVA_PF_LEAVES,       /* block instanceof LeavesBlock */
+    PF_FENCE_TAG        = CAVA_PF_FENCES,       /* BlockTags.FENCES */
+    PF_WALL_TAG         = CAVA_PF_WALLS,        /* BlockTags.WALLS */
+    PF_FENCE_GATE       = CAVA_PF_FENCE_GATE,   /* block instanceof FenceGateBlock */
+    PF_FENCE_GATE_OPEN  = CAVA_SF_OPEN,         /* state.get(FenceGateBlock.OPEN) */
+    PF_FIRE_DAMAGE      = CAVA_PF_FIRE_DAMAGE,  /* LandPathNodeMaker.inflictsFireDamage(state) */
+    PF_PATHFIND_LAND    = CAVA_PF_PATH_THROUGH_LAND, /* state.canPathfindThrough(view,pos,LAND) */
+    PF_WATER_BLOCK      = CAVA_PF_WATER_BLOCK   /* state.isOf(Blocks.WATER) */
 };
 
 /* 能力位直接用 ABI 头的 CAVA_NAV_*（captain 已把本流提案的全部 11 位加进去了）。

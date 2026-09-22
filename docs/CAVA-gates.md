@@ -226,6 +226,50 @@ bench 里 20000 次真实调用 `canaryDelta=20000/20000`（一次不多不少�
 
 > **残留风险（已写明，未消除）**：那 18 个变体是**启发式**，不是穷举；真实服务器上仍需复核。
 
+### 差分测试的三层结果（prompts/03，2026-09-22）
+
+| 层 | 命令 | 结果 |
+| --- | --- | --- |
+| 单元层 | `tools/parity-unit.ps1` | **ZERO DIFF over 10000 cases**（**走完整 Java→FFM→C ABI**）+ C++ 全字段 10000/0 + 负控制能红 |
+| 场景层 | `tools/parity-diff.ps1 -Ticks 600` | **方块层 `w` 逐 tick 零差异**（同配置两次、native on/off **都零**，含红石线功率/活塞/比较器状态） |
+| 整服层 | `tools/parity-invariants.ps1 -Ticks 1200 -Native on` | **PASS**（1855 tick 实时、MSPT 0.4ms、实时 TPS 20.56、实体 59、无 ERROR 级日志、优雅停服） |
+
+**实体/路径层仍未通过，但已定位且与 native 无关**：实体 id 计数器在不同运行间**整体平移**（同一只僵尸 a=#15 / b=#29），
+且 mob 的寻路时机由 AI 随机数决定 ⇒ `p` 在 515/600 tick 不同。
+**门禁按设计 `exit=3` 拒绝给 on/off 下结论** —— 这个处置是对的：**门禁能拒绝给结论，比给一个错结论有价值。**
+
+#### ★ 单元层立刻抓到一个"只有走 ABI 才看得见"的真 bug（**本轮最有价值的一处**）
+
+第一次走完整 ABI 就出现 **126 处差异**，根因**不在内核而在喂入**：
+Java 把 `CAN_SWIM` 填到了 caps 的 `1 << 2`（= `CAVA_NAV_CAN_FLOAT`）而不是 `1 << 6`。
+
+**为什么这件事重要**：C++ 那条腿**永远看不到它** —— 它直接构造 `WorldView`/`MobProfile`，绕过了 Java 的填值。
+这正是 **ABI 作为"契约边界"的价值**：两个独立实现必须就同一个位布局达成一致，而**只有跨过边界才能验证这件事**。
+
+> 这与 `CAVA_PF_*` 那次是**同一类 bug 的第四次实例**（产物与它的记账/填值不一致），
+> 但这次**在合入前就被差分抓住了** —— 说明"两层独立实现 + 强制比对"这套机制是有效的。
+
+#### 两条对既有文档的更正（都是实测）
+
+1. **`native/build/mingw/cava_pathfind_vectors.exe` 是陈旧产物**（14:25，当时 `cava_pathfind` 还返回 `CAVA_ERR_UNIMPLEMENTED`）。
+   拿它的"10000 组已通过"**是错的**。现在每次都**现场重编译**，不信任仓库里任何旧 exe。
+   > 这是"旧二进制造成假结论"的**第三次**实例，已固化成纪律。
+2. 冷启动噪声之外，场景层第一轮的非确定性**全部是"跑法"问题**：采样器早于 RCON 布场就开始落盘；
+   世界里有**没落定的落沙**。修法：场景与 `tick sprint` 都移进 `#minecraft:load`；
+   base 快照先 `chunky` 预生成 + 跑热 1200 tick 再保存。修完后 `w` 逐 tick 零差异。
+
+#### captain 特别要的那一问：**ServerCore 被跳过是否可观测 → 单目标下不可观测**
+
+`javap` 实测 `PathFinderMixin` = **3 个 @Redirect**（`Set.stream` / `Collectors.toMap` / `Stream.collect`）
++ **2 个 @ModifyVariable**（换 `Object2ObjectOpenHashMap`、换 `HashSet` 容量）—— **全是容器/管线替换**。
+脚本驱动 **2000 次真实单目标 `findPathToAny`**：
+
+    off  avgNodes=[6.00, 6.00, 6.00]  takeovers=0     errors=0
+    on   avgNodes=[6.00, 6.00, 6.00]  takeovers=2000/2000  errors=0
+
+⇒ **单目标下跳过它不可观测**。多目标我们不接管（`targets.size() != 1` 直接返回 null），所以也不存在"跳过"。
+**这是 P1 留下的那个"从未差分过"的问题的正式答案。**
+
 ### 三条"容易读反 / 容易混淆"的原版真值（P2 实体轮，captain 已独立复核）
 
 这三条都是**运行期不会报错、只会让结果与服务器不一致**的类型，所以每条都配了定点用例，而不是靠随机向量。

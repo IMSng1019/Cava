@@ -1,0 +1,10 @@
+# Cava P1 寻路测试向量
+# 由 cava.oracle.VectorGen 生成，格式见 docs/CAVA-pathfind-oracle-spec.md 第 10 节。
+# 全部整数/浮点均为 **大端**（Java DataOutputStream 默认）。
+masterSeed=1f2e3d4c5b6a7988
+cases=10000
+shards=1
+goldenCases=60
+terrainSeedSalt=a5a5a5a5a5a5a5a5
+复现：javac --release 21 -encoding UTF-8 -d out (Get-ChildItem -Recurse src/test/java/cava/oracle/*.java)
+      java -cp out cava.oracle.OracleSelfTest

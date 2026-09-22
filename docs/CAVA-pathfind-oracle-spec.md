@@ -260,20 +260,41 @@ fcmpl + iflt：**penalty 为 NaN 时视为 < 0 -> i4 保持 0。**
     184: iconst_1                                                   // return true
     188: iconst_0                                                   // return false
 
-即（**这是正确读法**；把 188 与 184 看反会得到完全相反的结论）：
+**这里的关键是 ifeq 的语义**：JVM 的 ifeq 是「**值为 0（假）时跳转**」。154/179 跳到 188，
+而 188 是唯一的 iconst_0; ireturn（false 出口）。所以从 154 落到 159 的条件是 **flag5 != 0（真）**，
+走到 188 返回 false 的条件是 **flag5 == 0（假）**。因此第三个合取项是 **!flag5**：
 
+    if (diag == null || sideB == null || sideA == null) return false;
+    if (diag.visited) return false;
+    if (sideB.y > host.y) return false;
+    if (sideA.y > host.y) return false;
+    if (sideA.type == WALKABLE_DOOR) return false;
+    if (sideB.type == WALKABLE_DOOR) return false;
+    if (diag.type  == WALKABLE_DOOR) return false;
+    boolean flag5 = sideB.type == FENCE && sideA.type == FENCE
+                    && (double) entity.getWidth() < 0.5;      // 注意 f2d 后才与 0.5d 比较
     if (diag.penalty < 0.0f) return false;
-    if (sideB.y >= host.y && sideB.penalty < 0.0f && flag5) return false;
-    if (sideA.y >= host.y && sideA.penalty < 0.0f && flag5) return false;
+    if (sideB.y >= host.y && sideB.penalty < 0.0f && !flag5) return false;   // <- !flag5
+    if (sideA.y >= host.y && sideA.penalty < 0.0f && !flag5) return false;   // <- !flag5
     return true;
 
-等价写法：
+等价写法（短路形式）：
 
-    return diag.penalty >= 0.0f
-        && !(sideB.y >= host.y && sideB.penalty < 0.0f && flag5)
-        && !(sideA.y >= host.y && sideA.penalty < 0.0f && flag5);
+    return diag != null && sideA != null && sideB != null
+        && !diag.visited
+        && sideB.y <= host.y && sideA.y <= host.y
+        && sideA.type != WALKABLE_DOOR && sideB.type != WALKABLE_DOOR && diag.type != WALKABLE_DOOR
+        && diag.penalty >= 0.0f
+        && !(sideB.y >= host.y && sideB.penalty < 0.0f && !flag5)
+        && !(sideA.y >= host.y && sideA.penalty < 0.0f && !flag5);
 
-（flag5 为真时才可能拒绝；flag5 为假时对角一律放行。）
+**语义**：只有当生物**较宽（width >= 0.5）**、且某一侧邻居在 host 同层或更高、且该侧惩罚为负（危险格，
+如 FENCE = -1）时才拒绝这个对角。**窄体型（width < 0.5）遇到两面栅栏时豁免** —— 这正是
+flag5 的构造意图（小鸡可以从两面栅栏之间斜着挤过去）。
+
+> ⚠️ **极性极易读反**（本项目确实读反过一次：第一次把 `&& flag5` 当成正确解读，第二版又错误地
+> 「改正」成了两版都错的形式）。本节的结论已由 **captain 与 W2-P1 双向独立复核字节码**确认，
+> 并由 `cava.oracle.OracleSelfTest` 的定点真值表用例（§9.6）锁死。改动此行前请先跑那个用例。
 
 ### 2.5 BirdPathNodeMaker.getSuccessors（class_6）—— **26 个邻居**
 
@@ -1194,6 +1215,31 @@ MobEntity（§5.4.7）。
 5. isBlocked(PathNode) 里的 1.0f / (float) steps 在 steps == 0 时是 +Inf/NaN，
    原版循环不执行 —— 照抄，**不加保护分支**。
 
+### 9.6 定点真值表用例（OracleSelfTest.checkDiagonalTruthTable）
+
+**为什么需要它**：10000 组向量是参照实现自己产的，**自洽但发现不了自身的语义错误**。
+isValidDiagonalSuccessor 的 flag5 极性在本项目被读反过一次，所以必须有一条**真值来自字节码、
+不是从实现反推**的定点用例把它锁死。
+
+用例直接构造 PathNode（host / sideA / sideB / diag）并调用
+LandMaker.isValidDiagonalSuccessor，覆盖 3 个维度：
+
+| 维度 | 取值 |
+| --- | --- |
+| 体型宽度 | 0.4（窄）、0.49999、0.5（边界，不算窄）、0.9（宽） |
+| 两侧类型 | FENCE+FENCE / FENCE+WALKABLE / WALKABLE+WALKABLE |
+| 其它 | 侧向 y 相对 host（等于 / 低于 / 高于）、侧向 penalty（-1 / 0）、
+diag.penalty（0 / -1）、diag.visited、WALKABLE_DOOR、null |
+
+**判别行（任何把 !flag5 写成 flag5 的实现都会在这里挂掉）**：
+
+    width = 0.4  + sideA=FENCE(-1,y=host.y) + sideB=FENCE(-1,y=host.y)  -> true   （窄体型豁免）
+    width = 0.9  + sideA=FENCE(-1,y=host.y) + sideB=FENCE(-1,y=host.y)  -> false  （宽体型被拒绝）
+    width = 0.5  + 同上                                                 -> false  （严格 < 0.5）
+    width = 0.4  + sideA=FENCE(-1)          + sideB=WALKABLE(0)         -> false  （flag5 要求两侧都是栅栏）
+
+本机实跑：语义不变式自检 **46 项，失败 0 项**（其中 14 项属于这张真值表）。
+
 ---
 
 ## 10. 测试向量
@@ -1202,13 +1248,28 @@ MobEntity（§5.4.7）。
 
     src/test/resources/cava/oracle/
       manifest.txt          452 bytes    人读说明 + 种子 + 复现命令
-      vectors-00.bin        3,868,453 bytes
+      vectors-00.bin        3,868,553 bytes
       vectors-01.bin           65,510 bytes
       golden-00.bin           276,856 bytes
-      合计                  4,211,271 bytes (4.02 MB)
+      合计                  4,211,371 bytes (4.02 MB)
 
 单文件严格 < 5 MB。默认 10000 组（= 要求的下限 10^4）；组数可用
 java -cp out cava.oracle.OracleSelfTest &lt;outDir&gt; &lt;cases&gt; 放大。
+
+**当前版本的 SHA-256（修复 isValidDiagonalSuccessor 极性之后）**
+
+    0AB5DD015CC7DE87085274C888B75EEF16B488A47561E15E2FB62C9491EAB212  golden-00.bin
+    A030904FC43CB362F6EEB43FE7DA7C010EDDB0C390B0A3DDB063C186FF811999  vectors-00.bin
+    5C485B9C114644F850AC0005300526F182202BC8DF3867AA305B8F12FBA43370  vectors-01.bin
+    34D5396CFB7CCBA5DBDE922EB94260A00B74B97ED78BB6196EB5AF636331B74E  manifest.txt
+
+> ⚠️ **这次向量更新是修 bug 导致的，不是漂移。**
+> commit 8606e85 里的旧哈希是
+> golden-00.bin = 7D29C7F12BCCFD7A…、vectors-00.bin = E48FE936375C9A8B…。
+> 起因：LandMaker.isValidDiagonalSuccessor 的第三个合取项最初被读成 `flag5`（正确是 `!flag5`）。
+> 受影响的是「width < 0.5 的窄体型生物（鸡/鹦鹉/蝙蝠等）贴着两面栅栏做对角移动」的情形。
+> vectors-01.bin 与 manifest.txt 的哈希未变（该分片里的用例没有命中这个分支；
+> manifest 不含哈希）。**任何在 8606e85 与本次修复之间产生的第三方比对结果都需要重跑。**
 
 ### 10.2 复现命令（实测可用）
 
@@ -1410,8 +1471,9 @@ FNV-1a 64，offset basis = 0xCBF29CE484222325，prime = 0x100000001B3
     真的抵达目标      : 1785 (17.85%)   <- Path.reachesTarget() == false
     未抵达(回退路径)  : 8215 (82.15%)   <- Path.reachesTarget() == true
     平均路径节点数    : 4.874    最大 24
-    平均展开节点数    : 34.121   最大 1023
-    f 值 min/max/avg  : 0.0000 / 171.5000 / 20.9751（样本 48737）
+    平均展开节点数    : 34.126   最大 1023
+    f 值 min/max/avg  : 0.0000 / 171.5000 / 20.9837（样本 48741）
+    语义不变式自检    : 46 项，失败 0 项
     生成耗时          : 1.68 s（单线程）
     逐场景（组数）：FLAT 1001 / OBSTACLES 1028 / STAIRS 984 / WATER 936 / LAVA 993 /
                     DOORS 1024 / FENCE 945 / SCAFFOLDING 1015 / MAZE 1038 / MIXED 1036
@@ -1466,7 +1528,7 @@ FNV-1a 64，offset basis = 0xCBF29CE484222325，prime = 0x100000001B3
     masterSeed = 0x1f2e3d4c5b6a7988
 
     --- 语义不变式自检 ---
-      自检：32 项，失败 0 项
+      自检：46 项，失败 0 项
     ...（完整输出见 §10.7 与提交说明）
 
 ### 12.2 隔离证明（不依赖 Minecraft）
@@ -1485,8 +1547,8 @@ FNV-1a 64，offset basis = 0xCBF29CE484222325，prime = 0x100000001B3
 
     PS J:\mc\Cava> # 连跑两次比对 SHA-256
     文件数 4，哈希不同的文件数：0
-    7D29C7F12BCCFD7A  golden-00.bin
-    E48FE936375C9A8B  vectors-00.bin
+    0AB5DD015CC7DE87  golden-00.bin
+    A030904FC43CB362  vectors-00.bin
     5C485B9C114644F8  vectors-01.bin
     34D5396CFB7CCBA5  manifest.txt
 
@@ -1496,3 +1558,9 @@ FNV-1a 64，offset basis = 0xCBF29CE484222325，prime = 0x100000001B3
   （把 iflt 188 / ifge 184 的跳转目标看反）。现已按字节码改正，并用参照实现逐用例复核。
 - **本文件首次成稿时**：§5.4.2 补充「adjustNodeType 收到的是实体的方块坐标而不是体素坐标」。
 - **本文件首次成稿时**：新增 §4.3.1「Path.reachesTarget() 语义是反的」，由字节码 + 10000 组实跑双重确认。
+- **修复（本次提交）**：§2.4 的 isValidDiagonalSuccessor 第三个合取项由 `flag5` 改为 **`!flag5`**。
+  证据：字节码 154/179 是 `iload 5 ; ifeq 188`，而 188 是唯一的 false 出口
+  —— `ifeq` 在**值为 0 时**跳转，所以拒绝条件是 `&& !flag5`。
+  语义也自洽：flag5 = 「两侧都是栅栏且 width < 0.5」= **窄体型豁免**，窄生物能从两面栅栏之间斜着挤过去。
+  同步修改：`cava.oracle.LandMaker` 的两处条件（已加注释）、新增 §9.6 的定点真值表用例（14 项）、
+  重新生成全部向量（新哈希见 §10.1）。本条由 captain 与 W2-P1 双向独立复核字节码后裁定。

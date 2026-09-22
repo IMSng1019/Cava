@@ -456,15 +456,21 @@ public class LandMaker extends NodeMaker {
         if (diag.type == Pnt.WALKABLE_DOOR) {
             return false;
         }
+        // flag5：两侧都是栅栏且生物很窄 —— 窄体型生物可以从两面栅栏之间斜着挤过去。
+        // 字节码 102-114：entity.getWidth() 先 f2d，再与 0.5d dcmpg；ifge -> false。
         boolean flag = sideB.type == Pnt.FENCE && sideA.type == Pnt.FENCE
                 && (double) this.entity.width < 0.5;
         if (diag.penalty < 0.0f) {
             return false;
         }
-        if (sideB.y >= host.y && sideB.penalty < 0.0f && flag) {
+        // 极性极易读反（本项目已读反过一次，由 captain 与 W2-P1 双向复核）：
+        //   字节码 154/179 是 "iload 5 ; ifeq 188"，即 flag5 == 0（假）时才跳到 188 的
+        //   "iconst_0 ; ireturn"。所以拒绝条件是 "&& !flag5"，不是 "&& flag5"。
+        //   语义：只有宽体型（width >= 0.5）生物才会因侧向危险格被拒绝；窄体型豁免。
+        if (sideB.y >= host.y && sideB.penalty < 0.0f && !flag) {
             return false;
         }
-        if (sideA.y >= host.y && sideA.penalty < 0.0f && flag) {
+        if (sideA.y >= host.y && sideA.penalty < 0.0f && !flag) {
             return false;
         }
         return true;

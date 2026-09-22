@@ -207,6 +207,13 @@ public final class OracleSelfTest {
         }
     }
 
+    /** 定点真值表专用：跑一行并打印实际值（captain 要求可贴进报告）。 */
+    private static void row(boolean expected, boolean actual, String label) {
+        check(actual == expected, label);
+        System.out.printf("    %-6s %-42s actual=%-5s expected=%s%n",
+                actual == expected ? "[ok]" : "[FAIL]", label, actual, expected);
+    }
+
     private static void runInvariants() {
         System.out.println();
         System.out.println("--- 语义不变式自检 ---");
@@ -337,6 +344,77 @@ public final class OracleSelfTest {
         check(n >= 3 && out[2] != null && out[2].x == center.x + 1, "Land 第 2 个后继是 x+1（EAST）");
         check(n >= 4 && out[3] != null && out[3].z == center.z - 1, "Land 第 3 个后继是 z-1（NORTH）");
 
+        // 10) isValidDiagonalSuccessor 的定点真值表 —— 锁住一个本项目读反过的分支
+        //     真值来自字节码 627-719。关键：154/179 是 ifeq 188，即 flag5 == 0 时才返回 false
+        //     -> 第三个合取项是 !flag5。见规格 §2.4 / §9.6。
+        checkDiagonalTruthTable();
+
         System.out.printf("  自检：%d 项，失败 %d 项%n", checks, failures);
+    }
+
+    /**
+     * isValidDiagonalSuccessor 的定点用例：体型宽度 x 两侧栅栏组合 x 高度/惩罚/visited。
+     * 每一行的期望值都由字节码推出来，不是从实现反推的。
+     */
+    private static void checkDiagonalTruthTable() {
+        MobProfile p = new MobProfile();
+        p.height = 1.0f;
+        LandMaker maker = new LandMaker();
+        Terrain dummy = TerrainGen.generate(3L, TerrainGen.SC_FLAT, 0, 64, 0, 4, 4, 4, 66, 70);
+        p.width = 0.4f;
+        maker.init(dummy, p);
+
+        p.width = 0.4f;
+        row(true, diag(maker, Pnt.FENCE, -1.0f, 0, Pnt.FENCE, -1.0f, 0, 0.0f, false, Pnt.OPEN),
+                "窄(0.4) + 两侧栅栏(y=host.y)");
+        p.width = 0.9f;
+        row(false, diag(maker, Pnt.FENCE, -1.0f, 0, Pnt.FENCE, -1.0f, 0, 0.0f, false, Pnt.OPEN),
+                "宽(0.9) + 两侧栅栏(y=host.y)");
+        p.width = 0.5f;
+        row(false, diag(maker, Pnt.FENCE, -1.0f, 0, Pnt.FENCE, -1.0f, 0, 0.0f, false, Pnt.OPEN),
+                "width == 0.5 边界（严格 < 0.5 才算窄）");
+        p.width = 0.49999f;
+        row(true, diag(maker, Pnt.FENCE, -1.0f, 0, Pnt.FENCE, -1.0f, 0, 0.0f, false, Pnt.OPEN),
+                "width == 0.49999");
+        p.width = 0.4f;
+        row(false, diag(maker, Pnt.FENCE, -1.0f, 0, Pnt.WALKABLE, 0.0f, 0, 0.0f, false, Pnt.OPEN),
+                "窄 + 只有一侧栅栏（flag5 要求两侧都是）");
+        p.width = 0.9f;
+        row(true, diag(maker, Pnt.FENCE, -1.0f, -1, Pnt.FENCE, -1.0f, -1, 0.0f, false, Pnt.OPEN),
+                "宽 + 两侧栅栏但 y 都低于 host");
+        row(true, diag(maker, Pnt.FENCE, 0.0f, 0, Pnt.FENCE, 0.0f, 0, 0.0f, false, Pnt.OPEN),
+                "宽 + 两侧 FENCE 类型但 penalty 为 0");
+        row(false, diag(maker, Pnt.FENCE, -1.0f, 0, Pnt.FENCE, -1.0f, 0, -1.0f, false, Pnt.OPEN),
+                "diag.penalty < 0");
+        row(false, diag(maker, Pnt.WALKABLE, 0.0f, 0, Pnt.WALKABLE, 0.0f, 0, 0.0f, true, Pnt.OPEN),
+                "diag.visited");
+        row(false, diag(maker, Pnt.WALKABLE, 0.0f, 0, Pnt.WALKABLE, 0.0f, 1, 0.0f, false, Pnt.OPEN),
+                "sideB.y > host.y");
+        row(false, diag(maker, Pnt.WALKABLE, 0.0f, 1, Pnt.WALKABLE, 0.0f, 0, 0.0f, false, Pnt.OPEN),
+                "sideA.y > host.y");
+        row(false, diag(maker, Pnt.WALKABLE_DOOR, 0.0f, 0, Pnt.WALKABLE, 0.0f, 0, 0.0f, false, Pnt.OPEN),
+                "sideA == WALKABLE_DOOR");
+        row(false, diag(maker, Pnt.WALKABLE, 0.0f, 0, Pnt.WALKABLE, 0.0f, 0, 0.0f, false, Pnt.WALKABLE_DOOR),
+                "diag == WALKABLE_DOOR");
+        row(false, maker.isValidDiagonalSuccessor(new PNode(0, 0, 0), null, new PNode(0, 0, 0), new PNode(0, 0, 0)),
+                "sideA == null");
+    }
+
+    private static boolean diag(LandMaker maker, Pnt sideAType, float sideAPenalty, int sideAY,
+                                Pnt sideBType, float sideBPenalty, int sideBY,
+                                float diagPenalty, boolean diagVisited, Pnt diagType) {
+        PNode host = new PNode(0, 0, 0);
+        // PathNode.x/y/z 是 final（与原版一致），所以高度差要在构造时给。
+        PNode sideA = new PNode(-1, sideAY, 0);
+        PNode sideB = new PNode(0, sideBY, -1);
+        PNode diag = new PNode(-1, 0, -1);
+        sideA.type = sideAType;
+        sideA.penalty = sideAPenalty;
+        sideB.type = sideBType;
+        sideB.penalty = sideBPenalty;
+        diag.type = diagType;
+        diag.penalty = diagPenalty;
+        diag.visited = diagVisited;
+        return maker.isValidDiagonalSuccessor(host, sideA, sideB, diag);
     }
 }

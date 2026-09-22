@@ -17,7 +17,15 @@
 
 **文件所有权铁律**：一个文件在同一时刻只能由一个分支改。跨流需要的改动，写成「请求」交给 captain 或对应流的代理，不要自己越界改。
 
-**提交纪律**：每个分支自己 commit（小步、语义清晰、中文 commit message 可以）。**不要 push**、不要 rebase 别人的分支、不要 `git checkout main` 后改文件。
+**提交纪律**（并行期强制）：
+- 一律 **pathspec 形式**提交，不依赖暂存区：`git commit -m "..." -- <我的路径...>`。
+- **不要用 `git add`**（除非紧接着立刻 commit 同一批路径，中间不跑别的命令）；**绝不** `git add -A` / `git add .` / `git commit -a`。
+- 发现暂存区里有别人的文件：**不要提交、不要 reset 别人的东西**，只在报告里说明。
+- **不要 push**、不要 rebase、不要 `git checkout` / `git stash` 别人的改动。
+- 提交前先 `git status --short` 确认。
+
+> **真实事故记录（2026-09-22）**：P0-B `git add` 了 15 个文件后，P0-D 用不带 pathspec 的 `git commit` 把它们一起提交了。
+> 已用 `git reset --soft` 修正、零丢失 —— 这条纪律就是为此加的。
 
 ---
 

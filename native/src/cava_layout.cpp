@@ -200,7 +200,7 @@ const StructLayout kLayouts[] = {
         18,
         {
             (uint64_t)offsetof(CavaMobProfile, penalty),
-            (uint64_t)offsetof(CavaMobProfile, max_fall_distance),
+            (uint64_t)offsetof(CavaMobProfile, reserved_max_fall_distance),
             (uint64_t)offsetof(CavaMobProfile, start_x),
             (uint64_t)offsetof(CavaMobProfile, start_y),
             (uint64_t)offsetof(CavaMobProfile, start_z),
@@ -220,7 +220,7 @@ const StructLayout kLayouts[] = {
         },
         {
             (uint64_t)sizeof(((CavaMobProfile*)0)->penalty),
-            (uint64_t)sizeof(((CavaMobProfile*)0)->max_fall_distance),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->reserved_max_fall_distance),
             (uint64_t)sizeof(((CavaMobProfile*)0)->start_x),
             (uint64_t)sizeof(((CavaMobProfile*)0)->start_y),
             (uint64_t)sizeof(((CavaMobProfile*)0)->start_z),

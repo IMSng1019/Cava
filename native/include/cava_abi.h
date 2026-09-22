@@ -242,7 +242,14 @@ typedef struct CavaMobProfile {
     /* 惩罚表：索引 = CAVA_PNT_*，值 = Entity.getPathfindingPenalty(type)。
      * 只有 penalty_mask 里置 1 的项有效，未置位的用 PathNodeType 的默认值。*/
     float    penalty[CAVA_PNT_COUNT];
-    float    max_fall_distance;     /* in: 与 getMaxFallDistance 同源，float 原样 */
+    /* **占位字段，内核当前不读**（2026-09-22 实测：`cava_pf_kernel.cpp` 里没有任何
+     * `max_fall_distance` 的读取点；真正影响下坠判定的是下面的 `safe_fall_distance`）。
+     * 保留它是为了**避免在本轮改动已冻结的布局**（改字段 = 两侧重登记 + layout_hash_sum 变化 +
+     * 正在并行开发的流全部返工）。填 0 即可。
+     * 另外：1.20.4 里 `MobEntity`/`EntityNavigation` **没有** `getMaxFallDistance`（javap 确认），
+     * 所以它本来也没有可靠的来源。
+     * 如果将来要真正使用它，请作为**独立议题**连同两侧布局登记一起改。*/
+    float    reserved_max_fall_distance;
 
     /* 起点：**起点是实体位姿推出来的**（pathNodeMaker.getStart()），
      * 不是从参数取。所以这里给 double 位姿，不给"起点方块坐标"。*/

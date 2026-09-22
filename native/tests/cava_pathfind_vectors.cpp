@@ -656,7 +656,7 @@ static int abi_smoke_test() {
     CavaMobProfile mp;
     std::memset(&mp, 0, sizeof mp);
     mp.width = 0.6f; mp.height = 1.8f; mp.step_height = 0.0f;
-    mp.max_fall_distance = 3.0f; mp.safe_fall_distance = 3;
+    mp.reserved_max_fall_distance = 0.0f; mp.safe_fall_distance = 3;
     mp.min_y = -64; mp.sea_level = 63;
     mp.caps = CAVA_NAV_CAN_OPEN_DOORS | CAVA_NAV_ON_GROUND;
     mp.start_x = 0.5; mp.start_y = 1.0; mp.start_z = 0.5;

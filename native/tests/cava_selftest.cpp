@@ -161,7 +161,7 @@ static const FieldExpect kPathNodeFields[] = {
 };
 static const FieldExpect kMobProfileFields[] = {
     { "penalty",            0,   104 },
-    { "max_fall_distance",  104, 4 },
+    { "reserved_max_fall_distance", 104, 4 },
     { "start_x",            112, 8 },
     { "start_y",            120, 8 },
     { "start_z",            128, 8 },
@@ -240,7 +240,7 @@ static const StructExpect kExpect[9] = {
     CAVA_ROW(T, f), CAVA_ROW(T, type), CAVA_ROW(T, flags)
 
 #define CAVA_ROWS_CavaMobProfile(T)                                                                    \
-    CAVA_ROW(T, penalty), CAVA_ROW(T, max_fall_distance), CAVA_ROW(T, start_x), CAVA_ROW(T, start_y),   \
+    CAVA_ROW(T, penalty), CAVA_ROW(T, reserved_max_fall_distance), CAVA_ROW(T, start_x), CAVA_ROW(T, start_y),   \
     CAVA_ROW(T, start_z), CAVA_ROW(T, start_block_x), CAVA_ROW(T, start_block_y), CAVA_ROW(T, start_block_z), \
     CAVA_ROW(T, width), CAVA_ROW(T, height), CAVA_ROW(T, step_height), CAVA_ROW(T, safe_fall_distance), \
     CAVA_ROW(T, min_y), CAVA_ROW(T, sea_level), CAVA_ROW(T, caps), CAVA_ROW(T, penalty_mask),          \

@@ -140,7 +140,9 @@ public final class CavaLayouts {
      */
     public static final StructLayout MOB_PROFILE = MemoryLayout.structLayout(
             MemoryLayout.sequenceLayout(PNT_COUNT, ValueLayout.JAVA_FLOAT).withName("penalty"),
-            ValueLayout.JAVA_FLOAT.withName("max_fall_distance"),
+            // 占位字段：内核当前不读（真正生效的是 safe_fall_distance）。
+            // 名字带 reserved_ 就是为了让下一个人一眼看出它不是活字段。
+            ValueLayout.JAVA_FLOAT.withName("reserved_max_fall_distance"),
             // C 会在 double 前插入 4 字节填充；Java 的 structLayout 不会自动插，
             // 必须显式写出来（padding 元素没有名字，struct() 只收集有名字的成员）。
             MemoryLayout.paddingLayout(4),
@@ -294,6 +296,39 @@ public final class CavaLayouts {
     public static final long MOB_PROFILE_SIZE = 192;
     /** CavaMobProfile 期望 alignof。 */
     public static final long MOB_PROFILE_ALIGN = 8;
+
+    /**
+     * {@code CavaMobProfile} 各字段在结构体内的偏移（= C 编译器实测值）。
+     *
+     * <p><b>为什么要有这些常量</b>：调用方本来用
+     * {@code MOB_PROFILE.byteOffset(groupElement("字段名"))} 取偏移 —— 那是**按字符串查字段名**，
+     * 字段一改名就会在运行期抛异常。2026-09-22 给 {@code max_fall_distance} 加
+     * {@code reserved_} 前缀时就撞了一次。
+     * <b>关键偏移一律用这里的常量，不要再按名字查。</b>
+     */
+    public static final class MobProfileOffset {
+        private MobProfileOffset() {
+        }
+
+        /** penalty[26]（数组算一个字段）。 */
+        public static final long PENALTY = 0;
+        /** 占位字段，内核不读（真正生效的是 SAFE_FALL_DISTANCE）。 */
+        public static final long RESERVED_MAX_FALL = 104;
+        public static final long START_X = 112;
+        public static final long START_Y = 120;
+        public static final long START_Z = 128;
+        public static final long START_BLOCK_X = 136;
+        public static final long START_BLOCK_Y = 140;
+        public static final long START_BLOCK_Z = 144;
+        public static final long WIDTH = 148;
+        public static final long HEIGHT = 152;
+        public static final long STEP_HEIGHT = 156;
+        public static final long SAFE_FALL_DISTANCE = 160;
+        public static final long MIN_Y = 164;
+        public static final long SEA_LEVEL = 168;
+        public static final long CAPS = 172;
+        public static final long PENALTY_MASK = 176;
+    }
 
     /** CavaStateRecord 期望偏移。 */
     public static final long[] STATE_RECORD_OFFSETS = {0, 4, 8, 12, 16};

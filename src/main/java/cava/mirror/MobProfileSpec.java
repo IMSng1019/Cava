@@ -32,22 +32,24 @@ public record MobProfileSpec(
     /** 内核未实现的寻路器（飞行 / 水生）。 */
     public static final int KIND_UNSUPPORTED = 0;
 
-    private static final long O_PENALTY = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("penalty"));
-    private static final long O_MAX_FALL = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("max_fall_distance"));
-    private static final long O_START_X = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("start_x"));
-    private static final long O_START_Y = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("start_y"));
-    private static final long O_START_Z = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("start_z"));
-    private static final long O_SBX = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("start_block_x"));
-    private static final long O_SBY = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("start_block_y"));
-    private static final long O_SBZ = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("start_block_z"));
-    private static final long O_WIDTH = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("width"));
-    private static final long O_HEIGHT = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("height"));
-    private static final long O_STEP = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("step_height"));
-    private static final long O_SAFE_FALL = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("safe_fall_distance"));
-    private static final long O_MIN_Y = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("min_y"));
-    private static final long O_SEA = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("sea_level"));
-    private static final long O_CAPS = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("caps"));
-    private static final long O_MASK = CavaLayouts.MOB_PROFILE.byteOffset(MemoryLayout.PathElement.groupElement("penalty_mask"));
+    private static final long O_PENALTY = CavaLayouts.MobProfileOffset.PENALTY;
+    // 一律用 CavaLayouts 的实测偏移常量，**不要**按字段名查
+    // （byteOffset(groupElement("名字")) 在字段改名时会运行期抛异常，2026-09-22 撞过一次）。
+    private static final long O_MAX_FALL = CavaLayouts.MobProfileOffset.RESERVED_MAX_FALL;
+    private static final long O_START_X = CavaLayouts.MobProfileOffset.START_X;
+    private static final long O_START_Y = CavaLayouts.MobProfileOffset.START_Y;
+    private static final long O_START_Z = CavaLayouts.MobProfileOffset.START_Z;
+    private static final long O_SBX = CavaLayouts.MobProfileOffset.START_BLOCK_X;
+    private static final long O_SBY = CavaLayouts.MobProfileOffset.START_BLOCK_Y;
+    private static final long O_SBZ = CavaLayouts.MobProfileOffset.START_BLOCK_Z;
+    private static final long O_WIDTH = CavaLayouts.MobProfileOffset.WIDTH;
+    private static final long O_HEIGHT = CavaLayouts.MobProfileOffset.HEIGHT;
+    private static final long O_STEP = CavaLayouts.MobProfileOffset.STEP_HEIGHT;
+    private static final long O_SAFE_FALL = CavaLayouts.MobProfileOffset.SAFE_FALL_DISTANCE;
+    private static final long O_MIN_Y = CavaLayouts.MobProfileOffset.MIN_Y;
+    private static final long O_SEA = CavaLayouts.MobProfileOffset.SEA_LEVEL;
+    private static final long O_CAPS = CavaLayouts.MobProfileOffset.CAPS;
+    private static final long O_MASK = CavaLayouts.MobProfileOffset.PENALTY_MASK;
 
     public MobProfileSpec {
         if (penalty.length != PathTypes.COUNT) {

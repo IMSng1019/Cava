@@ -137,9 +137,25 @@ tasks.withType(Test).configureEach {
 	useJUnitPlatform()
 	// 预览 class 需要 --enable-preview 才能加载
 	jvmArgs cavaPreviewJvmArgs
-	// 单测默认走纯 Java 路径（不需要先编出原生库）；要测原生加载用 -Pcava.native.enabled=true
+	// 原生开关的**自动判定**（可用 -Pcava.native.enabled=true|false 覆盖）：
+	//   - 工作区里已编出原生库 -> 打开原生，并把它指给测试。这样 PathfindAbiTest 会真的跑；
+	//   - 没编出原生库        -> 关掉原生，跑纯 Java 回退路径（NativeFallbackTest）。
+	//
+	// 动机（实测）：这两个条件**必须成对**。只设 cava.native.path 而不打开 enabled，
+	// PathfindAbiTest 仍然整类 skip（tryOpen 返回 DISABLED_BY_FLAG），构建照样"绿"，
+	// 但 6 个原生 ABI 用例一次都没执行 —— "绿"不等于"测过"。
+	def cavaOsName = System.getProperty('os.name', '').toLowerCase(Locale.ROOT)
+	def cavaOsArch = System.getProperty('os.arch', '').toLowerCase(Locale.ROOT)
+	def cavaLibName = cavaOsName.contains('win') ? 'cava.dll'
+			: (cavaOsName.contains('mac') ? 'libcava.dylib' : 'libcava.so')
+	// 平台标签与 CMake 的 CavaPlatform.cmake 一致；目前 P0/P1 只构建 windows-x64
+	def cavaBuiltNativeLib = layout.projectDirectory.file("natives/windows-x64/${cavaLibName}").asFile
+	def cavaAutoNative = cavaBuiltNativeLib.isFile()
 	if (project.findProperty('cava.native.enabled') == null) {
-		systemProperty 'cava.native.enabled', 'false'
+		systemProperty 'cava.native.enabled', cavaAutoNative ? 'true' : 'false'
+	}
+	if (cavaAutoNative) {
+		systemProperty 'cava.native.path', cavaBuiltNativeLib.absolutePath
 	}
 	// 黄金轨迹比对要求确定性：不要并行跑测试
 	maxParallelForks = 1

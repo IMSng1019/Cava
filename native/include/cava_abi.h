@@ -52,18 +52,27 @@ int32_t cava_abi_version(void);
  * 任一不等 => 整体回退纯 Java。
  *
  * 【唯一权威公式，2026-09-22 裁定】32 位 FNV-1a，对每个字段按声明顺序走满 4 步：
- *     对 (uint32_t)offset     喂 1 字节
- *     对 (uint32_t)size       喂 1 字节
- *     对 (uint32_t)(offset>>32) 喂 1 字节
- *     对 (uint32_t)(size>>32)   喂 1 字节
- *   即每个字段固定 4 次 h ^= byte; h *= PRIME（32 位字段的高位补 0 也要走）。
+ *     对 (uint32_t)offset        喂 **1 个 uint32**（整个 32 位值参与异或，不截断成字节）
+ *     对 (uint32_t)size          喂 **1 个 uint32**
+ *     对 (uint32_t)(offset>>32)  喂 **1 个 uint32**
+ *     对 (uint32_t)(size>>32)    喂 **1 个 uint32**
+ *   即每个字段固定 4 次 `h ^= v; h *= PRIME`，其中 v 是完整的 uint32（32 位字段的高位补 0 也要走这 4 步）。
  *   数组字段算**一个**字段（offset = 数组起点，size = 整个数组的字节数）。
- * layout_hash_sum = 所有导出结构体 layout_hash 的 uint32 无符号加法（回绕）。
- *   本机实测值：CavaLayoutEntry=0xF837804D / CavaLayoutReport=0xE9FFC021 /
- *   CavaOpenParams=0x7FDE7499 / CavaOpenResult=0xFF344829  =>  sum = 0x6149FD30
  *
- * 【已废除】早期注释里写的"逐字节"变体（sum=0xDB2A07ED）**不是**契约的一部分：
- * 原生侧实测会拒绝它（CAVA_ERR_LAYOUT），双变体协商代码将删除。*/
+ *   ⚠️ **措辞勘误（2026-09-22，由 P0-C 指出）**：本注释早期写成"喂 1 字节"，按字面读会变成
+ *   "每次只异或该 u32 的**最低字节**" —— 那样**算不出**实测值（size=256 会退化成 0）。
+ *   两侧实现用的都是**整个 uint32 参与异或**。下一个人不要照旧措辞实现。
+ *
+ * layout_hash_sum = 所有导出结构体 layout_hash 的 uint32 无符号加法（回绕）。
+ *   **本机实测权威值（9 个结构体，2026-09-22）**：
+ *     CavaLayoutEntry=0xF837804D / CavaLayoutReport=0xE9FFC021 / CavaOpenParams=0x7FDE7499 /
+ *     CavaOpenResult=0xFF344829 / CavaPathRequest=0xE566F98D / CavaPathNode=0x0DCFFE65 /
+ *     CavaMobProfile=0x9C6C98CD / CavaStateRecord=0x53797229 / CavaCollisionBox=0x250ECBE1
+ *     =>  sum = 0x6975CBF9
+ *   （旧的 4 结构体和值 0x6149FD30 已作废：扩了 5 个结构体，且 CavaPathNode 曾漏登记 2 个字段。）
+ *
+ * 【已废除】更早期注释里写的"逐字节"变体（sum=0xDB2A07ED）**不是**契约的一部分，
+ * 双变体协商代码已删除（原生侧会以 CAVA_ERR_LAYOUT 拒绝它）。*/
 
 #define CAVA_LAYOUT_MAX_FIELDS 32
 #define CAVA_LAYOUT_REPORT_CAP 64

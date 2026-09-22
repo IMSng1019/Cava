@@ -138,6 +138,29 @@ P1 的每次寻路本来就有天然边界（起点→终点 + maxVisitedNodes�
 
 **Wave 2 之后、Wave 3 之前必须先冻结**：实体镜像 ABI（P2 的 SoA 布局）—— 由 P2 流按真实 `Entity` 推导，captain 审查后写进 `cava_abi.h`。
 
+## 6.5 Wave 3 分流（提示词顺序推进；**性能对比留到最后**）
+
+**用户裁定（2026-09-22）**：
+1. **区块生成不纳入范围**（P0-E 基线显示它占 60.5%，但 Cava 的三个子系统都不碰它）——记录为"明确不在范围内"，不再讨论；
+2. **先把提示词推完，再回来做性能对比**。所以 `prompts/04` 里"与 Lithium + ServerCore 的 Java 寻路对比"这条**有意推迟**；
+3. **`mixin.ai.pathing` 暂时保持关闭**（用户明确说"不用"回退）——
+   即**接受"P1 已接管但只到与 vanilla 打平"这个中间态**，代价是 Lithium 的 Java 寻路优化暂时不生效。**这是用户的知情取舍，不是遗漏。**
+
+| 流 | 任务书 | 状态 | 交付 |
+| --- | --- | --- | --- |
+| **P2-K** | `prompts/05` 第 1 个核 | 运行中 | **原版碰撞语义规格**（javap 证据）+ 纯几何内核（`resolve_movement`）+ 定点真值表 + 向量 + **ABI 提案** |
+| **P2-Java** | `prompts/05` 设计要求 | 运行中 | 实体 SoA 镜像（打包/读取）+ 事件回放骨架 + **VMP 黏滞语义复刻** + ServerCore inactive 观测 |
+| **P03-差分** | `prompts/03` | 运行中 | 单元层 harness + 场景层黄金轨迹（**自采**）+ 整服层不变量 + mod 组合矩阵 + 一条命令出报告 |
+| P1-性能对比 | `prompts/04` 验收 | **推迟（用户指示）** | 重场景（长路径/迷宫/多生物）下的 native on/off |
+| P3 红石 | `prompts/06` | pending | 需先做 Carpet/TIS 源码比对 → 归属决策（复刻 Carpet vs 让位） |
+| P4 跨平台加固 | `prompts/07` | pending | arm64/macOS + CI 矩阵 + 熔断/看门狗/崩溃取证 + fuzz + ASan/UBSan |
+
+**P2 的关键设计约束（captain 已读字节码后写的，供后续流遵守）**：
+`Entity.adjustMovementForCollisions` 的**形状来源顺序有语义**：
+`entityCollisions`（前）→ `worldBorder.asVoxelShape()`（仅当 `canCollide(entity, box.stretch(movement))`）→ `world.getBlockCollisions(...)`（后）。
+三批形状交给**私有静态重载**求解；**worldBorder 是第三个输入源，不能漏**。
+以及：**回放事件必须能取回原始 VoxelShape 对象**，否则 mod 覆写过的方块行为会丢。
+
 ## 7. 风险台账
 
 | 风险 | 触发条件 | 现状 | 对策 |

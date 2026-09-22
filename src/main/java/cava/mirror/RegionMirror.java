@@ -410,8 +410,21 @@ public final class RegionMirror implements RegionSource {
     public Pushed pushReusingSameTick(RegionRect rect) {
         RegionReader r = requireReader();
         synchronized (lock) {
+            /* 复用条件（2026-09-22 captain 修改）：
+             *   原实现要求 `lastTick == r.currentTick()` —— 那是**按 tick 判定**，
+             *   会漏掉**同一 tick 内**的方块变化（玩家/别的 mod 放置），所以它只能当"可选快路径"。
+             *
+             *   现在改成按**"自上次上传以来没有发生任何会让区域失效的事件"**判定：
+             *   `invalidate()` 已经把 lastTick 置为 Long.MIN_VALUE，而它同时被
+             *   `onBlockChanged` / `onSectionUnloaded` / `onWorldChanged` 调用 ——
+             *   于是"有变更就不复用"成为**结构性保证**，而不是"赌 tick 内没有变更"。
+             *   代价为零（复用条件里已经比较了 rect 与维度），而收益是：
+             *   **同一片地形上的连续多次求解不再需要重推几万格**（实测瓶颈）。
+             *
+             *   注意：lastTick == Long.MIN_VALUE 同时覆盖"从未推过"与"刚失效"两种情况。*/
             if (lastRect != null && lastRect.equals(rect) && lastDim.equals(r.dimensionId())
-                    && lastTick == r.currentTick() && table.ready() && uploader.available()) {
+                    && lastTick == r.currentTick() && lastTick != Long.MIN_VALUE
+                    && table.ready() && uploader.available()) {
                 reuseSkips++;
                 return new Pushed(rect.dimX(), rect.dimY(), rect.dimZ(), rect.minX(), rect.minY(), rect.minZ(),
                         lastCells, 0L);

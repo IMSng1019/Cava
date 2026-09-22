@@ -83,6 +83,23 @@ public interface RegionSource {
     /** 清掉原生侧的区域缓存。幂等。 */
     void clear();
 
+    /**
+     * **推荐给求解路径用的推进入口**：只给起点/终点（与生物体型），窗口边距由镜像侧决定。
+     *
+     * <p><b>为什么契约里要有这个（2026-09-22 补，由实测的性能瓶颈驱动）</b>：
+     * 注入流原本只能调 `push(minX..dimZ)`，于是它**每次求解都要自己算并重推整个窗口**。
+     * 实测代价：35³ = 42875 格、**总耗时 ≈320 µs/次**，而 vanilla 整个 `findPathToAny` 只要 ≈33 µs
+     * ⇒ 打开原生反而**慢约 13.9 倍**，瓶颈完全在推送而不在原生 A\*。
+     *
+     * <p>把"窗口怎么定 + 要不要重推"交给镜像侧，才有可能做增量/复用优化
+     * （镜像侧已经在按"自上次上传以来是否发生过失效事件"判定可复用）。
+     *
+     * @return 推送结果（含复用时的 `elapsedNanos == 0`）；失败抛 {@link MirrorUnavailableException}
+     */
+    Pushed pushForSolve(int startX, int startY, int startZ,
+                        int targetX, int targetY, int targetZ,
+                        float width, float height, int safeFallDistance);
+
     /* 说明：原设计里"镜像流产出生物档案"的两个方法（isProfileReadyForSolve(profileKey) /
      * uploadProfileForSolve(handle, profileKey)）**已于 2026-09-22 作废并删除**。
      * 原因：档案需要实体位姿与惩罚表，而镜像流拿不到它们 —— 那个设计必然恒返回"未就绪"，

@@ -1,6 +1,6 @@
 # cava layout reference (ABI v1)
 # build_id: cava 0.1.0 win-x64 mingw-gcc-15.2.0 O2/fwrapv/ffp-contract=off safe=0 asan=0 ubsan=0
-# struct_count=4 pointer_size=8 platform=1 build_flags=0x00000000
+# struct_count=9 pointer_size=8 platform=1 build_flags=0x00000000
 # build_id_hash=0x982192f1
 # 哈希公式（契约 2.3）：h=0x811C9DC5；每字段按声明顺序 4 步：
 #   h^=(u32)(off&0xFFFFFFFF); h*=0x01000193; h^=(u32)(size&0xFFFFFFFF); h*=0x01000193;
@@ -35,4 +35,59 @@ struct CavaOpenResult size=24 align=8 fields=4 hash=0xff344829
   field abi_version          offset=4      size=4     
   field native_layout_sum    offset=8      size=8     
   field reserved0            offset=16     size=8     
-layout_hash_sum 0x6149fd30 (1632238896)
+struct CavaPathRequest size=56 align=8 fields=13 hash=0xe566f98d
+  field reserved1            offset=0      size=8     
+  field tx                   offset=8      size=4     
+  field ty                   offset=12     size=4     
+  field tz                   offset=16     size=4     
+  field reach_range          offset=20     size=4     
+  field max_range            offset=24     size=4     
+  field flags                offset=28     size=4     
+  field reserved0            offset=32     size=4     
+  field reserved2            offset=36     size=4     
+  field max_visited_nodes    offset=40     size=4     
+  field pad0                 offset=44     size=4     
+  field pad1                 offset=48     size=4     
+  field pad2                 offset=52     size=4     
+struct CavaPathNode size=32 align=4 fields=8 hash=0x0dcffe65
+  field x                    offset=0      size=4     
+  field y                    offset=4      size=4     
+  field z                    offset=8      size=4     
+  field heapIndex            offset=12     size=4     
+  field g                    offset=16     size=4     
+  field f                    offset=20     size=4     
+  field type                 offset=24     size=4     
+  field flags                offset=28     size=4     
+struct CavaMobProfile size=192 align=8 fields=18 hash=0x9c6c98cd
+  field penalty              offset=0      size=104   
+  field max_fall_distance    offset=104    size=4     
+  field start_x              offset=112    size=8     
+  field start_y              offset=120    size=8     
+  field start_z              offset=128    size=8     
+  field start_block_x        offset=136    size=4     
+  field start_block_y        offset=140    size=4     
+  field start_block_z        offset=144    size=4     
+  field width                offset=148    size=4     
+  field height               offset=152    size=4     
+  field step_height          offset=156    size=4     
+  field safe_fall_distance   offset=160    size=4     
+  field min_y                offset=164    size=4     
+  field sea_level            offset=168    size=4     
+  field caps                 offset=172    size=4     
+  field penalty_mask         offset=176    size=4     
+  field reserved0            offset=180    size=4     
+  field reserved1            offset=184    size=4     
+struct CavaStateRecord size=20 align=4 fields=5 hash=0x53797229
+  field flags                offset=0      size=4     
+  field box_offset           offset=4      size=4     
+  field box_count            offset=8      size=4     
+  field path_type_idx        offset=12     size=4     
+  field malus                offset=16     size=4     
+struct CavaCollisionBox size=24 align=4 fields=6 hash=0x250ecbe1
+  field min_x                offset=0      size=4     
+  field min_y                offset=4      size=4     
+  field min_z                offset=8      size=4     
+  field max_x                offset=12     size=4     
+  field max_y                offset=16     size=4     
+  field max_z                offset=20     size=4     
+layout_hash_sum 0x6975cbf9 (1769327609)

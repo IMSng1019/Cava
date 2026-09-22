@@ -1,3 +1,22 @@
+    CavaOpenResult   size=24 align=8 fields=4
+      status 0/4         abi_version 4/4   native_layout_sum 8/8  reserved0 16/8
+    CavaPathRequest  size=56 align=8 fields=13
+      reserved1 0/8      tx 8/4      ty 12/4     tz 16/4      reach_range 20/4   max_range 24/4
+      flags 28/4         reserved0 32/4   reserved2 36/4   max_visited_nodes 40/4
+      pad0 44/4          pad1 48/4        pad2 52/4
+    CavaPathNode     size=32 align=4 fields=8
+      x 0/4    y 4/4    z 8/4    heapIndex 12/4    g 16/4    f 20/4    type 24/4    flags 28/4
+    CavaMobProfile   size=192 align=8 fields=18
+      penalty 0/104      max_fall_distance 104/4
+      start_x 112/8      start_y 120/8     start_z 128/8
+      start_block_x 136/4  start_block_y 140/4  start_block_z 144/4
+      width 148/4   height 152/4   step_height 156/4   safe_fall_distance 160/4
+      min_y 164/4   sea_level 168/4  caps 172/4  penalty_mask 176/4
+      reserved0 180/4  reserved1 184/4
+    CavaStateRecord  size=20 align=4 fields=5
+      flags 0/4   box_offset 4/4   box_count 8/4   path_type_idx 12/4   malus 16/4
+    CavaCollisionBox size=24 align=4 fields=6
+      min_x 0/4   min_y 4/4   min_z 8/4   max_x 12/4   max_y 16/4   max_z 20/4
 # Cava 原生核心笔记（P0-B · 实测记录）
 
 > 所有权：P0-B（原生核心流）。本文只写**本机真跑出来的**东西；没跑过的一律标「未验证」。
@@ -7,18 +26,28 @@
 
 ---
 
-## 0. Java 侧直接要抄的数字（x64 / ABI v1）
+## 0. Java 侧直接要抄的数字（x64 / ABI v1，**9 个结构体**）
+
+> 2026-09-22 更新：captain 随 P1 扩展把导出结构体从 4 个加到 9 个。
+> **旧的 4 条和值 0x6149FD30 已作废**，不要再往 `CavaOpenParams.layout_hash_sum` 里填它。
 
 | 结构体 | struct_size | align | field_count | layout_hash |
 | --- | --- | --- | --- | --- |
-| `CavaLayoutEntry`  | 544   | 8 | 8 | **0xf837804d** |
-| `CavaLayoutReport` | 34848 | 8 | 8 | **0xe9ffc021** |
-| `CavaOpenParams`   | 32    | 8 | 5 | **0x7fde7499** |
-| `CavaOpenResult`   | 24    | 8 | 4 | **0xff344829** |
+| `CavaLayoutEntry`   | 544   | 8 | 8  | **0xf837804d** |
+| `CavaLayoutReport`  | 34848 | 8 | 8  | **0xe9ffc021** |
+| `CavaOpenParams`    | 32    | 8 | 5  | **0x7fde7499** |
+| `CavaOpenResult`    | 24    | 8 | 4  | **0xff344829** |
+| `CavaPathRequest`   | 56    | 8 | 13 | **0xe566f98d** |
+| `CavaPathNode`      | 32    | 4 | 8  | **0x0dcffe65** |
+| `CavaMobProfile`    | 192   | 8 | 18 | **0x9c6c98cd** |
+| `CavaStateRecord`   | 20    | 4 | 5  | **0x53797229** |
+| `CavaCollisionBox`  | 24    | 4 | 6  | **0x250ecbe1** |
 
-### layout_hash_sum = **0x6149FD30** = **1632238896**  ← Java 侧填进 `CavaOpenParams.layout_hash_sum`
+### layout_hash_sum = **0x6975CBF9** = **1769327609**  ← Java 侧填进 `CavaOpenParams.layout_hash_sum`
 
-（uint32 回绕加法：0xf837804d + 0xe9ffc021 + 0x7fde7499 + 0xff344829 = 0x16149fd30 → 取低 32 位）
+（uint32 回绕加法。本机用**三种独立方式**复算过：C 侧 `cava_layout_report` 的 9 条相加、
+测试侧 uint32 求和、以及一个 JS 脚本用同样的 9 个 hash 相加 —— 三个结果都是 `0x6975CBF9`；
+captain 给出的 Java 侧和值也是这个数。）
 
 **Java 侧不要硬编码这几个数字就完事**：应当自己按下面的公式算出期望值再填进去 ——
 硬编码会让「Java 结构体写错但恰好没被测到」这种错误无法被布局自检发现。
@@ -63,6 +92,7 @@ for each field in declaration order:
 ~~~
 
 **entry 顺序** = 头文件里的声明顺序：`CavaLayoutEntry` → `CavaLayoutReport` → `CavaOpenParams` → `CavaOpenResult`
+→ `CavaPathRequest` → `CavaPathNode` → `CavaMobProfile` → `CavaStateRecord` → `CavaCollisionBox`
 （求和可交换，但逐条比对要按这个顺序）。
 
 Java 参考实现（可直接抄）：
@@ -155,6 +185,38 @@ Java 侧只要传一个自己的 `CavaOpenResult`，即使 `cava_open` 返回 `C
 - 重复关闭后 generation 递增，老句柄不会复活到新对象上（实测 64 轮 open/open/close/close 无重复、无失败）；
 - 内部用 `std::mutex` + `shared_ptr` 查表，并发 close 不会让正在使用的人踩空（P0 无并发，先把地基打对）。
 
+### 3.4 句柄代际校验：给子系统入口用（2026-09-22 新增）
+
+子系统入口（`native/src/pathfind/cava_pf_abi.cpp`）此前只校验句柄**形状**（低 32 位在 1..256 之间）。
+形状合法的陈旧句柄会指向**槽位复用后的新对象**。现在在 `cava_internal.h` 里暴露：
+
+~~~cpp
+#include "../cava_internal.h"
+
+auto inst = cava::detail::lookup(handle);      // 有效 -> 非空 shared_ptr
+if (!inst) return CAVA_ERR_NULL;
+// 只要布尔：
+if (!cava::detail::handle_valid(handle)) return CAVA_ERR_NULL;
+~~~
+
+- **没有新增导出符号**：`cava_abi.h` 未改动，`objdump -p cava.dll` 确认导出表里没有 `lookup` / `handle_valid`
+  （唯一命中的是 KERNEL32 导入的 `RtlLookupFunctionEntry`）。
+- 返回 `shared_ptr`：即使另一线程同时在 `cava_close`，对象也不会在使用中被析构。
+- 实测（一次性验证脚本 `native/build/tmp/lookup_check.cpp`，故意不放进 `native/tests` ——
+  那里每个 `.cpp` 都会被编成链接 DLL 的测试 target，而这是内部符号）：
+
+~~~
+  [ ok ] handle_valid(有效句柄) == true
+  [ ok ] handle_valid(0) == false
+  [ ok ] handle_valid(-1) == false
+  [ ok ] handle_valid(未来 generation) == false
+  [ ok ] close 后 handle_valid(旧句柄) == false（代际校验生效）
+    旧句柄=0x100000001 新句柄=0x200000001
+  [ ok ] 槽位复用后，旧句柄仍然无效（这才是不校验代际会踩的坑）
+  [ ok ] 新句柄有效
+RESULT: PASS
+~~~
+
 ---
 
 ## 4. SAFE 开关（B2）实测
@@ -167,11 +229,11 @@ Java 侧只要传一个自己的 `CavaOpenResult`，即使 `cava_open` 返回 `C
 - 触发时**记录 + 返回错误码，不 abort**：SAFE 构建跑自测，故意喂非法参数，退出码仍是 0，stderr 只有记录行：
 
 ~~~
-[cava][SAFE] assertion #1 failed: (params != nullptr) at J:\mc\Cava\native\src\cava_handle.cpp:90 -> code=-3
-[cava][SAFE] assertion #2 failed: (out_handle != nullptr) at J:\mc\Cava\native\src\cava_handle.cpp:89 -> code=-3
-[cava][SAFE] assertion #3 failed: (out != nullptr) at J:\mc\Cava\native\src\cava_layout.cpp:245 -> code=-3
+[cava][SAFE] assertion #1 failed: (params != nullptr) at J:\mc\Cava\native\src\cava_handle.cpp:98 -> code=-3
+[cava][SAFE] assertion #2 failed: (out_handle != nullptr) at J:\mc\Cava\native\src\cava_handle.cpp:97 -> code=-3
+[cava][SAFE] assertion #3 failed: (out != nullptr) at J:\mc\Cava\native\src\cava_layout.cpp:414 -> code=-3
 ...
-=== SUMMARY: 67 passed, 0 failed ===
+=== SUMMARY: 130 passed, 0 failed ===
 RESULT: PASS      (exit code = 0)
 ~~~
 
@@ -184,15 +246,16 @@ RESULT: PASS      (exit code = 0)
 
 ## 5. 自测与验收证据
 
-### 5.1 三种构建各 67 项全过（实测输出）
+### 5.1 三种构建各 130 项全过（实测输出）
 
 ~~~
-=== run cava_selftest.exe (release) ===          SUMMARY: 67 passed, 0 failed   RESULT: PASS   exit 0
-=== run cava_selftest_safe.exe (CAVA_SAFE=1) === SUMMARY: 67 passed, 0 failed   RESULT: PASS   exit 0
-=== run cava_selftest_cxx20.exe (c++20) ===      SUMMARY: 67 passed, 0 failed   RESULT: PASS   exit 0
+=== run cava_selftest.exe (release) ===          SUMMARY: 130 passed, 0 failed   RESULT: PASS   exit 0
+=== run cava_selftest_safe.exe (CAVA_SAFE=1) === SUMMARY: 130 passed, 0 failed   RESULT: PASS   exit 0
+=== run cava_selftest_cxx20.exe (c++20) ===      SUMMARY: 130 passed, 0 failed   RESULT: PASS   exit 0
 ~~~
 
-覆盖：ABI 版本 / build_id；布局 4 条（struct_size/align/field_count/每个字段 offset+size 与**硬编码 x64 期望**比对、
+覆盖：ABI 版本 / build_id；布局 **9 条**（struct_size/align/field_count/每个字段 offset+size 与**硬编码 x64 期望**比对、
+再与 **offsetof/sizeof 机械表**比对（含字段名顺序）、
 layout_hash 与测试侧**独立重算**比对、build_id_hash 与独立 FNV 比对）；`cava_open` 6 条失败路径；
 `cava_close` 幂等 + 5 类非法句柄 + 64 轮 churn；`d2i_sat` 35 例 / `d2l_sat` 29 例
 （NaN 5 种载荷、±0、±inf、INT_MIN-1、INT_MAX+1、刚好边界、超大 double、次正规）；
@@ -208,7 +271,14 @@ layout_hash 与测试侧**独立重算**比对、build_id_hash 与独立 FNV 比
     OK: 只有系统 DLL
 === run cava_dll_loadtest.exe (clean PATH) ... cava.dll ===
   [ ok ] 10 个 ABI 符号全部可解析（和 Java FFM Linker 查的名字一致）
-  layout_hash_sum = 0x6149fd30
+  [ ok ] cava_layout_report 返回 9（P0 的 4 个 + P1 的 5 个）
+    0: hash=0xf837804d size=544 fields=8      1: hash=0xe9ffc021 size=34848 fields=8
+    2: hash=0x7fde7499 size=32 fields=5       3: hash=0xff344829 size=24 fields=4
+    4: hash=0xe566f98d size=56 fields=13      5: hash=0x0dcffe65 size=32 fields=8
+    6: hash=0x9c6c98cd size=192 fields=18     7: hash=0x53797229 size=20 fields=5
+    8: hash=0x250ecbe1 size=24 fields=6
+  layout_hash_sum = 0x6975cbf9
+  [ ok ] cava_open 成功并返回非 0 句柄
 RESULT: PASS   exit 0
 ~~~
 
@@ -222,6 +292,7 @@ RESULT: PASS   exit 0
 在 P0-A 的 CMake 于 13:52 产出的 DLL（导出表里还有他们的 `cava_p0a_stub_*`）上跑 `cava_dll_loadtest`：
 10 个符号全部可解析，`cava_layout_report` 返回 4 条，哈希与我们算的**逐个相同**，`layout_hash_sum = 0x6149fd30`，
 `cava_open` 成功 —— 说明两套构建编出的 ABI 完全一致。
+（⚠️ 这是**当时**的记录：那时 ABI 还是 4 个结构体。现在 9 个结构体的权威证据见 §5.2 与 §5.5。）
 （该 DLL 需要 MinGW 运行时 DLL，见 §2.1 与 §7.2。）
 
 另外：P0-A 的 CMake/CTest 也编了同一个探针（`native/tests/*.cpp` 每个文件一个 test target），
@@ -243,12 +314,12 @@ RESULT: PASS   exit 0
 $env:PATH = 'C:\mingw64\bin;J:\mc\Cava\natives\windows-x64;' + $env:PATH
 & 'J:\mc\Cava\build\native-mingw\native\tests\cava_test_cava_selftest.exe'
 ...
-=== SUMMARY: 67 passed, 0 failed ===
+=== SUMMARY: 130 passed, 0 failed ===
 RESULT: PASS
 EXITCODE=0
 ~~~
 
-   同一批次另外两个 exe（`build\native\native\tests\…`、`build\recon\linktest\…`）同样是 67 passed / exit 0；
+   同一批次另外两个 exe（`build\native\native\tests\…`、`build\recon\linktest\…`）同样是 130 passed / exit 0；
    只有 `build\native-p0d-mingw\…` 那个还是 `0xc0000135`（STATUS_DLL_NOT_FOUND，即它当时是在**没有静态运行库**的
    DLL 上链的，见 7.2）。
 
@@ -270,6 +341,28 @@ CTest 的 exe 是**按名字**从 `natives\windows-x64\` 加载 DLL 的，覆盖
 否则 exe 仍然依赖 `C:\mingw64\bin` 里的三个 DLL。P0-B 不主动往 `natives/` 写（遵守决定 3）。
 
 ---
+
+### 5.5 CavaPathNode 漏登记字段事件 + 新增的机械比对（2026-09-22）
+
+**现象**：C 侧 `layout_hash_sum` 算出 `0x80b49975`，Java 侧是 `0x6975cbf9`，**对不上**。
+**根因**：`cava_layout.cpp` 里 `CavaPathNode` 只登记了 6 个字段（漏了 `type` 与 `flags`）。
+captain 用「Java 侧只哈希前 6 个字段恰好得到 0x80b49975」反推定位并补齐。
+
+**教训（已固化进测试）**：
+
+1. **布局和值不等是真实信号，不要当噪声跳过** —— 它是唯一能发现「两边对同一个结构体理解不同」的机制。
+2. 自测现在对 9 个结构体**每个都做两套比对**：
+   - **硬编码 x64 期望表**（改头文件就会红，是变更探测器）；
+   - **机械表**：用 `offsetof` / `sizeof` 直接算出来（`CAVA_ROW` 宏，每结构体一行字段列表），
+     连字段名顺序都比。
+   为什么两套都要：如果两张表是「照同一份错理解抄出来的」，只有机械表能发现。
+   这一次如果我把当时那份 6 字段的表直接抄进硬编码表，测试会**通过**，bug 就漏过去了。
+3. 自测项数从 67 涨到 **130**（9 个结构体 × 每结构体多 3 项机械比对 + 和值硬校验），
+   三种构建（c++17 / c++20 / `CAVA_SAFE=1`）各 `SUMMARY: 130 passed, 0 failed`。
+
+**给后续加结构体的人**：`cava_layout.cpp` 的 `kLayouts` 与
+Java 侧 `cava/ffm/CavaLayouts.java` 必须**同时**登记；
+加完先跑 `cava_selftest --dump-layout` 看和值，与 Java 侧对上再提交。
 
 ---
 
@@ -336,8 +429,8 @@ CTest 的 exe 是**按名字**从 `natives\windows-x64\` 加载 DLL 的，覆盖
 ~~~
 build_id    : cava 0.1.0 windows-x64 GNU 15.2.0 (C:/mingw64/bin/g++.exe) -O2 -fwrapv -ffp-contract=off -fno-fast-math safe=1 asan=0 ubsan=0
 build_flags : 0x00000003 (safe_asserts=1 debug=1 asan=0 ubsan=0)
-layout_hash_sum = 0x6149fd30
-=== SUMMARY: 67 passed, 0 failed ===
+layout_hash_sum = 0x6149fd30   <- 当时 ABI 4 个结构体；9 个结构体时是 0x6975cbf9
+=== SUMMARY: 130 passed, 0 failed ===
 ~~~
 
 即：P0-A 的 `CAVA_SAFE=ON` 现在**真的**会点亮原生侧的断言（此前宏名不一致，会静默不生效）。

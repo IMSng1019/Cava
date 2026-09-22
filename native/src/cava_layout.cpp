@@ -391,6 +391,21 @@ int32_t layout_CavaOpenParams(uint32_t* h, uint64_t* s, uint64_t* a) {
 int32_t layout_CavaOpenResult(uint32_t* h, uint64_t* s, uint64_t* a) {
     return layout_query("CavaOpenResult", h, s, a);
 }
+int32_t layout_CavaPathRequest(uint32_t* h, uint64_t* s, uint64_t* a) {
+    return layout_query("CavaPathRequest", h, s, a);
+}
+int32_t layout_CavaPathNode(uint32_t* h, uint64_t* s, uint64_t* a) {
+    return layout_query("CavaPathNode", h, s, a);
+}
+int32_t layout_CavaMobProfile(uint32_t* h, uint64_t* s, uint64_t* a) {
+    return layout_query("CavaMobProfile", h, s, a);
+}
+int32_t layout_CavaStateRecord(uint32_t* h, uint64_t* s, uint64_t* a) {
+    return layout_query("CavaStateRecord", h, s, a);
+}
+int32_t layout_CavaCollisionBox(uint32_t* h, uint64_t* s, uint64_t* a) {
+    return layout_query("CavaCollisionBox", h, s, a);
+}
 
 } /* namespace detail */
 } /* namespace cava */

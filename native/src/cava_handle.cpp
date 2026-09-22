@@ -16,18 +16,12 @@
 
 namespace {
 
-constexpr uint32_t kMagicLive = 0x41564143u; /* 'C','A','V','A'（小端读作 CAVA）*/
-constexpr uint32_t kMagicDead = 0x44414544u; /* 'D','E','A','D'：只用于诊断 */
-constexpr int32_t  kMaxHandles = 256;
-
-struct CavaInstance {
-    uint32_t magic = kMagicLive;
-    uint32_t generation = 1;
-    int32_t  flags = 0;
-    int32_t  abi_version = CAVA_ABI_VERSION;
-    uint64_t native_layout_sum = 0;
-    int64_t  serial = 0;
-};
+/* CAVA_HANDLE_MAGIC_LIVE / CAVA_HANDLE_MAGIC_DEAD / CAVA_MAX_HANDLES / CavaInstance 现在都在 cava_internal.h 里
+ * （cava::detail 命名空间），因为子系统入口要用 cava::detail::lookup() 做代际校验。*/
+using cava::detail::CAVA_HANDLE_MAGIC_DEAD;
+using cava::detail::CAVA_HANDLE_MAGIC_LIVE;
+using cava::detail::CAVA_MAX_HANDLES;
+using cava::detail::CavaInstance;
 
 struct Slot {
     std::shared_ptr<CavaInstance> inst; /* null = 空槽 */
@@ -35,7 +29,7 @@ struct Slot {
 };
 
 std::mutex  g_slot_mutex;
-Slot        g_slots[kMaxHandles];
+Slot        g_slots[CAVA_MAX_HANDLES];
 std::atomic<int64_t> g_serial{0};
 
 inline int64_t encode_handle(uint32_t slot_index, uint32_t generation) {
@@ -45,7 +39,7 @@ inline int64_t encode_handle(uint32_t slot_index, uint32_t generation) {
 inline bool decode_handle(int64_t handle, uint32_t* out_slot_index, uint32_t* out_generation) {
     const uint64_t u = (uint64_t)handle;
     const uint32_t lo = (uint32_t)(u & 0xFFFFFFFFull);
-    if (lo == 0 || lo > (uint32_t)kMaxHandles) {
+    if (lo == 0 || lo > (uint32_t)CAVA_MAX_HANDLES) {
         return false;
     }
     *out_slot_index = lo - 1;
@@ -53,9 +47,18 @@ inline bool decode_handle(int64_t handle, uint32_t* out_slot_index, uint32_t* ou
     return true;
 }
 
+} /* namespace */
+
+/* ------------------------------------------------------------------ */
+/* 句柄代际校验：子系统入口用这两个（声明在 cava_internal.h）           */
+/* ------------------------------------------------------------------ */
+namespace cava {
+namespace detail {
+
 /* 查表；只有「活着且 generation 对得上」才返回对象。
- * P0 还没有子系统入口调用它（P1 才会用），先留着当地基。*/
-[[maybe_unused]] std::shared_ptr<CavaInstance> lookup(int64_t handle) {
+ * 放在匿名 namespace 之外，是因为 P1 的 native/src/pathfind/cava_pf_abi.cpp 要用；
+ * 它**不是导出符号**（没有 CAVA_EXPORT），只在原生库内部可见。*/
+std::shared_ptr<CavaInstance> lookup(int64_t handle) {
     uint32_t idx = 0;
     uint32_t gen = 0;
     if (!decode_handle(handle, &idx, &gen)) {
@@ -63,13 +66,18 @@ inline bool decode_handle(int64_t handle, uint32_t* out_slot_index, uint32_t* ou
     }
     std::lock_guard<std::mutex> lock(g_slot_mutex);
     Slot& s = g_slots[idx];
-    if (!s.inst || s.inst->magic != kMagicLive || s.inst->generation != gen) {
+    if (!s.inst || s.inst->magic != CAVA_HANDLE_MAGIC_LIVE || s.inst->generation != gen) {
         return nullptr;
     }
     return s.inst;
 }
 
-} /* namespace */
+bool handle_valid(int64_t handle) {
+    return lookup(handle) != nullptr;
+}
+
+} /* namespace detail */
+} /* namespace cava */
 
 extern "C" CAVA_EXPORT int32_t cava_open(const CavaOpenParams* params,
                                          int64_t* out_handle,
@@ -109,7 +117,7 @@ extern "C" CAVA_EXPORT int32_t cava_open(const CavaOpenParams* params,
     try {
         std::lock_guard<std::mutex> lock(g_slot_mutex);
         int32_t free_idx = -1;
-        for (int32_t i = 0; i < kMaxHandles; ++i) {
+        for (int32_t i = 0; i < CAVA_MAX_HANDLES; ++i) {
             if (!g_slots[i].inst) {
                 free_idx = i;
                 break;
@@ -159,8 +167,8 @@ extern "C" CAVA_EXPORT int32_t cava_close(int64_t handle) {
     }
     std::lock_guard<std::mutex> lock(g_slot_mutex);
     Slot& s = g_slots[idx];
-    if (s.inst && s.inst->generation == gen && s.inst->magic == kMagicLive) {
-        s.inst->magic = kMagicDead;
+    if (s.inst && s.inst->generation == gen && s.inst->magic == CAVA_HANDLE_MAGIC_LIVE) {
+        s.inst->magic = CAVA_HANDLE_MAGIC_DEAD;
         s.inst.reset();
         s.next_generation = gen + 1;
         if (s.next_generation == 0) {

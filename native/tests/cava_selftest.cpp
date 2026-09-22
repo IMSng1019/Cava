@@ -133,12 +133,158 @@ static const FieldExpect kResultFields[] = {
     { "reserved0",         16, 8 },
 };
 
-static const StructExpect kExpect[4] = {
-    { "CavaLayoutEntry",  544,   8, 8, kEntryFields  },
-    { "CavaLayoutReport", 34848, 8, 8, kReportFields },
-    { "CavaOpenParams",   32,    8, 5, kParamsFields },
-    { "CavaOpenResult",   24,    8, 4, kResultFields },
+/* P1 追加的 5 个结构体（captain 随 ABI 扩展登记，值与 Java 侧 CavaLayouts.java 逐项对齐过）。*/
+static const FieldExpect kPathRequestFields[] = {
+    { "reserved1",         0,  8 },
+    { "tx",                8,  4 },
+    { "ty",                12, 4 },
+    { "tz",                16, 4 },
+    { "reach_range",       20, 4 },
+    { "max_range",         24, 4 },
+    { "flags",             28, 4 },
+    { "reserved0",         32, 4 },
+    { "reserved2",         36, 4 },
+    { "max_visited_nodes", 40, 4 },
+    { "pad0",              44, 4 },
+    { "pad1",              48, 4 },
+    { "pad2",              52, 4 },
 };
+static const FieldExpect kPathNodeFields[] = {
+    { "x",         0,  4 },
+    { "y",         4,  4 },
+    { "z",         8,  4 },
+    { "heapIndex", 12, 4 },
+    { "g",         16, 4 },
+    { "f",         20, 4 },
+    { "type",      24, 4 },
+    { "flags",     28, 4 },
+};
+static const FieldExpect kMobProfileFields[] = {
+    { "penalty",            0,   104 },
+    { "max_fall_distance",  104, 4 },
+    { "start_x",            112, 8 },
+    { "start_y",            120, 8 },
+    { "start_z",            128, 8 },
+    { "start_block_x",      136, 4 },
+    { "start_block_y",      140, 4 },
+    { "start_block_z",      144, 4 },
+    { "width",              148, 4 },
+    { "height",             152, 4 },
+    { "step_height",        156, 4 },
+    { "safe_fall_distance", 160, 4 },
+    { "min_y",              164, 4 },
+    { "sea_level",          168, 4 },
+    { "caps",               172, 4 },
+    { "penalty_mask",       176, 4 },
+    { "reserved0",          180, 4 },
+    { "reserved1",          184, 4 },
+};
+static const FieldExpect kStateRecordFields[] = {
+    { "flags",         0,  4 },
+    { "box_offset",    4,  4 },
+    { "box_count",     8,  4 },
+    { "path_type_idx", 12, 4 },
+    { "malus",         16, 4 },
+};
+static const FieldExpect kCollisionBoxFields[] = {
+    { "min_x", 0,  4 },
+    { "min_y", 4,  4 },
+    { "min_z", 8,  4 },
+    { "max_x", 12, 4 },
+    { "max_y", 16, 4 },
+    { "max_z", 20, 4 },
+};
+
+static const StructExpect kExpect[9] = {
+    { "CavaLayoutEntry",   544,   8, 8,  kEntryFields        },
+    { "CavaLayoutReport",  34848, 8, 8,  kReportFields       },
+    { "CavaOpenParams",    32,    8, 5,  kParamsFields       },
+    { "CavaOpenResult",    24,    8, 4,  kResultFields       },
+    { "CavaPathRequest",   56,    8, 13, kPathRequestFields  },
+    { "CavaPathNode",      32,    4, 8,  kPathNodeFields     },
+    { "CavaMobProfile",    192,   8, 18, kMobProfileFields   },
+    { "CavaStateRecord",   20,    4, 5,  kStateRecordFields  },
+    { "CavaCollisionBox",  24,    4, 6,  kCollisionBoxFields },
+};
+
+/* ------------------------------------------------------------------ */
+/* 机械期望：直接用 offsetof/sizeof 算出来（**不人手抄数字**）。        */
+/* 为什么两套都要有：                                                  */
+/*   - 硬编码表是「改头文件就会红」的变更探测器；                        */
+/*   - 机械表能抓住「硬编码表和实现表犯同一个错」的情况 —— 这正是      */
+/*     CavaPathNode 曾经漏登记 type/flags 两个字段时差点骗过测试的路径。*/
+/* ------------------------------------------------------------------ */
+#define CAVA_ROW(T, m) { #m, (uint64_t)offsetof(T, m), (uint64_t)sizeof(((T*)0)->m) }
+
+#define CAVA_ROWS_CavaLayoutEntry(T)                                                                   \
+    CAVA_ROW(T, abi_version), CAVA_ROW(T, reserved0), CAVA_ROW(T, struct_size), CAVA_ROW(T, struct_align), \
+    CAVA_ROW(T, field_count), CAVA_ROW(T, layout_hash), CAVA_ROW(T, field_offsets), CAVA_ROW(T, field_sizes)
+
+#define CAVA_ROWS_CavaLayoutReport(T)                                                                  \
+    CAVA_ROW(T, abi_version), CAVA_ROW(T, build_flags), CAVA_ROW(T, platform), CAVA_ROW(T, pointer_size), \
+    CAVA_ROW(T, entry_count), CAVA_ROW(T, reserved0), CAVA_ROW(T, build_id_hash), CAVA_ROW(T, entries)
+
+#define CAVA_ROWS_CavaOpenParams(T) \
+    CAVA_ROW(T, abi_version), CAVA_ROW(T, flags), CAVA_ROW(T, layout_hash_sum), CAVA_ROW(T, reserved0), CAVA_ROW(T, reserved1)
+
+#define CAVA_ROWS_CavaOpenResult(T) \
+    CAVA_ROW(T, status), CAVA_ROW(T, abi_version), CAVA_ROW(T, native_layout_sum), CAVA_ROW(T, reserved0)
+
+#define CAVA_ROWS_CavaPathRequest(T)                                                                   \
+    CAVA_ROW(T, reserved1), CAVA_ROW(T, tx), CAVA_ROW(T, ty), CAVA_ROW(T, tz), CAVA_ROW(T, reach_range), \
+    CAVA_ROW(T, max_range), CAVA_ROW(T, flags), CAVA_ROW(T, reserved0), CAVA_ROW(T, reserved2),          \
+    CAVA_ROW(T, max_visited_nodes), CAVA_ROW(T, pad0), CAVA_ROW(T, pad1), CAVA_ROW(T, pad2)
+
+#define CAVA_ROWS_CavaPathNode(T)                                                                      \
+    CAVA_ROW(T, x), CAVA_ROW(T, y), CAVA_ROW(T, z), CAVA_ROW(T, heapIndex), CAVA_ROW(T, g),             \
+    CAVA_ROW(T, f), CAVA_ROW(T, type), CAVA_ROW(T, flags)
+
+#define CAVA_ROWS_CavaMobProfile(T)                                                                    \
+    CAVA_ROW(T, penalty), CAVA_ROW(T, max_fall_distance), CAVA_ROW(T, start_x), CAVA_ROW(T, start_y),   \
+    CAVA_ROW(T, start_z), CAVA_ROW(T, start_block_x), CAVA_ROW(T, start_block_y), CAVA_ROW(T, start_block_z), \
+    CAVA_ROW(T, width), CAVA_ROW(T, height), CAVA_ROW(T, step_height), CAVA_ROW(T, safe_fall_distance), \
+    CAVA_ROW(T, min_y), CAVA_ROW(T, sea_level), CAVA_ROW(T, caps), CAVA_ROW(T, penalty_mask),          \
+    CAVA_ROW(T, reserved0), CAVA_ROW(T, reserved1)
+
+#define CAVA_ROWS_CavaStateRecord(T) \
+    CAVA_ROW(T, flags), CAVA_ROW(T, box_offset), CAVA_ROW(T, box_count), CAVA_ROW(T, path_type_idx), CAVA_ROW(T, malus)
+
+#define CAVA_ROWS_CavaCollisionBox(T) \
+    CAVA_ROW(T, min_x), CAVA_ROW(T, min_y), CAVA_ROW(T, min_z), CAVA_ROW(T, max_x), CAVA_ROW(T, max_y), CAVA_ROW(T, max_z)
+
+static const FieldExpect kMechEntry[]        = { CAVA_ROWS_CavaLayoutEntry(CavaLayoutEntry) };
+static const FieldExpect kMechReport[]       = { CAVA_ROWS_CavaLayoutReport(CavaLayoutReport) };
+static const FieldExpect kMechParams[]       = { CAVA_ROWS_CavaOpenParams(CavaOpenParams) };
+static const FieldExpect kMechResult[]       = { CAVA_ROWS_CavaOpenResult(CavaOpenResult) };
+static const FieldExpect kMechPathRequest[]  = { CAVA_ROWS_CavaPathRequest(CavaPathRequest) };
+static const FieldExpect kMechPathNode[]     = { CAVA_ROWS_CavaPathNode(CavaPathNode) };
+static const FieldExpect kMechMobProfile[]   = { CAVA_ROWS_CavaMobProfile(CavaMobProfile) };
+static const FieldExpect kMechStateRecord[]  = { CAVA_ROWS_CavaStateRecord(CavaStateRecord) };
+static const FieldExpect kMechCollisionBox[] = { CAVA_ROWS_CavaCollisionBox(CavaCollisionBox) };
+
+struct MechExpect {
+    const FieldExpect* fields;
+    int32_t            count;   /* 字段数：直接数出来，不是抄的 */
+    uint64_t           size;
+    uint64_t           align;
+};
+
+static const MechExpect kMech[9] = {
+    { kMechEntry,        (int32_t)(sizeof(kMechEntry) / sizeof(FieldExpect)),             sizeof(CavaLayoutEntry),   alignof(CavaLayoutEntry)   },
+    { kMechReport,       (int32_t)(sizeof(kMechReport) / sizeof(FieldExpect)),            sizeof(CavaLayoutReport),  alignof(CavaLayoutReport)  },
+    { kMechParams,       (int32_t)(sizeof(kMechParams) / sizeof(FieldExpect)),            sizeof(CavaOpenParams),    alignof(CavaOpenParams)    },
+    { kMechResult,       (int32_t)(sizeof(kMechResult) / sizeof(FieldExpect)),            sizeof(CavaOpenResult),    alignof(CavaOpenResult)    },
+    { kMechPathRequest,  (int32_t)(sizeof(kMechPathRequest) / sizeof(FieldExpect)),       sizeof(CavaPathRequest),   alignof(CavaPathRequest)   },
+    { kMechPathNode,     (int32_t)(sizeof(kMechPathNode) / sizeof(FieldExpect)),          sizeof(CavaPathNode),      alignof(CavaPathNode)      },
+    { kMechMobProfile,   (int32_t)(sizeof(kMechMobProfile) / sizeof(FieldExpect)),        sizeof(CavaMobProfile),    alignof(CavaMobProfile)    },
+    { kMechStateRecord,  (int32_t)(sizeof(kMechStateRecord) / sizeof(FieldExpect)),       sizeof(CavaStateRecord),   alignof(CavaStateRecord)   },
+    { kMechCollisionBox, (int32_t)(sizeof(kMechCollisionBox) / sizeof(FieldExpect)),      sizeof(CavaCollisionBox),  alignof(CavaCollisionBox)  },
+};
+
+static const int32_t kStructExpectCount = 9;
+
+/* Java 侧对齐的和值（captain 复算并让 Java/C 两边逐字段一致后给出）。*/
+static const uint32_t kExpectedLayoutSum = 0x6975CBF9u;
 
 /* ------------------------------------------------------------------ */
 /* --dump-layout：给 Java 侧的黄金参考文本                              */
@@ -154,7 +300,8 @@ static void dump_layout(std::FILE* f, const CavaLayoutReport& rep) {
     std::fprintf(f, "#   h^=(u32)((off>>32)&0xFFFFFFFF); h*=0x01000193; h^=(u32)((size>>32)&0xFFFFFFFF); h*=0x01000193;\n");
     std::fprintf(f, "# 数组字段算一个字段：offset=数组起点, size=整个数组字节数\n");
     uint32_t sum = 0;
-    for (int32_t i = 0; i < rep.entry_count; ++i) {
+    const int32_t max_i = (rep.entry_count < kStructExpectCount) ? rep.entry_count : kStructExpectCount;
+    for (int32_t i = 0; i < max_i; ++i) {
         const CavaLayoutEntry& e = rep.entries[i];
         std::fprintf(f, "struct %s size=%llu align=%llu fields=%u hash=0x%08x\n",
                      kExpect[i].name,
@@ -162,7 +309,7 @@ static void dump_layout(std::FILE* f, const CavaLayoutReport& rep) {
                      (unsigned long long)e.struct_align,
                      (unsigned)e.field_count,
                      (unsigned)e.layout_hash);
-        for (uint32_t k = 0; k < e.field_count; ++k) {
+        for (uint32_t k = 0; k < e.field_count && k < (uint32_t)CAVA_LAYOUT_MAX_FIELDS; ++k) {
             std::fprintf(f, "  field %-20s offset=%-6llu size=%-6llu\n",
                          kExpect[i].fields[k].name,
                          (unsigned long long)e.field_offsets[k],
@@ -268,7 +415,7 @@ int main(int argc, char** argv) {
     const int32_t entries = cava_layout_report(&rep);
     const bool dump = (argc > 1 && std::strcmp(argv[1], "--dump-layout") == 0);
     if (dump) {
-        if (entries != 4) {
+        if (entries != kStructExpectCount) {
             std::fprintf(stderr, "layout_report failed: %d\n", (int)entries);
             return 1;
         }
@@ -308,8 +455,10 @@ int main(int argc, char** argv) {
 
     /* ---------------- 2. 布局自检 ---------------- */
     section("2. layout report");
-    check(entries == 4, "cava_layout_report 返回 %d（期望 4）", (int)entries);
-    check(rep.entry_count == 4, "report.entry_count=%d", (int)rep.entry_count);
+    check(entries == kStructExpectCount, "cava_layout_report 返回 %d（期望 %d）",
+          (int)entries, (int)kStructExpectCount);
+    check(rep.entry_count == kStructExpectCount, "report.entry_count=%d（期望 %d）",
+          (int)rep.entry_count, (int)kStructExpectCount);
     check(rep.pointer_size == 8, "pointer_size=%d", (int)rep.pointer_size);
     check(rep.platform == CAVA_PLATFORM_WINDOWS_X64 || rep.platform == CAVA_PLATFORM_LINUX_X64 ||
           rep.platform > 0, "platform=%d（>0 即已识别）", (int)rep.platform);
@@ -319,9 +468,10 @@ int main(int argc, char** argv) {
           (unsigned)fnv_from_bytes(cava_build_id(), std::strlen(cava_build_id())));
 
     uint32_t sum = 0;
-    for (int32_t i = 0; i < entries && i < 4; ++i) {
+    for (int32_t i = 0; i < entries && i < kStructExpectCount; ++i) {
         const CavaLayoutEntry& e = rep.entries[i];
         const StructExpect& x = kExpect[i];
+        const MechExpect& m = kMech[i];
         char tag[64];
         std::snprintf(tag, sizeof(tag), "%s", x.name);
         check(e.abi_version == CAVA_ABI_VERSION, "%s.entry.abi_version=%d", tag, (int)e.abi_version);
@@ -345,10 +495,36 @@ int main(int argc, char** argv) {
             }
         }
         check(fields_ok, "%s 全部 %d 个字段 offset/size 与硬编码 x64 期望一致", tag, (int)x.field_count);
+
+        /* 机械比对：直接拿 offsetof/sizeof 的表来对。手抄表和实现表"一起错"的时候只有它能发现
+         * （CavaPathNode 漏登记 type/flags 那次就是这个坑）。*/
+        check(m.count == x.field_count, "%s 机械表字段数=%d == 硬编码表字段数=%d",
+              tag, (int)m.count, (int)x.field_count);
+        check(e.struct_size == m.size && e.struct_align == m.align,
+              "%s.struct_size/align=%llu/%llu == offsetof 机械值 %llu/%llu",
+              tag, (unsigned long long)e.struct_size, (unsigned long long)e.struct_align,
+              (unsigned long long)m.size, (unsigned long long)m.align);
+        bool mech_ok = true;
+        const int32_t mf = (m.count < x.field_count) ? m.count : x.field_count;
+        for (int32_t f = 0; f < mf; ++f) {
+            if (e.field_offsets[f] != m.fields[f].offset || e.field_sizes[f] != m.fields[f].size ||
+                std::strcmp(x.fields[f].name, m.fields[f].name) != 0) {
+                mech_ok = false;
+                std::printf("         ^ 机械比对第 %d 个字段不符：报告=%llu/%llu 机械=%llu/%llu（名 %s vs %s）\n",
+                            (int)f,
+                            (unsigned long long)e.field_offsets[f], (unsigned long long)e.field_sizes[f],
+                            (unsigned long long)m.fields[f].offset, (unsigned long long)m.fields[f].size,
+                            x.fields[f].name, m.fields[f].name);
+            }
+        }
+        check(mech_ok, "%s 全部字段与 offsetof/sizeof 机械值一致（含字段名顺序）", tag);
         sum += e.layout_hash;
     }
     std::printf("  layout_hash_sum = 0x%08x (%u)\n", (unsigned)sum, (unsigned)sum);
-    for (int32_t i = 0; i < entries && i < 4; ++i) {
+    check(sum == kExpectedLayoutSum,
+          "layout_hash_sum=0x%08x == Java 侧对齐值 0x%08x（9 条 entry 的和）",
+          (unsigned)sum, (unsigned)kExpectedLayoutSum);
+    for (int32_t i = 0; i < entries && i < kStructExpectCount; ++i) {
         std::printf("    %-18s 0x%08x  size=%llu\n", kExpect[i].name,
                     (unsigned)rep.entries[i].layout_hash,
                     (unsigned long long)rep.entries[i].struct_size);

@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 #include "../include/cava_abi.h"
 
@@ -93,8 +94,8 @@ namespace detail {
 /* 32 位 FNV-1a，逐字节（= 契约 2.3 的公式；offset/size 的 4 个 u32 依次喂入）。*/
 uint32_t fnv1a32_bytes(const void* data, std::size_t len);
 
-/* 原生侧算出的 4 个结构体 layout_hash 的 uint32 回绕和。
- * 这是 cava_open 用来和 Java 侧 layout_hash_sum 比对的权威值，
+/* 原生侧算出的**全部导出结构体**（P0 的 4 个 + P1 追加的 5 个 = 9 个）layout_hash
+ * 的 uint32 回绕和。这是 cava_open 用来和 Java 侧 layout_hash_sum 比对的权威值，
  * 也通过 CavaOpenResult::native_layout_sum 回给 Java。*/
 uint64_t native_layout_sum();
 
@@ -108,6 +109,36 @@ int32_t layout_CavaLayoutEntry(uint32_t* out_hash, uint64_t* out_size, uint64_t*
 int32_t layout_CavaLayoutReport(uint32_t* out_hash, uint64_t* out_size, uint64_t* out_align);
 int32_t layout_CavaOpenParams(uint32_t* out_hash, uint64_t* out_size, uint64_t* out_align);
 int32_t layout_CavaOpenResult(uint32_t* out_hash, uint64_t* out_size, uint64_t* out_align);
+int32_t layout_CavaPathRequest(uint32_t* out_hash, uint64_t* out_size, uint64_t* out_align);
+int32_t layout_CavaPathNode(uint32_t* out_hash, uint64_t* out_size, uint64_t* out_align);
+int32_t layout_CavaMobProfile(uint32_t* out_hash, uint64_t* out_size, uint64_t* out_align);
+int32_t layout_CavaStateRecord(uint32_t* out_hash, uint64_t* out_size, uint64_t* out_align);
+int32_t layout_CavaCollisionBox(uint32_t* out_hash, uint64_t* out_size, uint64_t* out_align);
+
+/* ------------------------------------------------------------------ */
+/* 3b. 句柄表（给子系统入口做**代际校验**；不新增任何导出符号）         */
+/* ------------------------------------------------------------------ */
+/* 子系统入口（native/src/pathfind 等）只校验句柄"形状"是不够的：槽位会被复用，
+ * 一个陈旧句柄的形状完全合法，但指向的是**别的对象**。用法：
+ *     auto inst = cava::detail::lookup(handle);   // 有效 -> 非空
+ *     if (!inst) return CAVA_ERR_NULL;
+ * 或只判布尔：cava::detail::handle_valid(handle)。
+ * 返回 shared_ptr：即使另一线程同时在 cava_close，对象也不会在使用中被析构。*/
+constexpr uint32_t CAVA_HANDLE_MAGIC_LIVE = 0x41564143u; /* 'C','A','V','A'（小端读作 CAVA）*/
+constexpr uint32_t CAVA_HANDLE_MAGIC_DEAD = 0x44414544u; /* 'D','E','A','D'：只用于诊断 */
+constexpr int32_t  CAVA_MAX_HANDLES = 256;
+
+struct CavaInstance {
+    uint32_t magic = CAVA_HANDLE_MAGIC_LIVE;
+    uint32_t generation = 1;
+    int32_t  flags = 0;
+    int32_t  abi_version = CAVA_ABI_VERSION;
+    uint64_t native_layout_sum = 0;
+    int64_t  serial = 0;
+};
+
+std::shared_ptr<CavaInstance> lookup(int64_t handle);
+bool handle_valid(int64_t handle);
 
 /* 当前构建是否 SAFE（供 build_flags 与文档用）。*/
 bool safe_build();

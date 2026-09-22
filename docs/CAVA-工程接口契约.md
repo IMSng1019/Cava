@@ -26,24 +26,29 @@
     cava/                        ← 模组根包（**不是 cava.modid**）
       Cava.java                  ← ModInitializer（唯一入口）
       CavaConfig.java            ← config/cava.json 的读取与默认值
-      native/
-        ffm/                     ← **所有 java.lang.foreign 调用只允许出现在这里**，禁止引用任何 MC 类型
-          NativeLibrary.java     ← 解压 + 哈希校验 + System.load
-          CavaBindings.java      ← MethodHandle 绑定（按 cava_abi.h 手写，不用 jextract）
-          NativeStatus.java      ← OPEN / DISABLED_BY_FLAG / ABI_MISMATCH / LAYOUT_MISMATCH / LOAD_FAILED ...
-          CavaNative.java        ← facade 单例：tryOpen() / available() / status() / close()
-          Numeric.java           ← 饱和转换与位模式工具（唯一数值工具入口）
-        mirror/                  ← 方块状态表 / 区段镜像 / 实体镜像
-        hook/                    ← Mixin 注入点，每个都带回退分支
-        fallback/                ← 纯 Java 回退路径
-        canary/                  ← 钩子金丝雀框架
-        compat/                  ← 兼容层：让位/复刻决策、启动报告
-        subsystem/               ← 子系统注册表（pathfind / entity / redstone）
-        parity/                  ← **差分测试的运行时部分**（黄金轨迹采集），必须能进生产 jar
+      ffm/                       ← **所有 java.lang.foreign 调用只允许出现在这里**，禁止引用任何 MC 类型
+        NativeLibrary.java       ← 解压 + 哈希校验 + System.load
+        CavaBindings.java        ← MethodHandle 绑定（按 cava_abi.h 手写，不用 jextract）
+        NativeStatus.java        ← OPEN / DISABLED_BY_FLAG / ABI_MISMATCH / LAYOUT_MISMATCH / LOAD_FAILED ...
+        CavaNative.java          ← facade 单例：tryOpen() / available() / status() / close()
+        Numeric.java             ← 饱和转换与位模式工具（唯一数值工具入口）
+      mirror/                    ← 方块状态表 / 区段镜像 / 实体镜像
+      mixin/                     ← Mixin 注入点（每个都带回退分支）
+      fallback/                  ← 纯 Java 回退
+      canary/                    ← 钩子金丝雀框架
+      compat/                    ← 兼容层：让位/复刻决策、启动报告
+      subsystem/                 ← 子系统注册表（pathfind / entity / redstone）
+      parity/                    ← **差分测试的运行时部分**（黄金轨迹采集），必须能进生产 jar
       client/                    ← 客户端入口（保留，服务端不加载）
     src/test/java/cava/parity/   ← 单元层测试与离线比对器（不进 jar）
 
-**Mixin 配置**：`src/main/resources/cava.mixins.json`（服务端）与 `cava.client.mixins.json`（客户端）保持不变，只加 package 与 mixin 类。
+**Mixin 配置**：`src/main/resources/cava.mixins.json`（服务端，package `cava.mixin`）与
+`cava.client.mixins.json`（客户端，package `cava.client.mixin`）；P0 阶段两个列表都为空。
+
+**勘误（2026-09-22，由 P0-C 实测发现）**：契约最初写的是 `cava.native.ffm`，**这是非法的** ——
+`native` 是 Java 保留字（JLS 3.9），不能做包名，javac 报 `错误: 需要<标识符>`。
+**已定为 `cava.ffm`**（唯一合法且最短）。"所有 FFM 调用集中一处"这条纪律的验法改为：
+`grep -rl "java.lang.foreign" src/main/java` 必须只命中 `cava/ffm/`。
 
 ---
 

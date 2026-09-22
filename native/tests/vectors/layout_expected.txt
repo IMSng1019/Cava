@@ -1,0 +1,38 @@
+# cava layout reference (ABI v1)
+# build_id: cava 0.1.0 win-x64 mingw-gcc-15.2.0 O2/fwrapv/ffp-contract=off safe=0 asan=0 ubsan=0
+# struct_count=4 pointer_size=8 platform=1 build_flags=0x00000000
+# build_id_hash=0x982192f1
+# 哈希公式（契约 2.3）：h=0x811C9DC5；每字段按声明顺序 4 步：
+#   h^=(u32)(off&0xFFFFFFFF); h*=0x01000193; h^=(u32)(size&0xFFFFFFFF); h*=0x01000193;
+#   h^=(u32)((off>>32)&0xFFFFFFFF); h*=0x01000193; h^=(u32)((size>>32)&0xFFFFFFFF); h*=0x01000193;
+# 数组字段算一个字段：offset=数组起点, size=整个数组字节数
+struct CavaLayoutEntry size=544 align=8 fields=8 hash=0xf837804d
+  field abi_version          offset=0      size=4     
+  field reserved0            offset=4      size=4     
+  field struct_size          offset=8      size=8     
+  field struct_align         offset=16     size=8     
+  field field_count          offset=24     size=4     
+  field layout_hash          offset=28     size=4     
+  field field_offsets        offset=32     size=256   
+  field field_sizes          offset=288    size=256   
+struct CavaLayoutReport size=34848 align=8 fields=8 hash=0xe9ffc021
+  field abi_version          offset=0      size=4     
+  field build_flags          offset=4      size=4     
+  field platform             offset=8      size=4     
+  field pointer_size         offset=12     size=4     
+  field entry_count          offset=16     size=4     
+  field reserved0            offset=20     size=4     
+  field build_id_hash        offset=24     size=8     
+  field entries              offset=32     size=34816 
+struct CavaOpenParams size=32 align=8 fields=5 hash=0x7fde7499
+  field abi_version          offset=0      size=4     
+  field flags                offset=4      size=4     
+  field layout_hash_sum      offset=8      size=8     
+  field reserved0            offset=16     size=8     
+  field reserved1            offset=24     size=8     
+struct CavaOpenResult size=24 align=8 fields=4 hash=0xff344829
+  field status               offset=0      size=4     
+  field abi_version          offset=4      size=4     
+  field native_layout_sum    offset=8      size=8     
+  field reserved0            offset=16     size=8     
+layout_hash_sum 0x6149fd30 (1632238896)

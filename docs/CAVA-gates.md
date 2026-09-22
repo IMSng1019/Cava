@@ -5,6 +5,42 @@
 
 ---
 
+## 门禁 #4：**Gradle 构建与单元测试 → 通过（captain 独立复跑）**
+
+```powershell
+$env:GRADLE_USER_HOME = 'J:\mc\Cava\.gradle-home'
+$env:JAVA_TOOL_OPTIONS = '-Duser.language=en -Dfile.encoding=UTF-8'
+.\gradlew.bat test --console=plain --no-watch-fs --rerun-tasks
+```
+
+**结果**：`BUILD SUCCESSFUL in 6s`，exit 0；`compileJava` 打印 `Note: Some input files use preview features of Java SE 21`
+（确证 `--enable-preview` 生效）。JUnit 报告（`build/test-results/test/*.xml`）逐类实测：
+
+    cava.CavaConfigTest          tests=5  failures=0 errors=0
+    cava.ffm.LayoutHashTest      tests=5  failures=0 errors=0
+    cava.parity.Fnv1aTest        tests=5  failures=0 errors=0
+    cava.parity.GoldenTraceTest  tests=3  failures=0 errors=0
+    cava.parity.TraceDiffTest    tests=5  failures=0 errors=0
+    cava.subsystem.CanaryTest    tests=5  failures=0 errors=0
+    TOTAL                        tests=28 failures=0 errors=0
+
+产物 `build/libs/cava-0.1.0.jar`（667165 B，33 个 class）实测包含 `natives/windows-x64/cava.dll`（2780964 B）、
+`fabric.mod.json`、`cava.mixins.json`、`cava.client.mixins.json`。
+
+**预览标志在 remap 之后仍然保留**（实测逐 class 读头）：`cava/ffm/CavaBindings.class` = `major 65, minor 65535`（预览版），
+而 `cava/ffm/NativeLibrary.class` / `cava/parity/TickSampler.class` = `major 65, minor 0`（普通版，因为它们不直接用预览 API）。
+**说明**：`--enable-preview` 是编译期要求（不写它 javac 直接拒绝 `java.lang.foreign`），编译出来的**只有真正用到预览 API 的 class** 带 65535。
+所以"jar 里 preview class 数量"不是指标；`compileJava` 的那行 Note 才是。
+
+### 本机两条无害噪声（不要误判为失败）
+1. `Exception in thread "File watcher server" ... Couldn't open current thread, error = 5`：
+   沙箱不允许 Gradle 起文件监视线程。**加 `--no-watch-fs` 即消失**，与构建结果无关。
+2. `Directory 'C:\Program Files\Java\jdk-21.0.10' ... does not exist`（三个候选路径）：
+   `gradle.properties` 里 `org.gradle.java.installations.paths` 的兜底候选，**只是提示**；
+   期望的 `C:\Program Files\Java\jdk-21` 存在且被选中，构建与测试都正常。
+
+---
+
 ## 门禁 #2 + #3：**端到端冒烟（原生库 ↔ Java FFM ↔ 一键回退 ↔ ABI 守卫）→ 全部通过**
 
 **结论：PASS。** 这是 P0 的核心验收：Java 侧的 FFM facade **真的**加载了 C++ 产物、**真的**跑通了布局自检与所有回退路径。

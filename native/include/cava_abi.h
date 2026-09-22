@@ -162,24 +162,117 @@ int32_t cava_close(int64_t handle);
 #define CAVA_PROFILE_FLYING           4
 #define CAVA_PROFILE_AMPHIBIOUS       8
 
-/* 能力位（对应 MobNavigation 的 canOpenDoors / canEnterOpenDoors / canFloat 等）。*/
-#define CAVA_CAP_CAN_OPEN_DOORS       (1 << 16)
-#define CAVA_CAP_CAN_ENTER_OPEN_DOORS (1 << 17)
-#define CAVA_CAP_CAN_FLOAT            (1 << 18)
-#define CAVA_CAP_CAN_WALK_ON_WATER    (1 << 19)
+/* ------------------------------------------------------------------ */
+/* 生物档案（每个生物一份，变化时重推一次）                            */
+/* ------------------------------------------------------------------ */
+/* 为什么单独开一张表而不是塞进 CavaPathRequest：原版陆地寻路要的
+ * width/height/stepHeight/惩罚表/世界上下界都是**每个生物（每个维度）恒定**的量，
+ * 每次调用都传会浪费 FFM 边界（实测 14–16 ns/次）。*/
 
-#define CAVA_PATH_NODE_TERMINAL 0x1u  /* 终点节点，Java 侧据此做 Path 截断/后处理 */
+/* 能力位（proposal 里的 caps）。低 16 位是"导航能力"，高 16 位留给后续。*/
+#define CAVA_NAV_CAN_OPEN_DOORS       (1u << 0)
+#define CAVA_NAV_CAN_ENTER_OPEN_DOORS (1u << 1)
+#define CAVA_NAV_CAN_FLOAT            (1u << 2)
+#define CAVA_NAV_AMPHIBIOUS           (1u << 3)
+#define CAVA_NAV_PENALIZE_DEEP_WATER  (1u << 4)
+#define CAVA_NAV_CAN_WALK_OVER_FENCES (1u << 5)
+#define CAVA_NAV_CAN_SWIM             (1u << 6)
+#define CAVA_NAV_CAN_PATHFIND_THROUGH (1u << 7)  /* 仅飞行类有意义 */
+#define CAVA_NAV_ON_GROUND            (1u << 8)
+#define CAVA_NAV_TOUCHING_WATER       (1u << 9)
+#define CAVA_NAV_CAN_WALK_ON_FLUID    (1u << 10)
 
+/* PathNodeType 的完整序号表 = **Yarn 1.20.4 枚举的 ordinal，逐条从字节码 static{} 读出**
+ * （`javap -p -c net.minecraft.entity.ai.pathing.PathNodeType`：每个常量先 push ordinal 再
+ * `<init>(String,int,float)`，随后 `putstatic`。低位用 iconst_*，≥6 用 bipush）。
+ * 惩罚表 float penalty[26] 按它索引，所以**这张表错一位 = 整张惩罚表错位，且路径照样能算出来** ——
+ * 属于最难发现的 parity bug。任何改动都必须重读字节码。
+ *
+ * ⚠️ **勘误（2026-09-22）**：本表第一版是 captain 凭记忆写的，**序号顺序全错、还包含 4 个
+ * 1.20.4 里根本不存在的常量**（DAMAGE_CACTUS / DOOR_OPEN_IRON / DAMAGE_WITHER_ROSE / DANGER_WATER），
+ * 同时缺 POWDER_SNOW / WATER_BORDER / DAMAGE_CAUTIOUS / DANGER_TRAPDOOR。由 P1 流发现并以
+ * javap 实证纠正。下表为**实测值**。*/
+#define CAVA_PNT_BLOCKED             0
+#define CAVA_PNT_OPEN                1
+#define CAVA_PNT_WALKABLE            2
+#define CAVA_PNT_WALKABLE_DOOR       3
+#define CAVA_PNT_TRAPDOOR            4
+#define CAVA_PNT_POWDER_SNOW         5
+#define CAVA_PNT_DANGER_POWDER_SNOW  6
+#define CAVA_PNT_FENCE               7
+#define CAVA_PNT_LAVA                8
+#define CAVA_PNT_WATER               9
+#define CAVA_PNT_WATER_BORDER       10
+#define CAVA_PNT_RAIL               11
+#define CAVA_PNT_UNPASSABLE_RAIL    12
+#define CAVA_PNT_DANGER_FIRE        13
+#define CAVA_PNT_DAMAGE_FIRE        14
+#define CAVA_PNT_DANGER_OTHER       15
+#define CAVA_PNT_DAMAGE_OTHER       16
+#define CAVA_PNT_DOOR_OPEN          17
+#define CAVA_PNT_DOOR_WOOD_CLOSED   18
+#define CAVA_PNT_DOOR_IRON_CLOSED   19
+#define CAVA_PNT_BREACH             20
+#define CAVA_PNT_LEAVES             21
+#define CAVA_PNT_STICKY_HONEY       22
+#define CAVA_PNT_COCOA              23
+#define CAVA_PNT_DAMAGE_CAUTIOUS    24
+#define CAVA_PNT_DANGER_TRAPDOOR    25
+
+#define CAVA_PNT_COUNT 26
+/* 与 Java 侧一致：PathNodeType 里没有"UNPASSABLE"这个常量，只有 UNPASSABLE_RAIL。*/
+#define CAVA_PENALTY_ALL_SET 0x03FFFFFFu  /* penalty_mask 全 1 */
+
+typedef struct CavaMobProfile {
+    /* **字段顺序不要重排**（实测约束）：先用 2 个 4 字节字段把 3 个 double 顶到
+     * 8 的倍数偏移上（float[26] + float + int32 = 112），这样结构体内部
+     * **不需要任何填充**，Java 侧 MemoryLayout.structLayout 才不用显式 paddingLayout
+     * （实测：字段错位会让 FFM 抛 "Invalid alignment constraint for member layout"，
+     * 而且交错放置曾把 float 顶到非 4 对齐的偏移上）。*/
+
+    /* 惩罚表：索引 = CAVA_PNT_*，值 = Entity.getPathfindingPenalty(type)。
+     * 只有 penalty_mask 里置 1 的项有效，未置位的用 PathNodeType 的默认值。*/
+    float    penalty[CAVA_PNT_COUNT];
+    float    max_fall_distance;     /* in: 与 getMaxFallDistance 同源，float 原样 */
+
+    /* 起点：**起点是实体位姿推出来的**（pathNodeMaker.getStart()），
+     * 不是从参数取。所以这里给 double 位姿，不给"起点方块坐标"。*/
+    double   start_x, start_y, start_z;
+    int32_t  start_block_x, start_block_y, start_block_z;  /* in: 实体所在方块坐标 */
+
+    float    width;                 /* in: Entity.getWidth() */
+    float    height;                /* in: Entity.getHeight() */
+    float    step_height;           /* in: Entity.getStepHeight() */
+    int32_t  safe_fall_distance;    /* in: getSafeFallDistance() */
+    int32_t  min_y;                 /* in: world.getBottomY() */
+    int32_t  sea_level;             /* in: world.getSeaLevel() */
+    uint32_t caps;                  /* in: CAVA_NAV_* */
+    uint32_t penalty_mask;          /* in: 置 1 的项才用上面的值 */
+    int32_t  reserved0;
+    int32_t  reserved1;
+} CavaMobProfile;
+
+/* 字段顺序说明（**不要随意重排**）：int64 放在开头 8 字节边界上，
+ * 后面全部是 4 字节字段，这样**结构体内部不需要任何填充**，
+ * Java 侧 MemoryLayout.structLayout 才能不用显式 paddingLayout 就对齐
+ * （实测：把 int64 放在 24 字节处会让 FFM 抛 "Invalid alignment constraint"）。*/
 typedef struct CavaPathRequest {
-    int32_t sx, sy, sz;             /* in: 起点方块坐标 */
-    int32_t tx, ty, tz;             /* in: 终点方块坐标 */
-    int32_t maxVisitedNodes;        /* in: 预算，<=0 视为默认 */
-    int32_t reachRange;             /* in: 终点可接受的曼哈顿/切比雪夫相近范围（按 PathNodeMaker 语义）*/
-    float   maxFallDistance;        /* in: 与 getMaxFallDistance 同源，float 原样 */
-    uint32_t profile;               /* in: CAVA_PROFILE_* | CAVA_CAP_* */
+    int64_t  reserved1;             /* in: 必须为 0（也把结构体顶到 8 字节对齐）*/
+    int32_t  tx, ty, tz;            /* in: 终点方块坐标 */
+    int32_t  reach_range;           /* in: 终点可接受的相近范围（PathNodeMaker 语义）*/
+    float    max_range;             /* in: findPathToAny 的 maxRange（float，原样）*/
     uint32_t flags;                 /* in: 保留，必须为 0；非 0 时返回 CAVA_ERR_ARG */
-    int64_t  reserved0;             /* in: 必须为 0 */
-} CavaPathRequest;
+    int32_t  reserved0;
+    int32_t  reserved2;
+    int32_t  max_visited_nodes;     /* in: 真实预算；<=0 表示"由 max_range 推" */
+    /* 尾部填充写成**具名字段**（不是 C 的匿名填充）：这样 Java 侧能用普通命名字段
+     * 一一对应，不必依赖无法命名的 MemoryLayout.paddingLayout（JDK 21 的 paddingLayout
+     * 没有 withName，实测会给布局计算带来两边的字段数/大小不一致）。*/
+    int32_t  pad0;
+    int32_t  pad1;
+    int32_t  pad2;
+} CavaPathRequest;   /* 13 个 4 字节字段 + 1 个 int64 = 56 字节，8 对齐，零内部填充 */
+/* 断言：本结构体**内部没有任何填充**，全部字段都是 4 字节步长（首个 int64 占 0..7）。*/
 
 typedef struct CavaPathNode {
     int32_t x, y, z;
@@ -196,10 +289,13 @@ typedef struct CavaPathNode {
  * cap 不足时返回 CAVA_ERR_ARG，**绝不部分写入**。*/
 int32_t cava_pathfind(int64_t handle, const CavaPathRequest* req, CavaPathNode* out, int32_t cap);
 
-/* 镜像侧 ABI（区块/方块状态推送）**故意留到 P1 开工时冻结**：
- * 它必须由"区段镜像 + 方块状态表"的实际实现推导，提前冻结会锁死错误的形状。
- * 在此之前，P1 代理只能实现 cava_pathfind 的纯算法内核 + 从 Java 侧注入的
- * 只读方块查询回调，不得自行发明镜像 ABI。*/
+/* 上传/更新当前生物档案。同一句柄同一时刻只有一份"当前档案"。
+ * 任一字段非法（width<=0 / height<=0 / NaN / profile 未上传）=> CAVA_ERR_ARG，
+ * 且**不改变已有档案**。*/
+int32_t cava_mob_profile_upload(int64_t handle, const CavaMobProfile* profile);
+
+/* 释放当前档案（生物卸载/换维度时调用）。幂等。*/
+int32_t cava_mob_profile_clear(int64_t handle);
 
 /* ------------------------------------------------------------------ */
 /* 镜像侧 ABI：方块状态表 + 区域推送（P1 已冻结）                       */
@@ -221,16 +317,44 @@ int32_t cava_pathfind(int64_t handle, const CavaPathRequest* req, CavaPathNode* 
  *   （Block.getRawIdFromState(Blocks.AIR.getDefaultState()) == 0），
  *   不成立时**不要静默**，要么拒绝启用该子系统，要么按实际 id 传参。*/
 
-/* 方块状态表里一个状态的静态属性（P1 只用到这些；后续按需在末尾追加）。*/
+/* 方块状态表的 flags：**32 位掩码**。
+ * 低 8 位 = 跨子系统通用的静态属性（CAVA_SF_*）；
+ * 高 24 位（1<<8 起）= **寻路专用谓词**（CAVA_PF_*），逐位对应原版
+ * getCommonNodeType 的一个分支。**只允许在末尾追加新位，绝不复用旧位。** */
 #define CAVA_SF_SOLID            (1u << 0)  /* isSolid */
 #define CAVA_SF_BLOCKS_MOTION    (1u << 1)  /* blocksMotion */
 #define CAVA_SF_FLUID            (1u << 2)
 #define CAVA_SF_WATER            (1u << 3)
 #define CAVA_SF_LAVA             (1u << 4)
 #define CAVA_SF_OPEN             (1u << 5)  /* 门/活板门/栅栏门的"开着" */
+#define CAVA_SF_AIR              (1u << 6)  /* isAir */
+#define CAVA_SF_DOOR             (1u << 7)  /* 是门（任意开关状态）*/
 
-/* PathNodeType 的序号必须与 Java 枚举 ordinal **完全一致**（P1 会逐点核对）。*/
-#define CAVA_PATH_TYPE_COUNT 16
+/* 寻路专用谓词（原版 getCommonNodeType 的判据）。名字对应
+ * docs/CAVA-pathfind-oracle-spec.md 与 native/src/pathfind/cava_pf.h 的 PF_*。*/
+#define CAVA_PF_TRAPDOOR          (1u << 8)
+#define CAVA_PF_POWDER_SNOW       (1u << 9)
+#define CAVA_PF_CACTUS_OR_BERRY   (1u << 10)
+#define CAVA_PF_HONEY             (1u << 11)
+#define CAVA_PF_COCOA             (1u << 12)
+#define CAVA_PF_CAUTIOUS          (1u << 13)  /* 谨慎方块（岩浆锅/营火等）*/
+#define CAVA_PF_DOOR_HAND         (1u << 14)  /* 门可由该生物用手开 */
+#define CAVA_PF_RAIL              (1u << 15)
+#define CAVA_PF_LEAVES            (1u << 16)
+#define CAVA_PF_FENCES            (1u << 17)
+#define CAVA_PF_WALLS             (1u << 18)
+#define CAVA_PF_FENCE_GATE        (1u << 19)
+#define CAVA_PF_FIRE_DAMAGE       (1u << 20)  /* 会造成火焰伤害 */
+#define CAVA_PF_PATH_THROUGH_LAND (1u << 21)  /* canPathfindThrough(LAND) */
+#define CAVA_PF_WATER_BLOCK       (1u << 22)  /* 水方块（区别于"含流体"）*/
+#define CAVA_PF_FENCE_OR_WALL_CLOSED (1u << 23)
+#define CAVA_PF_DOOR_IRON         (1u << 24)  /* 铁门（不能用手开）*/
+#define CAVA_PF_FIRE              (1u << 25)  /* 火焰方块 */
+#define CAVA_PF_WITHER_ROSE       (1u << 26)  /* 凋灵玫瑰（危险）*/
+/* 1u << 27 .. 1u << 31 保留（追加新谓词时从 27 往上加，绝不复用）*/
+
+/* PathNodeType 的序号表在生物档案一节（CAVA_PNT_*）。*/
+#define CAVA_PATH_TYPE_COUNT CAVA_PNT_COUNT
 
 typedef struct CavaCollisionBox {
     float min_x, min_y, min_z;   /* 相对方块原点的扁平 AABB 集合，不是体素近似 */

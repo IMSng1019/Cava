@@ -87,6 +87,100 @@ public final class CavaLayouts {
             ValueLayout.JAVA_LONG.withName("reserved0")
     ).withName("CavaOpenResult");
 
+    // ------------------------------------------------------------------
+    // P1 追加的 5 个结构体（2026-09-22，captain 随 ABI 扩展一起登记）
+    // **必须与 native/src/cava_layout.cpp 的 kLayouts 同时改动**，
+    // 否则两边 layout_hash_sum 不等 → cava_open 返回 CAVA_ERR_LAYOUT → 整体回退。
+    // 偏移与大小全部由 C 编译器 offsetof/sizeof 实测，不是手算。
+    // ------------------------------------------------------------------
+
+    public static final StructLayout PATH_REQUEST = MemoryLayout.structLayout(
+            ValueLayout.JAVA_LONG.withName("reserved1"),
+            ValueLayout.JAVA_INT.withName("tx"),
+            ValueLayout.JAVA_INT.withName("ty"),
+            ValueLayout.JAVA_INT.withName("tz"),
+            ValueLayout.JAVA_INT.withName("reach_range"),
+            ValueLayout.JAVA_FLOAT.withName("max_range"),
+            ValueLayout.JAVA_INT.withName("flags"),
+            ValueLayout.JAVA_INT.withName("reserved0"),
+            ValueLayout.JAVA_INT.withName("reserved2"),
+            ValueLayout.JAVA_INT.withName("max_visited_nodes"),
+            // 头文件里尾部填充是**具名字段** pad0/pad1（不是 C 匿名填充），所以这里也用具名
+            // int32 —— 整个结构体零内部填充，两边字段数/大小完全一致（实测 12 个字段 / 48 字节）。
+            ValueLayout.JAVA_INT.withName("pad0"),
+            ValueLayout.JAVA_INT.withName("pad1"),
+            ValueLayout.JAVA_INT.withName("pad2")
+    ).withName("CavaPathRequest");
+
+    public static final StructLayout PATH_NODE = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("x"),
+            ValueLayout.JAVA_INT.withName("y"),
+            ValueLayout.JAVA_INT.withName("z"),
+            ValueLayout.JAVA_INT.withName("heapIndex"),
+            ValueLayout.JAVA_FLOAT.withName("g"),
+            ValueLayout.JAVA_FLOAT.withName("f"),
+            ValueLayout.JAVA_INT.withName("type"),
+            ValueLayout.JAVA_INT.withName("flags")
+    ).withName("CavaPathNode");
+
+    /**
+     * 与 CAVA_PNT_COUNT 一致（Yarn 1.20.4 {@code PathNodeType} 的 26 个 ordinal）。
+     *
+     * <p><b>惩罚表 {@code penalty[26]} 按 CAVA_PNT_* 索引</b>，而 CAVA_PNT_* 的数值就是
+     * {@code PathNodeType.ordinal()}。两者错一位 = 整张惩罚表错位，**而且路径照样能算出来** ——
+     * 属于最难发现的 parity bug。这里的 26 必须与头文件、与 {@code PathNodeType.values().length} 三方一致。
+     */
+    public static final int PNT_COUNT = 26;
+
+    /**
+     * 字段顺序与 {@code cava_abi.h} 的 {@code CavaMobProfile} **逐字一致**，且刻意让
+     * float[26]+float = 108、再加一个 int32 顶到 112，使 3 个 double 落在 8 字节边界上。
+     * 这样布局内部**没有任何填充**，可以不用 {@code paddingLayout}。
+     * <b>不要重排</b>：交错放置会同时触发 FFM 的 "Invalid alignment constraint"。
+     */
+    public static final StructLayout MOB_PROFILE = MemoryLayout.structLayout(
+            MemoryLayout.sequenceLayout(PNT_COUNT, ValueLayout.JAVA_FLOAT).withName("penalty"),
+            ValueLayout.JAVA_FLOAT.withName("max_fall_distance"),
+            // C 会在 double 前插入 4 字节填充；Java 的 structLayout 不会自动插，
+            // 必须显式写出来（padding 元素没有名字，struct() 只收集有名字的成员）。
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.JAVA_DOUBLE.withName("start_x"),
+            ValueLayout.JAVA_DOUBLE.withName("start_y"),
+            ValueLayout.JAVA_DOUBLE.withName("start_z"),
+            ValueLayout.JAVA_INT.withName("start_block_x"),
+            ValueLayout.JAVA_INT.withName("start_block_y"),
+            ValueLayout.JAVA_INT.withName("start_block_z"),
+            ValueLayout.JAVA_FLOAT.withName("width"),
+            ValueLayout.JAVA_FLOAT.withName("height"),
+            ValueLayout.JAVA_FLOAT.withName("step_height"),
+            ValueLayout.JAVA_INT.withName("safe_fall_distance"),
+            ValueLayout.JAVA_INT.withName("min_y"),
+            ValueLayout.JAVA_INT.withName("sea_level"),
+            ValueLayout.JAVA_INT.withName("caps"),
+            ValueLayout.JAVA_INT.withName("penalty_mask"),
+            ValueLayout.JAVA_INT.withName("reserved0"),
+            ValueLayout.JAVA_INT.withName("reserved1"),
+            // 尾部补齐到 alignof 的整数倍（C: 192）。
+            MemoryLayout.paddingLayout(4)
+    ).withName("CavaMobProfile");
+
+    public static final StructLayout STATE_RECORD = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("flags"),
+            ValueLayout.JAVA_INT.withName("box_offset"),
+            ValueLayout.JAVA_INT.withName("box_count"),
+            ValueLayout.JAVA_INT.withName("path_type_idx"),
+            ValueLayout.JAVA_FLOAT.withName("malus")
+    ).withName("CavaStateRecord");
+
+    public static final StructLayout COLLISION_BOX = MemoryLayout.structLayout(
+            ValueLayout.JAVA_FLOAT.withName("min_x"),
+            ValueLayout.JAVA_FLOAT.withName("min_y"),
+            ValueLayout.JAVA_FLOAT.withName("min_z"),
+            ValueLayout.JAVA_FLOAT.withName("max_x"),
+            ValueLayout.JAVA_FLOAT.withName("max_y"),
+            ValueLayout.JAVA_FLOAT.withName("max_z")
+    ).withName("CavaCollisionBox");
+
     /** 一个结构体字段的 (名字, 偏移, 大小)。 */
     public record Field(String name, long offset, long size) {
         @Override
@@ -102,18 +196,29 @@ public final class CavaLayouts {
         }
     }
 
-    /** P0 必须导出布局的 4 个结构体，顺序 = cava_abi.h 的声明顺序。 */
+    /** 必须导出布局的 9 个结构体，顺序 = cava_abi.h 的声明顺序（也是 cava_layout.cpp 的 kLayouts 顺序）。 */
     public static final List<Struct> STRUCTS = List.of(
             struct(LAYOUT_ENTRY),
             struct(LAYOUT_REPORT),
             struct(OPEN_PARAMS),
-            struct(OPEN_RESULT)
+            struct(OPEN_RESULT),
+            struct(PATH_REQUEST),
+            struct(PATH_NODE),
+            struct(MOB_PROFILE),
+            struct(STATE_RECORD),
+            struct(COLLISION_BOX)
     );
 
     private static Struct struct(StructLayout layout) {
         List<Field> fields = new ArrayList<>();
         for (MemoryLayout member : layout.memberLayouts()) {
-            String name = member.name().orElseThrow(() -> new IllegalStateException("未命名字段: " + member));
+            // 填充元素（MemoryLayout.paddingLayout）**无法命名**（JDK 21 的 paddingLayout(long)
+            // 没有 withName 变体，实测），所以这里跳过匿名成员：填充不是"字段"，
+            // 但它的字节数已经体现在后面字段的偏移里。
+            if (member.name().isEmpty()) {
+                continue;
+            }
+            String name = member.name().get();
             long offset = layout.byteOffset(PathElement.groupElement(name));
             fields.add(new Field(name, offset, member.byteSize()));
         }
@@ -160,6 +265,53 @@ public final class CavaLayouts {
     public static final long RESULT_SIZE = 24;
     /** CavaOpenResult 期望 alignof。 */
     public static final long RESULT_ALIGN = 8;
+
+    // --- P1 的 5 个结构体（C 编译器 offsetof/sizeof 实测，MinGW g++ 15.2 / x86_64-w64-mingw32）---
+
+    /** CavaPathRequest 期望偏移。 */
+    public static final long[] PATH_REQUEST_OFFSETS = {0, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52};
+    /** CavaPathRequest 期望大小。 */
+    public static final long[] PATH_REQUEST_SIZES = {8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4};
+    /** CavaPathRequest 期望 sizeof。 */
+    public static final long PATH_REQUEST_SIZE = 56;
+    /** CavaPathRequest 期望 alignof。 */
+    public static final long PATH_REQUEST_ALIGN = 8;
+
+    /** CavaPathNode 期望偏移。 */
+    public static final long[] PATH_NODE_OFFSETS = {0, 4, 8, 12, 16, 20, 24, 28};
+    /** CavaPathNode 期望大小。 */
+    public static final long[] PATH_NODE_SIZES = {4, 4, 4, 4, 4, 4, 4, 4};
+    /** CavaPathNode 期望 sizeof。 */
+    public static final long PATH_NODE_SIZE = 32;
+    /** CavaPathNode 期望 alignof。 */
+    public static final long PATH_NODE_ALIGN = 4;
+
+    /** CavaMobProfile 期望偏移（数组 penalty[26] 算一个字段：offset=0, size=104）。中间有一处 C 隐式填充（108→112）。 */
+    public static final long[] MOB_PROFILE_OFFSETS = {0, 104, 112, 120, 128, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184};
+    /** CavaMobProfile 期望大小。 */
+    public static final long[] MOB_PROFILE_SIZES = {104, 4, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4};
+    /** CavaMobProfile 期望 sizeof。 */
+    public static final long MOB_PROFILE_SIZE = 192;
+    /** CavaMobProfile 期望 alignof。 */
+    public static final long MOB_PROFILE_ALIGN = 8;
+
+    /** CavaStateRecord 期望偏移。 */
+    public static final long[] STATE_RECORD_OFFSETS = {0, 4, 8, 12, 16};
+    /** CavaStateRecord 期望大小。 */
+    public static final long[] STATE_RECORD_SIZES = {4, 4, 4, 4, 4};
+    /** CavaStateRecord 期望 sizeof。 */
+    public static final long STATE_RECORD_SIZE = 20;
+    /** CavaStateRecord 期望 alignof。 */
+    public static final long STATE_RECORD_ALIGN = 4;
+
+    /** CavaCollisionBox 期望偏移。 */
+    public static final long[] COLLISION_BOX_OFFSETS = {0, 4, 8, 12, 16, 20};
+    /** CavaCollisionBox 期望大小。 */
+    public static final long[] COLLISION_BOX_SIZES = {4, 4, 4, 4, 4, 4};
+    /** CavaCollisionBox 期望 sizeof。 */
+    public static final long COLLISION_BOX_SIZE = 24;
+    /** CavaCollisionBox 期望 alignof。 */
+    public static final long COLLISION_BOX_ALIGN = 4;
 
     /** CAVA_OK。 */
     public static final int CAVA_OK = 0;
@@ -214,6 +366,16 @@ public final class CavaLayouts {
         checkStruct(problems, "CavaLayoutReport", LAYOUT_REPORT, REPORT_SIZE, REPORT_ALIGN, REPORT_OFFSETS, REPORT_SIZES);
         checkStruct(problems, "CavaOpenParams", OPEN_PARAMS, PARAMS_SIZE, PARAMS_ALIGN, PARAMS_OFFSETS, PARAMS_SIZES);
         checkStruct(problems, "CavaOpenResult", OPEN_RESULT, RESULT_SIZE, RESULT_ALIGN, RESULT_OFFSETS, RESULT_SIZES);
+        checkStruct(problems, "CavaPathRequest", PATH_REQUEST, PATH_REQUEST_SIZE, PATH_REQUEST_ALIGN,
+                PATH_REQUEST_OFFSETS, PATH_REQUEST_SIZES);
+        checkStruct(problems, "CavaPathNode", PATH_NODE, PATH_NODE_SIZE, PATH_NODE_ALIGN,
+                PATH_NODE_OFFSETS, PATH_NODE_SIZES);
+        checkStruct(problems, "CavaMobProfile", MOB_PROFILE, MOB_PROFILE_SIZE, MOB_PROFILE_ALIGN,
+                MOB_PROFILE_OFFSETS, MOB_PROFILE_SIZES);
+        checkStruct(problems, "CavaStateRecord", STATE_RECORD, STATE_RECORD_SIZE, STATE_RECORD_ALIGN,
+                STATE_RECORD_OFFSETS, STATE_RECORD_SIZES);
+        checkStruct(problems, "CavaCollisionBox", COLLISION_BOX, COLLISION_BOX_SIZE, COLLISION_BOX_ALIGN,
+                COLLISION_BOX_OFFSETS, COLLISION_BOX_SIZES);
         return problems;
     }
 

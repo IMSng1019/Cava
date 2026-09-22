@@ -33,10 +33,14 @@ struct StructLayout {
     uint64_t    sizes[CAVA_LAYOUT_MAX_FIELDS];
 };
 
-/* entry 顺序 = cava_abi.h 里的声明顺序：CavaLayoutEntry / CavaLayoutReport /
- * CavaOpenParams / CavaOpenResult。Java 侧求和时顺序无所谓（加法可交换），
- * 但逐条比对的测试要按这个顺序。 */
-const StructLayout kLayouts[4] = {
+/* entry 顺序 = cava_abi.h 里的声明顺序。Java 侧求和时顺序无所谓（加法可交换），
+ * 但逐条比对的测试要按这个顺序。
+ *
+ * P1 追加的 5 个结构体（2026-09-22，captain 随 ABI 扩展一起登记）：
+ *   CavaPathRequest / CavaPathNode / CavaMobProfile / CavaStateRecord / CavaCollisionBox
+ * **必须与 Java 侧 cava/ffm/CavaLayouts.java 同时登记**，否则两边 layout_hash_sum 不等
+ * → cava_open 返回 CAVA_ERR_LAYOUT → 整体回退纯 Java。加完后由 captain 复算和值。*/
+const StructLayout kLayouts[] = {
     {
         "CavaLayoutEntry",
         (uint64_t)sizeof(CavaLayoutEntry),
@@ -127,10 +131,160 @@ const StructLayout kLayouts[4] = {
             (uint64_t)sizeof(((CavaOpenResult*)0)->reserved0),
         },
     },
+    {
+        "CavaPathRequest",
+        (uint64_t)sizeof(CavaPathRequest),
+        (uint64_t)alignof(CavaPathRequest),
+        13,
+        {
+            (uint64_t)offsetof(CavaPathRequest, reserved1),
+            (uint64_t)offsetof(CavaPathRequest, tx),
+            (uint64_t)offsetof(CavaPathRequest, ty),
+            (uint64_t)offsetof(CavaPathRequest, tz),
+            (uint64_t)offsetof(CavaPathRequest, reach_range),
+            (uint64_t)offsetof(CavaPathRequest, max_range),
+            (uint64_t)offsetof(CavaPathRequest, flags),
+            (uint64_t)offsetof(CavaPathRequest, reserved0),
+            (uint64_t)offsetof(CavaPathRequest, reserved2),
+            (uint64_t)offsetof(CavaPathRequest, max_visited_nodes),
+            (uint64_t)offsetof(CavaPathRequest, pad0),
+            (uint64_t)offsetof(CavaPathRequest, pad1),
+            (uint64_t)offsetof(CavaPathRequest, pad2),
+        },
+        {
+            (uint64_t)sizeof(((CavaPathRequest*)0)->reserved1),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->tx),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->ty),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->tz),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->reach_range),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->max_range),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->flags),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->reserved0),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->reserved2),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->max_visited_nodes),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->pad0),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->pad1),
+            (uint64_t)sizeof(((CavaPathRequest*)0)->pad2),
+        },
+    },
+    {
+        "CavaPathNode",
+        (uint64_t)sizeof(CavaPathNode),
+        (uint64_t)alignof(CavaPathNode),
+        8,
+        {
+            (uint64_t)offsetof(CavaPathNode, x),
+            (uint64_t)offsetof(CavaPathNode, y),
+            (uint64_t)offsetof(CavaPathNode, z),
+            (uint64_t)offsetof(CavaPathNode, heapIndex),
+            (uint64_t)offsetof(CavaPathNode, g),
+            (uint64_t)offsetof(CavaPathNode, f),
+            (uint64_t)offsetof(CavaPathNode, type),
+            (uint64_t)offsetof(CavaPathNode, flags),
+        },
+        {
+            (uint64_t)sizeof(((CavaPathNode*)0)->x),
+            (uint64_t)sizeof(((CavaPathNode*)0)->y),
+            (uint64_t)sizeof(((CavaPathNode*)0)->z),
+            (uint64_t)sizeof(((CavaPathNode*)0)->heapIndex),
+            (uint64_t)sizeof(((CavaPathNode*)0)->g),
+            (uint64_t)sizeof(((CavaPathNode*)0)->f),
+            (uint64_t)sizeof(((CavaPathNode*)0)->type),
+            (uint64_t)sizeof(((CavaPathNode*)0)->flags),
+        },
+    },
+    {
+        "CavaMobProfile",
+        (uint64_t)sizeof(CavaMobProfile),
+        (uint64_t)alignof(CavaMobProfile),
+        18,
+        {
+            (uint64_t)offsetof(CavaMobProfile, penalty),
+            (uint64_t)offsetof(CavaMobProfile, max_fall_distance),
+            (uint64_t)offsetof(CavaMobProfile, start_x),
+            (uint64_t)offsetof(CavaMobProfile, start_y),
+            (uint64_t)offsetof(CavaMobProfile, start_z),
+            (uint64_t)offsetof(CavaMobProfile, start_block_x),
+            (uint64_t)offsetof(CavaMobProfile, start_block_y),
+            (uint64_t)offsetof(CavaMobProfile, start_block_z),
+            (uint64_t)offsetof(CavaMobProfile, width),
+            (uint64_t)offsetof(CavaMobProfile, height),
+            (uint64_t)offsetof(CavaMobProfile, step_height),
+            (uint64_t)offsetof(CavaMobProfile, safe_fall_distance),
+            (uint64_t)offsetof(CavaMobProfile, min_y),
+            (uint64_t)offsetof(CavaMobProfile, sea_level),
+            (uint64_t)offsetof(CavaMobProfile, caps),
+            (uint64_t)offsetof(CavaMobProfile, penalty_mask),
+            (uint64_t)offsetof(CavaMobProfile, reserved0),
+            (uint64_t)offsetof(CavaMobProfile, reserved1),
+        },
+        {
+            (uint64_t)sizeof(((CavaMobProfile*)0)->penalty),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->max_fall_distance),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->start_x),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->start_y),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->start_z),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->start_block_x),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->start_block_y),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->start_block_z),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->width),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->height),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->step_height),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->safe_fall_distance),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->min_y),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->sea_level),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->caps),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->penalty_mask),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->reserved0),
+            (uint64_t)sizeof(((CavaMobProfile*)0)->reserved1),
+        },
+    },
+    {
+        "CavaStateRecord",
+        (uint64_t)sizeof(CavaStateRecord),
+        (uint64_t)alignof(CavaStateRecord),
+        5,
+        {
+            (uint64_t)offsetof(CavaStateRecord, flags),
+            (uint64_t)offsetof(CavaStateRecord, box_offset),
+            (uint64_t)offsetof(CavaStateRecord, box_count),
+            (uint64_t)offsetof(CavaStateRecord, path_type_idx),
+            (uint64_t)offsetof(CavaStateRecord, malus),
+        },
+        {
+            (uint64_t)sizeof(((CavaStateRecord*)0)->flags),
+            (uint64_t)sizeof(((CavaStateRecord*)0)->box_offset),
+            (uint64_t)sizeof(((CavaStateRecord*)0)->box_count),
+            (uint64_t)sizeof(((CavaStateRecord*)0)->path_type_idx),
+            (uint64_t)sizeof(((CavaStateRecord*)0)->malus),
+        },
+    },
+    {
+        "CavaCollisionBox",
+        (uint64_t)sizeof(CavaCollisionBox),
+        (uint64_t)alignof(CavaCollisionBox),
+        6,
+        {
+            (uint64_t)offsetof(CavaCollisionBox, min_x),
+            (uint64_t)offsetof(CavaCollisionBox, min_y),
+            (uint64_t)offsetof(CavaCollisionBox, min_z),
+            (uint64_t)offsetof(CavaCollisionBox, max_x),
+            (uint64_t)offsetof(CavaCollisionBox, max_y),
+            (uint64_t)offsetof(CavaCollisionBox, max_z),
+        },
+        {
+            (uint64_t)sizeof(((CavaCollisionBox*)0)->min_x),
+            (uint64_t)sizeof(((CavaCollisionBox*)0)->min_y),
+            (uint64_t)sizeof(((CavaCollisionBox*)0)->min_z),
+            (uint64_t)sizeof(((CavaCollisionBox*)0)->max_x),
+            (uint64_t)sizeof(((CavaCollisionBox*)0)->max_y),
+            (uint64_t)sizeof(((CavaCollisionBox*)0)->max_z),
+        },
+    },
 };
 
 constexpr int32_t kStructCount = (int32_t)(sizeof(kLayouts) / sizeof(kLayouts[0]));
-static_assert(kStructCount == 4, "P0 只导出这 4 个结构体；加结构体要同时改契约文档与 Java 侧");
+static_assert(kStructCount == 9, "登记的结构体数量与 cava_abi.h 不一致；加结构体要同时改 Java 侧");
 static_assert(kStructCount <= CAVA_LAYOUT_REPORT_CAP, "entry 数超过 CavaLayoutReport 容量");
 
 uint32_t hash_field(uint32_t h, uint64_t off, uint64_t size) {

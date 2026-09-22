@@ -98,6 +98,17 @@
         h ^= (uint32_t)((size   >> 32) & 0xFFFFFFFF); h *= 0x01000193
 
 `layout_hash_sum` = 所有导出结构体 `layout_hash` 的 **uint32 无符号加法**（回绕）。
+
+> ⚠️ **实测到的固有弱点（2026-09-22，captain 记录，不要误用）**：上面这个公式**不区分字段数与"形状相同"的结构体**。
+> 实测 `CavaPathRequest` / `CavaPathNode` / `CavaCollisionBox` 三者都只由连续的单 u32 字段构成，
+> 于是 **layout_hash 完全相同（`0x250ECBE1`）**。即使把字段数喂进去也仍然碰撞（三者字段数分别为 6/6/6——是 6/6/6 中两个 6、一个是 6，三者**字段数与步长都一致**，故仍相同）。
+>
+> **这不构成安全漏洞**，因为真正拦住布局漂移的不是哈希，而是：
+> 1. **原生侧逐字段 `(offset, size)` 全表比对**（`cava_layout_report` 返回的 `field_offsets/field_sizes`）；
+> 2. **Java 侧对 C 编译器实测 offsetof 的断言**（`CavaLayouts.checkAgainstCAbi()`）；
+> 3. `cava_open` 的 `layout_hash_sum` 只是**快速失败**的粗筛。
+>
+> **仍然要保留哈希**（它能抓住"少了一个结构体/多加了一个结构体"这类整体漂移），但**任何 parity 结论都不许只依赖哈希**。
 Java 侧算出期望值填进 `CavaOpenParams.layout_hash_sum`；原生侧比较自己算出的值，
 不等则 `cava_open` 返回 `CAVA_ERR_LAYOUT` 且 `handle = 0` → **整体回退纯 Java**。
 
@@ -109,8 +120,14 @@ Java 侧算出期望值填进 `CavaOpenParams.layout_hash_sum`；原生侧比较
 | `CavaLayoutReport` | 自检报告 |
 | `CavaOpenParams` | open 入参 |
 | `CavaOpenResult` | open 出参 |
-| `CavaPathRequest` | P1 寻路入参（已冻结） |
-| `CavaPathNode` | P1 寻路出参节点（已冻结） |
+| `CavaPathRequest` | P1 寻路入参（已冻结，**56 字节 / 13 字段**） |
+| `CavaPathNode` | P1 寻路出参节点（已冻结，**32 字节 / 8 字段**） |
+| `CavaMobProfile` | P1 生物档案（已冻结，**192 字节 / 18 字段**） |
+| `CavaStateRecord` | 方块状态表条目（**20 字节 / 5 字段**） |
+| `CavaCollisionBox` | 扁平 AABB（**24 字节 / 6 字段**） |
+
+> **当前权威 `layout_hash_sum` = `0x6975CBF9`**（9 个结构体，MinGW g++ 15.2 / x86-64 实测；
+> Java 侧独立重算得到**完全相同**的值）。任何结构体改动都必须两侧同时改并重跑两边的自检。
 
 ### 2.4 P1 寻路 ABI（**已冻结**，`CavaPathRequest` / `CavaPathNode`）
 

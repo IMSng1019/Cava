@@ -151,4 +151,6 @@ P1 的每次寻路本来就有天然边界（起点→终点 + maxVisitedNodes�
 | Lithium `@Overwrite` 碰撞点 | P2 | 未决 | 兼容层给出售让/复刻的显式决策 |
 | 反编译器在本 jar 上未验证 | — | 已标注「未验证」，默认走 javap | 不阻塞 |
 | **参照实现可能"自洽但不对齐原版"** | 已实际发生一次 | `LandMaker.isValidDiagonalSuccessor` 的第三个合取项被写成 `flag5`（应为 `!flag5`）；**10000 组向量是参照实现自己产的，抓不住这个错** | ① 每个易读反的分支都要有**定点真值表断言**（不靠随机向量）；② W2-P1 用 javac 判定性实验独立复核，captain 用 javap 仲裁 |
+| **同一份常量被定义在两处 → 静默漂移** | **已实际发生一次（P1 位号 19/19 全错位）** | `CAVA_PF_*` 在 `cava_abi.h`、内核读的 `PF_*` 在 `native/src/pathfind/cava_pf.h`，**19 个位号全部不一致**。后果本会是：Java 填 `AIR` → 内核读成"活板门"、`RAIL` → "门"、`FIRE` → "可通行"、`WITHER_ROSE` → "水方块"。**而且运行期完全发现不了**（`cava_pathfind` 返回 UNIMPLEMENTED，没有可观测行为） | 改成**别名**：`PF_*` 定义为 `CAVA_PF_*`（**只剩一处事实来源**），并重跑 10060 组向量自证零逻辑改动。<br>**通用规则**：**任何跨边界的常量/位布局只允许定义一次**；需要别名就写成别名，不要复制数值。 |
+| **接口语义太"软"导致调用方误用** | **已实际发生一次** | 我把位姿放进 `CavaMobProfile`，却在注释里写"每生物一份、变化时重推" → 会得到**陈旧起点** | 把约束**写进方法名**：`uploadProfileForSolve` / `isProfileReadyForSolve`，并在 javadoc 里写死"每次求解前重推、不得跨 tick 复用"。<br>**通用规则**：**会致命的调用时序约束要进方法名，不要只写在注释里。** |
 | **读原版行为的 jar 路径被写错** | 已实际发生一次 | `docs/CAVA-dev-toolbox.md` 早期写 `minecraft-clientonly`，而 `entity/*` 与 `ai/pathing/*` **只在 `minecraft-common` 里**（clientonly 的 entity 条目数 = 0） | 已勘误并写进 toolbox；所有"读原版"的流都被这条卡过，固化进门禁 #5 的教训 |

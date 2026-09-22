@@ -82,6 +82,51 @@ Java 侧整体回退纯 Java，不会有任何一次原生调用落在错误的�
 
 ---
 
+## 门禁 #6：**真实 Cava jar 在真实服务端里跑起来（启动横幅 + 原生库加载 + 布局自检）→ 通过**
+
+这是"MC 侧代码从未在服务端里跑过"这个缺口的闭合验证（captain 亲自做）。
+**做法**：把 `gradlew build` 产出的 `build/libs/cava-0.1.0.jar`（不是桩、不是探针）
+连同 `fabric-api 0.96.11` 与 **Lithium / ServerCore / VMP / FerriteCore / Carpet / TIS** 一起
+放进一个真实 Fabric 服务端的 `mods/`，用 `--enable-preview --enable-native-access=ALL-UNNAMED` 启动。
+
+### 证据（服务器真实 stdout，节选）
+
+    - cava 0.1.0
+       \-- mixinextras 0.5.5
+    [main/WARN]: Force-disabling mixin 'alloc.blockstate.StateMixin' as rule 'mixin.alloc.blockstate' (added by mods [ferritecore]) disables it and children
+    [main/WARN]: Force-disabling mixin 'alloc.chunk_ticking.ServerChunkManagerMixin' as rule 'mixin.alloc.chunk_ticking' (added by mods [servercore]) disables it and children
+    [native] 原子落盘 …\cava\natives\0.1.0\windows-x64\cava-34a578ed29e77709.dll (len=2780964, sha256=34a578ed29e77709…)
+    [native] System.load(…\cava-34a578ed29e77709.dll) 成功
+    [native] defaultLookup() 找不到 cava_build_id，回退 SymbolLookup.libraryLookup()
+    [cava/native] 布局自检通过：native_entries=4 java_sum=0x6149fd30 native_sum(per-entry u32 sum)=0x6149fd30
+    [cava/native] cava_open → sent_sum=0x6149fd30 rc=CAVA_OK result.status=CAVA_OK result.abi=1 result.native_layout_sum=0x6149fd30 handle=4294967297
+    [cava/native] 原生库已打开：status=OPEN build_id="cava 0.1.0 windows-x64 GNU 15.2.0 … -O2 -fwrapv -ffp-contract=off -fno-fast-math safe=0 …" abi=1/1 entries=4
+      ################ Cava 0.1.0 （Java 21 预览版 FFM + C++ 原生；P0 骨架，未注入任何游戏逻辑） ################
+      ================================ Cava / native ================================
+      native 状态     : OPEN  (OK)
+      ABI 版本        : java=1 native=1 platform=windows-x64 build_flags=0x0 build_id_hash=0x398927d3
+      布局自检        : 通过  java_sum(u32)=0x6149fd30 native_sum=0x6149fd30 entries=4
+      cava_abi_touch  : 1（=1 表示原生代码确实执行过）
+      config 文件     : …\config\cava.json（文件不存在，已写入默认值）
+    [Server thread/INFO]: Done (7.102s)! For help, type "help"
+    [Server thread/INFO]: [cava/parity] 未开启轨迹采集（-Dcava.parity.trace=<dir> 才开）
+    [Server thread/INFO]: [cava] 金丝雀跳过 pathfind：enabled=false（P0 骨架或已被禁用，不参与判定）
+    [Server thread/INFO]: [cava] 金丝雀自检结束：0 个通过 / 3 个注册
+
+### 这条门禁证明了什么
+1. **资源打包约定成立**：`natives/windows-x64/cava.dll` 从 jar 里被正确取出（`source=resource:/natives/windows-x64/cava.dll`）。
+2. **哈希命名 + 原子落盘 + `System.load` 在生产路径上真的跑通了**，不是只有自检程序能跑。
+3. **布局自检在真实服务端里通过**，且 `cava_abi_touch() == 1` 证明**原生代码确实被执行过**（不是只加载了库）。
+4. **与真实优化 mod 共存启动成功**：Lithium / ServerCore / VMP / FerriteCore / Carpet / TIS 同时在装，无冲突、无崩溃。
+5. **`config/cava.json` 默认值自动落盘**。
+
+### 仍未闭合
+- **金丝雀 0/3**：因为 P0 阶段三个子系统都是 `enabled=false`（按设计），所以"金丝雀主动触发目标方法看计数器有没有动"这条链路**尚未在真实环境里被验证过一次**。
+  这一条要等 P1 真正注入 `PathNodeNavigator.findPathToAny` 之后才能验。**这是 P1 的必验项。**
+- 黄金轨迹**尚未采到**（`-Dcava.parity.trace` 没开），确定性前置（同存档连续两次一致）也还没证明。
+
+---
+
 ## 门禁 #5：**预览版 class 能否被 Fabric Loader 加载并执行 → 通过**
 
 **结论：PASS。** 整个项目的载体假设是「Fabric mod + JDK 21 **预览版 FFM**（必须 `--enable-preview`）」。

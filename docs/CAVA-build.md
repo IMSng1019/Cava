@@ -224,7 +224,7 @@ DLL Name: libgcc_s_seh-1.dll / libstdc++-6.dll / KERNEL32.dll / msvcrt.dll / lib
 > （我 13:51 放的 `libcava.dll` 与一份 558310 B 的 `cava.dll`，到 13:53 只剩下别人新构建的 `cava.dll` 114904 B，直接导致我那一次 ctest 报 `0xc0000135`）。
 > **纪律：同一时刻只有一个流跑原生构建**；产物文件名/ABI 以 P0-A 为准。
 
-### 4.2 MSVC（⛔ configure 已通；build 退出码 1，错误正在取证）
+### 4.2 MSVC（configure ✅ 已通；build ⛔ 证据被并发构建干扰，需单流复现）
 
 ```powershell
 # 1) 配置（⚠️ 必须给 CMAKE_TRY_COMPILE_CONFIGURATION=Release，且**必须是全新 build 目录**）

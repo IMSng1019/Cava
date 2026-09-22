@@ -284,7 +284,7 @@ static const MechExpect kMech[9] = {
 static const int32_t kStructExpectCount = 9;
 
 /* Java 侧对齐的和值（captain 复算并让 Java/C 两边逐字段一致后给出）。*/
-static const uint32_t kExpectedLayoutSum = 0x6975CBF9u;
+static const uint32_t kExpectedLayoutSum = 0x1C12265Eu;
 
 /* ------------------------------------------------------------------ */
 /* --dump-layout：给 Java 侧的黄金参考文本                              */

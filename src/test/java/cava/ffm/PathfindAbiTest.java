@@ -155,6 +155,6 @@ class PathfindAbiTest {
         assertEquals(nat.handle(), nat.handle(), "句柄稳定");
         assertEquals(CavaLayouts.ABI_VERSION, nat.abiVersion(), "原生 ABI 版本");
         assertEquals(nat.javaLayoutSum(), nat.nativeLayoutSum(), "java/native layout_hash_sum");
-        assertEquals(0x6975CBF9L, nat.javaLayoutSum(), "9 个结构体的 layout_hash_sum");
+        assertEquals(0x1C12265EL, nat.javaLayoutSum(), "9 个结构体的 layout_hash_sum");
     }
 }

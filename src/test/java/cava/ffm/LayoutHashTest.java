@@ -67,6 +67,12 @@ class LayoutHashTest {
                 0x9C6C98CDL, // CavaMobProfile
                 0x53797229L, // CavaStateRecord
                 0x250ECBE1L, // CavaCollisionBox
+                // --- P2 实体位移（2026-09-22 冻结）---
+                0x0DCFFE65L, // CavaShapeRecord  ← 与 CavaPathNode 同值：都是连续 8 个 4 字节字段
+                0x1545B999L, // CavaMoveShapeRef
+                0xB542D3D5L, // CavaMoveRequest
+                0x630C22D5L, // CavaMoveEvent
+                0x7737ABBDL, // CavaMoveResult
         };
         assertEquals(expected.length, java.structs().size(), "导出结构体个数");
         for (int i = 0; i < expected.length; i++) {
@@ -74,7 +80,7 @@ class LayoutHashTest {
             assertEquals(expected[i], Integer.toUnsignedLong(java.structs().get(i).hashU32()),
                     java.structs().get(i).name() + " layout_hash");
         }
-        assertEquals(0x6975CBF9L, java.sumU32(), "layout_hash_sum（9 个结构体；真实 cava.dll 算出同值）");
+        assertEquals(0x1C12265EL, java.sumU32(), "layout_hash_sum（14 个结构体；真实 cava.dll 算出同值）");
     }
 
     @Test

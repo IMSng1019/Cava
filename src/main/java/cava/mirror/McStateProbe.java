@@ -55,6 +55,85 @@ public final class McStateProbe implements StateProbe {
         return PROBE_POS;
     }
 
+    /** 普查用的第二个位置（形状若与 pos 有关，两个位置会给出不同的盒）。 */
+    private static final BlockPos PROBE_POS_B = new BlockPos(0, -60, 0);
+
+    /**
+     * **静态信号**：声明了"带 world/pos（/context）"的形状方法的方块类。
+     *
+     * <p>判据：类自己声明了 {@code getCollisionShape} / {@code getShape} / {@code getOutlineShape}
+     * 且形参数为 3 或 4（= 带 {@code BlockView} / {@code BlockPos} / {@code ShapeContext}）。
+     * 基类实现（{@code AbstractBlock}）不看这些参数，所以只有覆写者才可能位置/上下文相关。
+     */
+    public static java.util.Set<String> shapeSensitiveBlockClasses() {
+        java.util.Set<String> out = new java.util.TreeSet<>();
+        for (net.minecraft.block.Block block : net.minecraft.registry.Registries.BLOCK) {
+            Class<?> c = block.getClass();
+            for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+                String n = m.getName();
+                if (!n.equals("getCollisionShape") && !n.equals("getShape") && !n.equals("getOutlineShape")) {
+                    continue;
+                }
+                int p = m.getParameterCount();
+                if (p == 3 || p == 4) {
+                    out.add(c.getName());
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * **经验信号**：该状态的碰撞盒在"多个合成上下文"下是否会变。
+     *
+     * <p>变体 = {邻居: 空气/石头/自身} × {位置: (8,64,8) / (0,-60,0)} ×
+     * {ShapeContext: absent / 实体在上方 / 正在下降}（共 18 个，含基准）。
+     * 只要有一个变体与基准不同，就说明**冻结 ABI 的一组盒表达不了它** ⇒ 必须走保守守卫
+     * （captain 裁决 1：宁可不加速，也不出错）。
+     *
+     * <p>这是**启发式**，不是证明：它只能覆盖这 18 个变体。剩下的风险写进 docs §3.1。
+     */
+    public static boolean shapeVariesAcrossContexts(net.minecraft.block.BlockState state) {
+        java.util.List<net.minecraft.util.math.Box> base = boxesOf(state, ProbeWorldView.MODE_EMPTY, PROBE_POS, null);
+        int[] modes = {ProbeWorldView.MODE_EMPTY, ProbeWorldView.MODE_SOLID, ProbeWorldView.MODE_SELF};
+        BlockPos[] positions = {PROBE_POS, PROBE_POS_B};
+        net.minecraft.block.ShapeContext[] contexts = {null, ProbeShapeContext.ABOVE, ProbeShapeContext.DESCENDING};
+        for (int mode : modes) {
+            for (BlockPos pos : positions) {
+                for (net.minecraft.block.ShapeContext ctx : contexts) {
+                    if (!boxesOf(state, mode, pos, ctx).equals(base)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 诊断：把一个状态在几个合成上下文下的碰撞盒打出来（探针/排查用，不在生产路径上）。
+     *
+     * <p>用途：判断"某个方块的**碰撞**盒到底会不会随邻居/上下文变" —— 这决定了
+     * 冻结 ABI 的"一个状态一组盒"到底够不够用（captain 裁决 1 的守卫范围）。
+     */
+    public static String debugShapes(net.minecraft.block.BlockState state) {
+        return "air=" + boxesOf(state, ProbeWorldView.MODE_EMPTY, PROBE_POS, null)
+                + " solid=" + boxesOf(state, ProbeWorldView.MODE_SOLID, PROBE_POS, null)
+                + " self=" + boxesOf(state, ProbeWorldView.MODE_SELF, PROBE_POS, null)
+                + " ctxAbove=" + boxesOf(state, ProbeWorldView.MODE_EMPTY, PROBE_POS, ProbeShapeContext.ABOVE);
+    }
+
+    private static java.util.List<net.minecraft.util.math.Box> boxesOf(net.minecraft.block.BlockState state,
+                                                                     int mode, BlockPos pos,
+                                                                     net.minecraft.block.ShapeContext ctx) {
+        ProbeWorldView view = new ProbeWorldView(mode);
+        view.set(state);
+        VoxelShape shape = ctx == null ? state.getCollisionShape(view, pos)
+                : state.getCollisionShape(view, pos, ctx);
+        return shape.getBoundingBoxes();
+    }
+
     @Override
     public void probe(int stateId, StateSample out) {
         BlockState st = Block.getStateFromRawId(stateId);

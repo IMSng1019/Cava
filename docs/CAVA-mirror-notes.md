@@ -164,6 +164,31 @@
 
 ---
 
+### 2.4 `caps` 与这 19 个谓词位的关系（**回答 captain：「哪些位受 caps 影响」= 一个都没有**）
+
+| 问题 | 答案 | 依据 |
+| --- | --- | --- |
+| 19 个谓词位里有受 `caps` 影响的吗？ | **没有** | 它们全部来自 `getCommonNodeType` 的 16 步，而那 16 步只用 state 与该 pos 的流体 |
+| 那 `caps` 影响什么？ | 求解**当时**的类型/代价判定 | 内核：`common_node_type`（不含 caps）→ `adjust_node_type`（`can_enter_open_doors`/`can_open_doors`）、`node_type_raw`（`get_penalty` 选型 + `entity_block_x_size`）、`amphibious_default_node_type`（两栖）、`valid_adjacent`/`get_path_node` 里的 `can_walk_over_fences`/`can_swim`/`penalize_deep_water` |
+| `caps` 变化时要重算/失效状态表吗？ | **不需要** | 状态表只承载"与实体无关"的那部分；caps 每次都随档案上传（`CavaMobProfile.caps`） |
+| 那 `isFlagsReadyFor(caps)` 检查什么？ | ①表已构建+上传 ②`selfConsistent()`（`commonNodeType(flags) == path_type_idx` 对全部状态成立）③原生可用 | `RegionMirror.isFlagsReadyFor` |
+| `caps` 里有本版本不认识的位呢？ | **不阻塞**，只打一次 WARN | `NavCaps.KNOWN_MASK`；那些位与方块状态无关 |
+
+**实测（真实 26644 状态表）**：
+
+    [probe] isFlagsReadyFor(0x0) = true
+    [probe] isFlagsReadyFor(0x1) = true            （CAN_OPEN_DOORS）
+    [probe] isFlagsReadyFor(0x18) = true           （AMPHIBIOUS|PENALIZE_DEEP_WATER）
+    [probe] isFlagsReadyFor(0x20) = true           （CAN_WALK_OVER_FENCES）
+    [probe] isFlagsReadyFor(0x7ff) = true          （KNOWN_MASK）
+    [probe] isFlagsReadyFor(0x7fffffff) = true     （含未定义位：不阻塞）
+    [probe] 状态表自检不一致条数 = 0
+
+⇒ **captain 的阻塞项（"恒 false"）已消除**：只要表上传成功且自检通过，它对任何 caps 都返回 true，
+而且这个 true 是有内容的（自检真的跑过 26644 条）。
+
+---
+
 ## 3. 碰撞盒与区域推送
 
 ### 3.1 碰撞盒取法与"位置依赖"的处理（**我的选择与理由**）
@@ -178,6 +203,43 @@
      （FENCE/铁栏杆都是 `PF_FENCES`/`PT_FENCE`，别人占用的节点本来就不可通行）；
   3. 另一个候选 `MODE_SELF`（邻居=自身=全连接）是**最大**形状，会把"紧贴孤立方块的格子"
      判成不可站 —— 对 parity 的破坏面更大。
+- **2026-09-22 追加实测（比上面的推理更强）**：1.20.4 里**碰撞**形状基本与邻居无关 ——
+  "连接条"只出现在 **outline** 形状里。探针实测（`McStateProbe.debugShapes`）：
+
+      shapes oak_fence:        air=[AABB[0.375,0,0.375]->[0.625,1.5,0.625]]   solid/self/ctxAbove 完全相同
+      shapes cobblestone_wall: air=[AABB[0.25,0,0.25]->[0.75,1.5,0.75]]       solid/self/ctxAbove 完全相同
+      shapes iron_bars:        air=[AABB[0.4375,0,0.4375]->[0.5625,1,0.5625]] solid/self/ctxAbove 完全相同
+      shapes oak_fence_gate:   air=[AABB[0,0,0.375]->[1,1.5,0.625]]           solid/self/ctxAbove 完全相同
+      shapes oak_stairs / stone / water:                                      全部相同
+      shapes scaffolding:      邻居无关，但 **ShapeContext 相关**（`isDescending()` 那一档会变）
+
+  ⇒ 我原先担心的"2/16 连接条被低估"**对碰撞不成立**（那属于 outline）。这让 `MODE_EMPTY` 的
+  选择从"合理近似"升级为"对绝大多数方块精确"。
+
+#### 3.1.1 形状守卫（**captain 裁决 1**：绝不静默发散）
+
+按裁决实现为**静态 + 经验**两步分类，**建表时做一次**（不在热路径）：
+
+1. **静态**：`McStateProbe.shapeSensitiveBlockClasses()` —— 类自己声明了 `getCollisionShape` /
+   `getShape` / `getOutlineShape` 且形参数为 3 或 4（带 `BlockView`/`BlockPos`/`ShapeContext`）。
+   实测 **114 个类**命中。
+2. **经验**：对这些类的每个状态，用 18 个合成上下文（邻居=空气/石头/自身 × 位置 (8,64,8)/(0,-60,0) ×
+   ShapeContext=absent/实体在上方/下降）**重算碰撞盒**，与基准不同的才记为守卫。
+
+**实测结果（真实注册表）**：
+
+    [cava/mirror] 形状守卫普查：静态敏感类 114，经验命中 3 类 / 64 状态，耗时 341 ms；
+                  类=[BambooBlock, PointedDripstoneBlock, ScaffoldingBlock]
+
+⇒ 只有 3 个类、64 个状态（26644 里的 0.24%）被守卫。**"声明了参数但其实不看"的方块不会被误挡**
+（流体：形状恒为空；栅栏/墙/栏杆：碰撞盒只随 state 变）。
+
+**运行期**：`RegionMirror.push` 在 fill 之后、上传之前扫一遍区域 id，命中守卫状态就
+**抛 `MirrorUnavailableException`（调用方回退原逻辑）**，绝不上传。开关
+`-Dcava.mirror.shape.guard`（**默认 true**，只用于 A/B 对比）。
+
+**残留风险（未验证）**：18 个变体是**启发式**而非证明；真实服务器（带数据包标签）下
+`isIn(FENCES)` 之类的邻居判定会变，可能让更多方块进入守卫集 —— **必须在真服里复核一次**（§6）。
 - 两种模式都在代码里（`ProbeWorldView`），`BlockStateTable.census()` 可随时对拍。
 - **静态风险清单（实测）**：真实注册表里有 **20 个方块类**覆写了
   `getCollisionShape(BlockState, BlockView, BlockPos, ShapeContext)`：
@@ -206,6 +268,16 @@
   - 向上 `max(4, floor(height+1)+1)`：第 8 步递归 `y+1`、身高格数、目标节点 ±1；
   - 向下 `safeFallDistance + 4`：第 10 步"一直往下掉"最多 safeFallDistance 层；
   - Y 裁剪到世界高度；X/Z 不裁剪（世界无界），但要求区块已加载。
+- **绑定（`RegionSource.bind`，captain 2026-09-22 补的契约入口）**：`MirrorFactory.instance()`
+  给出进程内单例，`MirrorFactory.forWorld(world)` 绑定世界并返回同一实例。
+  实现侧语义：
+  - **同一世界重复绑定幂等**（一次身份比较 + 一次计数，无副作用、不打日志）；
+  - **换世界/换维度 = 重绑**：换 `RegionReader` + **清掉原生区域缓存**（旧区域属于旧维度，
+    留着只会得到"看起来正常但地形错了"的结果）+ 让同 tick 复用失效；
+  - **未绑定就 push → 显式抛 `MirrorUnavailableException`**（不静默、不猜）；
+  - `isFlagsReadyFor(caps)` **不需要**先绑定（它只关心状态表）。
+  - `RegionMirror.create()` 出来的实例**本身就是可用的单例形态**：`NativeRegionUploader` 是无状态的
+    （直接转发到 `cava.ffm.CavaNative` 单例），状态表是懒构建的全局单例，所以不需要任何隐藏初始化。
 - 失效（**本轮只要最简方案**）：`push()` **默认每次重推**（数据必然新鲜）；
   `pushReusingSameTick(rect)` 在同 tick/同维度/同矩形时可跳过（默认不用，因为会漏 tick 内方块变化）；
   `onSectionUnloaded / onBlockChanged / onWorldChanged` 是**留给后续脏跟踪流的口子**
@@ -256,6 +328,11 @@
     [probe] 覆写 canPathfindThrough(BlockView,BlockPos,NavigationType)=0 []
     [probe] 覆写 getCollisionShape(BlockState,BlockView,BlockPos,ShapeContext)=20 [...]
     [probe] 覆写 getCollisionShape(BlockState,BlockView,BlockPos)=0 []
+    [probe] isFlagsReadyFor(0x0/0x1/0x18/0x20/0x7ff/0x7fffffff) = true（6 个 caps 采样全 true）
+    [probe] 状态表自检不一致条数 = 0
+    [cava/mirror] 形状守卫普查：静态敏感类 114，经验命中 3 类 / 64 状态，耗时 341 ms
+    [probe] 真实口径推送 19x14x13(3458) = 121.22 us/次（含守卫扫描；首次运行；另一次同口径为 20.5 us/次 —— 
+            该数字对 JIT/GC 敏感，取量级即可）
 
 **`canPathfindThrough` 覆写数 = 0 是一条好消息**：`PF_PATH_THROUGH_LAND` 这个位
 在 1.20.4 里**没有任何方块覆写**（全部走 `AbstractBlock` 的默认实现 ⇒ `!isFullCube(view,pos)`），
@@ -349,11 +426,36 @@
 
 ## 6. 未验证 / 已知风险 / 请求
 
+### 6.0 本轮接口返工（captain 提交 `6a925ef`）——镜像侧的处置
+
+原设计"镜像流产出生物档案"**已作废**（镜像流拿不到位姿与惩罚表 ⇒ 恒返回未就绪，
+注入流实测 `reasons={profile-not-ready=20201}`、`nativeCalls=0`）。现在的边界是：
+
+| 契约方法 | 谁生产 | 镜像侧做什么 |
+| --- | --- | --- |
+| `bind(ServerWorld)` | 调用方给世界 | 建 `ServerWorldRegionReader`；同世界幂等；换世界清原生区域 |
+| `isFlagsReadyFor(int caps)` | — | 表已上传 + 自检通过 + 原生可用；**caps 不参与**（§2.4） |
+| `uploadProfileForSolve(long, Consumer<MemorySegment>)` | **注入流**（它有 `MobEntity`/`PathNodeMaker`） | 只负责 arena 生命周期 + 本地合法性预检 + 写进原生 |
+| `push(int×6)` | — | 读世界 → 填 id →（**形状守卫**）→ FFM 上传 |
+
+**已删除**：`MobProfiles`（profileKey 注册表）与 `MobProfileSpec.independentKey()` ——
+key 机制随旧设计一起作废，"两边各推一份"的风险也随之消失。
+**保留为填值工具**（captain 允许）：`MobProfileSpec`（值对象 + `writeTo(seg)`）与
+`McMobProfileCapture.of(mob, world)` / `McMobProfileCapture.filler(mob, world)`
+（后者直接喂给 `uploadProfileForSolve`），把"26 项惩罚表 + caps + 布局偏移"这段最容易写错的
+代码收敛到一处。**生产者仍然是注入流**。
+
+**主线程约束（captain 用字节码核过，写进文档作为显式约束）**：`EntityNavigation.findPathToAny`
+直接 `invokevirtual` 调 `PathNodeNavigator.findPathToAny`，整条链上没有 executor 交接 ⇒
+**原生路径假定在主线程（调用线程）上跑**。`RegionMirror` 的 push/clear 用一把对象锁保护，
+**那是防御性的，不是吞吐瓶颈**。**若将来有 mod 把寻路挪到工作线程，这条约束要重评。**
+
 1. **未验证**：真实服务器（带数据包标签）下的逐位命中数（§2.3）；真实 `ChunkSection` 调色板读取增量（§4.3）；
    `MODE_EMPTY` 形状与真实 `getBlockCollisions(entity, box)` 的逐状态差异（§3.1）。
-2. **未验证**：`CavaMobProfile.max_fall_distance` **在 1.20.4 里找不到来源**
-   （`MobEntity`/`EntityNavigation` 都没有 `getMaxFallDistance`，已 javap 逐个确认）——
-   我填 0 并在代码里注明；内核当前不读它。**建议 captain 裁决删字段或写清来源**。
+2. ~~`max_fall_distance` 没有来源~~ → **captain 裁决 3 已闭合**：字段改名为
+   `reserved_max_fall_distance`（内核不读，真正生效的是 `safe_fall_distance`），**填 0** ✔（本实现照此填）。
+   注意：Java 侧 `cava/ffm/CavaLayouts.java` 里的字段名仍是 `max_fall_distance`（该文件不归我），
+   但**布局哈希只用 (offset,size)**，改名不影响两侧自检；内核读的也是偏移，不是名字。
 3. **给 B（注入流）的两条硬事实**：
    - 内核**只读 flags**，别指望 `path_type_idx`；```RegionSource.isProfileReadyForSolve```
      的语义是"表已上传 + 该 profile 的 caps/惩罚表有出处"，不是"parity 已验证"。

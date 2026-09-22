@@ -1,7 +1,6 @@
 package cava.mirror;
 
 import cava.ffm.CavaLayouts;
-import cava.parity.Fnv1a;
 import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -12,13 +11,12 @@ import java.lang.foreign.ValueLayout;
  * <p><b>位姿也在里面（{@code startX/Y/Z}）</b>，而 {@code CavaPathRequest} 里没有起点 ——
  * 所以 captain 已裁决：**每次求解前重新上传**（见 {@code RegionSource.uploadProfileForSolve}）。
  *
- * <p>{@link #independentKey()} 是"与该生物这一瞬间的位姿无关"的语义指纹，
- * 用来充当 {@code profileKey}：它只随**能力/体型/惩罚表/世界上下界**变化。
- * 位姿不进 key（每 tick 都在变），但**每次上传前必须用当前位姿重新构造 spec**。
+ * <p>位姿（{@code startX/Y/Z} + {@code startBlock*}) 每 tick 都在变 ⇒ **每次求解前都要重新采样**
+ * 并通过 {@code RegionSource.uploadProfileForSolve(handle, uploader)} 重新上传。
  */
 public record MobProfileSpec(
         float[] penalty,          /* penalty[26]，下标 = PathTypes 的真实 ordinal */
-        float maxFallDistance,    /* ABI 有、1.20.4 里找不到来源（见 mirror-notes §4），内核不读 */
+        float maxFallDistance,    /* ABI 字段，captain 已改名 reserved_max_fall_distance：填 0，内核不读 */
         double startX, double startY, double startZ,
         int startBlockX, int startBlockY, int startBlockZ,
         float width, float height, float stepHeight,
@@ -70,25 +68,17 @@ public record MobProfileSpec(
                 && (penaltyMask & ~NavCaps.PENALTY_ALL_SET) == 0;
     }
 
-    /** 与位姿无关的语义指纹（= profileKey）。 */
-    public long independentKey() {
-        long h = Fnv1a.begin();
-        h = Fnv1a.updateInt(h, Float.floatToRawIntBits(width));
-        h = Fnv1a.updateInt(h, Float.floatToRawIntBits(height));
-        h = Fnv1a.updateInt(h, Float.floatToRawIntBits(stepHeight));
-        h = Fnv1a.updateInt(h, safeFallDistance);
-        h = Fnv1a.updateInt(h, minY);
-        h = Fnv1a.updateInt(h, seaLevel);
-        h = Fnv1a.updateInt(h, caps);
-        h = Fnv1a.updateInt(h, penaltyMask);
-        h = Fnv1a.updateInt(h, navKind);
-        for (int i = 0; i < penalty.length; i++) {
-            h = Fnv1a.updateInt(h, Float.floatToRawIntBits(penalty[i]));
-        }
-        return h;
-    }
-
-    /** 按 {@code CavaMobProfile} 的布局写进段（192 字节）。 */
+    /**
+     * 按 {@code CavaMobProfile} 的布局写进段（192 字节）。
+     *
+     * <p><b>它是给注入流用的"填值工具"</b>：{@code RegionSource.uploadProfileForSolve(handle, uploader)}
+     * 只接受一个"填段回调"，所以注入流可以写
+     * {@code mirror.uploadProfileForSolve(handle, McMobProfileCapture.filler(mob, world))}，
+     * 也可以自己直接 {@code seg -> spec.writeTo(seg)}。
+     *
+     * <p><b>已删除</b>：原先的 {@code independentKey()}（profileKey）与 {@code MobProfiles} 注册表 ——
+     * 那套"镜像流产出档案"的设计已由 captain 作废（镜像流拿不到位姿，必然恒返回未就绪）。
+     */
     public void writeTo(MemorySegment seg) {
         for (int i = 0; i < penalty.length; i++) {
             seg.set(ValueLayout.JAVA_FLOAT, O_PENALTY + i * 4L, penalty[i]);

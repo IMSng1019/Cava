@@ -29,6 +29,24 @@ public final class McMobProfileCapture {
     private McMobProfileCapture() {
     }
 
+    /**
+     * 给注入流用的**填值回调**，直接喂给
+     * {@code RegionSource.uploadProfileForSolve(long handle, Consumer<MemorySegment> uploader)}：
+     *
+     * <pre>{@code
+     * mirror.uploadProfileForSolve(handle, McMobProfileCapture.filler(mob, world));
+     * }</pre>
+     *
+     * <p>注意：档案里含**当前位姿**，所以这个回调**每次求解前都要重新构造**（别缓存）。
+     * 生产者仍然是注入流（它有 {@code MobEntity}）；本类只是把"26 项惩罚表 + caps + 布局偏移"
+     * 这段容易写错的代码收敛到一处，避免两边各写一份。
+     */
+    public static java.util.function.Consumer<java.lang.foreign.MemorySegment> filler(MobEntity mob,
+                                                                                     ServerWorld world) {
+        MobProfileSpec spec = of(mob, world);
+        return spec::writeTo;
+    }
+
     /** 采集。{@code world} 必须与该生物所在维度一致（取 bottomY / seaLevel）。 */
     public static MobProfileSpec of(MobEntity mob, ServerWorld world) {
         boolean exact = true;

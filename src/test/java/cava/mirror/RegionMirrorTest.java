@@ -3,9 +3,11 @@ package cava.mirror;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import cava.ffm.CavaLayouts;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
@@ -85,7 +87,10 @@ class RegionMirrorTest {
         final List<int[]> shapes = new ArrayList<>();
         int clears;
         int profileUploads;
+        int nextProfileRc;
         float lastProfileFirstFloat = Float.NaN;
+        float lastProfileWidth = Float.NaN;
+        long lastHandle = Long.MIN_VALUE;
 
         @Override
         public boolean available() {
@@ -116,14 +121,18 @@ class RegionMirrorTest {
         @Override
         public int mobProfileUpload(long handle, MemorySegment profile) {
             profileUploads++;
+            lastHandle = handle;
             lastProfileFirstFloat = profile.get(ValueLayout.JAVA_FLOAT, 0L);
-            return 0;
+            lastProfileWidth = profile.get(ValueLayout.JAVA_FLOAT, 148L);   // CavaMobProfile.width 的 offset
+            return nextProfileRc;
         }
     }
 
     private static final class FakeGate implements StateTableGate {
         boolean ok = true;
         boolean ready = true;
+        boolean consistent = true;
+        final java.util.Set<Integer> guardedIds = new java.util.HashSet<>();
 
         @Override
         public boolean uploadIfNeeded() {
@@ -144,6 +153,16 @@ class RegionMirrorTest {
         public String failure() {
             return "(fake)";
         }
+
+        @Override
+        public boolean selfConsistent() {
+            return consistent;
+        }
+
+        @Override
+        public boolean isShapeGuarded(int stateId) {
+            return guardedIds.contains(stateId);
+        }
     }
 
     private FakeReader reader;
@@ -162,7 +181,7 @@ class RegionMirrorTest {
     @AfterEach
     void tearDown() {
         System.clearProperty(RegionMirror.PROP_MAX_VOLUME);
-        MobProfiles.clear();
+        System.clearProperty(RegionMirror.PROP_SHAPE_GUARD);
     }
 
     @Test
@@ -255,31 +274,140 @@ class RegionMirrorTest {
         assertEquals(1, uploader.clears);
     }
 
-    @Test
-    void profileUploadUsesRegistryAndReportsMissingKey() {
-        assertFalse(mirror.isProfileReadyForSolve(12345L), "未注册的 key 必须 not ready");
-        assertFalse(mirror.uploadProfileForSolve(1L, 12345L), "未注册的 key 必须失败（调用方回退）");
-        assertEquals(0, uploader.profileUploads);
+    // ------------------------------------------------------------------
+    // 新契约（captain 2026-09-22 返工）：档案由注入流填值，镜像只负责写进原生
+    // ------------------------------------------------------------------
 
+    @Test
+    void profileUploadWritesWhatTheFillerWrote() {
         MobProfileSpec spec = new MobProfileSpec(
                 PathTypes.defaultPenalties(), 0.0f,
                 1.5, 64.0, -2.5, 1, 64, -3,
                 0.6f, 1.8f, 0.0f, 3, -64, 63,
                 NavCaps.CAN_OPEN_DOORS | NavCaps.CAN_SWIM, NavCaps.PENALTY_ALL_SET,
                 MobProfileSpec.KIND_LAND, true);
-        long key = MobProfiles.define(spec);
-        assertTrue(mirror.isProfileReadyForSolve(key));
-        assertTrue(mirror.uploadProfileForSolve(1L, key));
+        assertTrue(mirror.uploadProfileForSolve(12345L, spec::writeTo), "合法档案必须上传成功");
         assertEquals(1, uploader.profileUploads);
         assertEquals(-1.0f, uploader.lastProfileFirstFloat, 0.0f, "penalty[0] = BLOCKED = -1.0f");
+        assertEquals(0.6f, uploader.lastProfileWidth, 0.0f, "width 必须原样写到布局的 width 偏移");
+        assertEquals(12345L, uploader.lastHandle, "必须用调用方给的 handle，不是 uploader.handle()");
+        assertTrue(mirror.profileStats().contains("profileUploads=1"), mirror.profileStats());
+    }
 
-        // 飞行/水生档案 -> not ready（内核未实现）
-        MobProfileSpec unsupported = new MobProfileSpec(
-                PathTypes.defaultPenalties(), 0.0f,
-                0.0, 64.0, 0.0, 0, 64, 0,
-                0.6f, 1.8f, 0.0f, 3, -64, 63, 0, NavCaps.PENALTY_ALL_SET,
-                MobProfileSpec.KIND_UNSUPPORTED, true);
-        assertFalse(mirror.isProfileReadyForSolve(MobProfiles.define(unsupported)));
+    @Test
+    void profileUploadRefusesNullThrowingAndIllegal() {
+        assertFalse(mirror.uploadProfileForSolve(1L, null), "null 回调必须拒绝");
+        assertFalse(mirror.uploadProfileForSolve(1L, seg -> {
+            throw new IllegalStateException("filler 内部炸了");
+        }), "回调抛异常必须转成 false（回退），不许逃逸");
+        assertFalse(mirror.uploadProfileForSolve(1L, seg -> {
+            // 什么都不填 = 全 0 = width/height 为 0（原生会 CAVA_ERR_ARG）
+        }), "全 0 档案必须提前拒绝");
+        assertEquals(0, uploader.profileUploads, "这三种情况都不该调到原生");
+        assertTrue(mirror.profileStats().contains("profileRefusals=3"), mirror.profileStats());
+    }
+
+    @Test
+    void profileUploadSurfacesNativeErrorCode() {
+        uploader.nextProfileRc = CavaLayouts.CAVA_ERR_ARG;
+        assertEquals(false, mirror.uploadProfileForSolve(1L, seg -> {
+            seg.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, 148L, 0.6f);  // width
+            seg.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, 152L, 1.8f);  // height
+        }), "原生返回错误码时必须 false");
+        assertEquals(1, uploader.profileUploads);
+    }
+
+    // ------------------------------------------------------------------
+    // isFlagsReadyFor：19 个谓词位与 caps 无关（理由见 docs §2.4）
+    // ------------------------------------------------------------------
+
+    @Test
+    void flagsReadyRequiresTableSelfCheckAndNative() {
+        assertTrue(mirror.isFlagsReadyFor(NavCaps.CAN_OPEN_DOORS), "一切正常时必须**真的**返回 true");
+        assertEquals(1, mirror.flagsReadyOk());
+
+        gate.ok = false;
+        assertFalse(mirror.isFlagsReadyFor(0), "表未就绪必须 false");
+        assertTrue(mirror.flagsNotReadyReason().contains("状态表未就绪"), mirror.flagsNotReadyReason());
+        gate.ok = true;
+
+        gate.consistent = false;
+        assertFalse(mirror.isFlagsReadyFor(0), "表自检失败必须 false");
+        assertTrue(mirror.flagsNotReadyReason().contains("自检"), mirror.flagsNotReadyReason());
+        gate.consistent = true;
+
+        uploader.available = false;
+        assertFalse(mirror.isFlagsReadyFor(0), "原生不可用必须 false");
+        uploader.available = true;
+
+        assertTrue(mirror.isFlagsReadyFor(0));
+        assertNull(mirror.flagsNotReadyReason());
+    }
+
+    @Test
+    void capsNeverChangesFlagsReadiness() {
+        int[] capsSamples = {
+                0,
+                NavCaps.CAN_OPEN_DOORS,
+                NavCaps.CAN_ENTER_OPEN_DOORS | NavCaps.CAN_OPEN_DOORS,
+                NavCaps.CAN_SWIM | NavCaps.TOUCHING_WATER,
+                NavCaps.AMPHIBIOUS | NavCaps.PENALIZE_DEEP_WATER,
+                NavCaps.CAN_WALK_OVER_FENCES,
+                NavCaps.CAN_FLOAT | NavCaps.CAN_PATHFIND_THROUGH,
+                0x7FFFFFFF,          // 含未定义位：不阻塞，只 WARN 一次
+                NavCaps.KNOWN_MASK,
+        };
+        for (int caps : capsSamples) {
+            assertTrue(mirror.isFlagsReadyFor(caps), "caps=0x" + Integer.toHexString(caps) + " 不该影响就绪判定");
+        }
+        assertEquals(capsSamples.length, mirror.flagsReadyCalls());
+    }
+
+    // ------------------------------------------------------------------
+    // bind：未绑定必须显式失败；null 必须拒绝
+    // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // 形状守卫（captain 裁决 1：绝不静默发散）
+    // ------------------------------------------------------------------
+
+    @Test
+    void shapeGuardRejectsRegionWithGuardedState() {
+        gate.guardedIds.add(encode(11, 60, -5));
+        RegionSource.MirrorUnavailableException e = assertThrows(RegionSource.MirrorUnavailableException.class,
+                () -> mirror.push(10, 60, -5, 3, 2, 4));
+        assertTrue(e.getMessage().contains("位置/上下文相关形状"), e.getMessage());
+        assertEquals(0, uploader.uploads.size(), "被守卫的区域绝不许上传");
+        assertEquals(1, mirror.shapeGuardRejections());
+        assertEquals(1, mirror.failures());
+    }
+
+    @Test
+    void shapeGuardAllowsCleanRegion() {
+        gate.guardedIds.add(encode(99, 99, 99));   // 区域里没有它
+        RegionSource.Pushed pushed = mirror.push(10, 60, -5, 3, 2, 4);
+        assertEquals(24, pushed.stateCount());
+        assertEquals(0, mirror.shapeGuardRejections());
+    }
+
+    @Test
+    void shapeGuardCanBeDisabledForAbComparison() {
+        System.setProperty(RegionMirror.PROP_SHAPE_GUARD, "false");
+        gate.guardedIds.add(encode(11, 60, -5));
+        RegionSource.Pushed pushed = mirror.push(10, 60, -5, 3, 2, 4);
+        assertEquals(24, pushed.stateCount(), "关掉守卫后应当照常推送（A/B 对比用）");
+        assertEquals(1, uploader.uploads.size());
+        assertTrue(mirror.report().contains("形状守卫: 关"), mirror.report());
+    }
+
+    @Test
+    void pushWithoutBindFailsLoudly() {
+        RegionMirror unbound = new RegionMirror(uploader, gate);
+        RegionSource.MirrorUnavailableException e = assertThrows(RegionSource.MirrorUnavailableException.class,
+                () -> unbound.push(0, 0, 0, 2, 2, 2));
+        assertTrue(e.getMessage().contains("bind"), e.getMessage());
+        assertThrows(RegionSource.MirrorUnavailableException.class, () -> unbound.bind(null));
+        assertNull(unbound.boundWorld());
     }
 
     @Test

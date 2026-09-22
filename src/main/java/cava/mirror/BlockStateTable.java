@@ -38,6 +38,13 @@ public final class BlockStateTable implements StateTableGate {
     private String failure = "(尚未构建)";
     private int epoch;
     private boolean uploaded;
+    /** 构建时做的自检结果：commonNodeType(flags) == path_type_idx 对全部状态成立。 */
+    private volatile boolean tableSelfConsistent;
+    private int selfCheckMismatches = -1;
+    /** 位置/上下文相关形状的守卫表（captain 裁决 1）：true = 该状态必须让调用方回退。 */
+    private volatile boolean[] shapeGuarded;
+    private int guardedStateCount = -1;
+    private final java.util.List<String> guardedClasses = new java.util.ArrayList<>();
 
     private BlockStateTable() {
     }
@@ -67,6 +74,8 @@ public final class BlockStateTable implements StateTableGate {
                 stats.notes.add(msg);
                 LOG.error("[cava/mirror] {}", msg);
             }
+            runSelfCheck();
+            runShapeGuardCensus();
             failure = null;
             LOG.info("[cava/mirror] 方块状态表构建完成：状态 {} 条 / 碰撞盒 {} 个，耗时 {} ms（air id={}）",
                     stats.stateCount, stats.boxTotal,
@@ -79,6 +88,107 @@ public final class BlockStateTable implements StateTableGate {
             LOG.error("[cava/mirror] 构建状态表失败（镜像侧不可用，调用方必须回退原逻辑）", t);
             return false;
         }
+    }
+
+    /**
+     * 构建时自检：对**全部**状态验证 {@code MirrorFlags.commonNodeType(flags) == path_type_idx}。
+     *
+     * <p>为什么值得花这一遍（26644 次整数运算，实测 &lt; 1 ms）：flags 与 path_type_idx 是同一套
+     * 原版语义的两种表达，任何一位填反/填漏都会让两者对不上 —— 这是**唯一**能在真实注册表上
+     * 抓住"位填错"的廉价报警器（内核只读 flags，不会替我们发现）。
+     */
+    private void runSelfCheck() {
+        int mismatch = 0;
+        String first = null;
+        for (int id = 0; id < data.stateCount; id++) {
+            int derived = MirrorFlags.commonNodeType(data.flags(id));
+            if (derived != data.pathTypeIdx(id)) {
+                mismatch++;
+                if (first == null) {
+                    first = "id=" + id + " 位推=" + PathTypes.name(derived) + " 表=" + PathTypes.name(data.pathTypeIdx(id));
+                }
+            }
+        }
+        selfCheckMismatches = mismatch;
+        tableSelfConsistent = mismatch == 0;
+        stats.notes.add("状态表自检（commonNodeType(flags) vs path_type_idx）：不一致 " + mismatch + " 条"
+                + (first == null ? "" : "，首条 " + first));
+        if (mismatch != 0) {
+            LOG.error("[cava/mirror] 状态表自检失败：{} 条不一致（首条 {}）—— 镜像侧不可用，调用方必须回退",
+                    mismatch, first);
+        }
+    }
+
+    /**
+     * **形状守卫普查**（captain 裁决 1，"绝不静默发散"）。
+     *
+     * <p>两步：
+     * <ol>
+     *   <li><b>静态</b>：{@link McStateProbe#shapeSensitiveBlockClasses()} —— 覆写了带
+     *       world/pos/ShapeContext 的形状方法的方块类（基类不看这些参数，所以只有覆写者才可能相关）；</li>
+     *   <li><b>经验</b>：对这些类的每个状态，用 18 个合成上下文（邻居=空气/石头/自身 × 两个位置 ×
+     *       ShapeContext=absent/实体在上方/下降）重算碰撞盒；与基准不同 ⇒ 记为守卫。</li>
+     * </ol>
+     * 只有"静态命中 **且** 经验上真的会变"的状态才守卫 —— 这样既保守（会变的都挡掉），
+     * 又不会把"声明了参数但其实不看"的方块（例如流体：形状恒为空）误挡。
+     *
+     * <p>成本实测写进 docs §3.1；不在热路径上（一次构建一次）。
+     */
+    private void runShapeGuardCensus() {
+        long begin = System.nanoTime();
+        java.util.Set<String> sensitive = McStateProbe.shapeSensitiveBlockClasses();
+        boolean[] guarded = new boolean[data.stateCount];
+        int count = 0;
+        java.util.Set<String> classes = new java.util.TreeSet<>();
+        for (int id = 0; id < data.stateCount; id++) {
+            net.minecraft.block.BlockState st = Block.getStateFromRawId(id);
+            if (!sensitive.contains(st.getBlock().getClass().getName())) {
+                continue;
+            }
+            if (McStateProbe.shapeVariesAcrossContexts(st)) {
+                guarded[id] = true;
+                count++;
+                classes.add(st.getBlock().getClass().getSimpleName());
+            }
+        }
+        shapeGuarded = guarded;
+        guardedStateCount = count;
+        guardedClasses.clear();
+        guardedClasses.addAll(classes);
+        long ms = (System.nanoTime() - begin) / 1_000_000;
+        stats.notes.add("形状守卫：静态敏感类 " + sensitive.size() + " 个，其中经验上真的会变的 "
+                + classes.size() + " 个类 / " + count + " 个状态被守卫（普查耗时 " + ms + " ms）");
+        stats.notes.add("守卫类清单: " + classes);
+        LOG.info("[cava/mirror] 形状守卫普查：静态敏感类 {}，经验命中 {} 类 / {} 状态，耗时 {} ms；类={}",
+                sensitive.size(), classes.size(), count, ms, classes);
+    }
+
+    /** 该状态是否必须让调用方回退（位置/上下文相关形状）。 */
+    @Override
+    public boolean isShapeGuarded(int stateId) {
+        boolean[] g = shapeGuarded;
+        return g != null && stateId >= 0 && stateId < g.length && g[stateId];
+    }
+
+    /** 被守卫的状态数（-1 = 还没构建）。 */
+    public int guardedStateCount() {
+        return guardedStateCount;
+    }
+
+    /** 被守卫的方块类名（诊断用）。 */
+    public java.util.List<String> guardedClasses() {
+        return java.util.List.copyOf(guardedClasses);
+    }
+
+    /** 自检是否通过（{@link StateTableGate#selfConsistent()}）。 */
+    @Override
+    public boolean selfConsistent() {
+        return tableSelfConsistent;
+    }
+
+    /** 自检不一致的条数（-1 = 还没构建）。 */
+    public int selfCheckMismatches() {
+        return selfCheckMismatches;
     }
 
     // ------------------------------------------------------------------

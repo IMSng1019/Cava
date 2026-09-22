@@ -32,8 +32,10 @@ final class ProbeWorldView implements BlockView {
 
     /** 邻居查询返回空气。 */
     static final int MODE_EMPTY = 0;
-    /** 邻居查询返回被求值状态自身。 */
+    /** 邻居查询返回被求值状态自身（= 全连接）。 */
     static final int MODE_SELF = 1;
+    /** 邻居查询返回**实心整方块**（石头）——用于形状普查里"邻居都是固体"这一档。 */
+    static final int MODE_SOLID = 2;
 
     private final int mode;
     private BlockState self = Blocks.AIR.getDefaultState();
@@ -71,11 +73,19 @@ final class ProbeWorldView implements BlockView {
 
     @Override
     public BlockState getBlockState(BlockPos pos) {
-        return mode == MODE_SELF ? self : Blocks.AIR.getDefaultState();
+        return switch (mode) {
+            case MODE_SELF -> self;
+            case MODE_SOLID -> Blocks.STONE.getDefaultState();
+            default -> Blocks.AIR.getDefaultState();
+        };
     }
 
     @Override
     public FluidState getFluidState(BlockPos pos) {
-        return mode == MODE_SELF ? self.getFluidState() : Blocks.AIR.getDefaultState().getFluidState();
+        return switch (mode) {
+            case MODE_SELF -> self.getFluidState();
+            case MODE_SOLID -> Blocks.STONE.getDefaultState().getFluidState();
+            default -> Blocks.AIR.getDefaultState().getFluidState();
+        };
     }
 }

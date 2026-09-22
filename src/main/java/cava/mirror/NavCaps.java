@@ -37,4 +37,14 @@ public final class NavCaps {
 
     /** {@code CAVA_PENALTY_ALL_SET}：惩罚表 26 项全有效。 */
     public static final int PENALTY_ALL_SET = 0x03FFFFFF;
+
+    /**
+     * 本版本认识的**全部** caps 位。
+     *
+     * <p>用途：{@code RegionSource.isFlagsReadyFor(caps)} 里判断"调用方是不是用了更新的 ABI"。
+     * 出现不认识的位**不阻塞**（那些位与方块状态的 19 个谓词无关），只打一次 WARN。
+     */
+    public static final int KNOWN_MASK = CAN_OPEN_DOORS | CAN_ENTER_OPEN_DOORS | CAN_FLOAT | AMPHIBIOUS
+            | PENALIZE_DEEP_WATER | CAN_WALK_OVER_FENCES | CAN_SWIM | CAN_PATHFIND_THROUGH | ON_GROUND
+            | TOUCHING_WATER | CAN_WALK_ON_FLUID;
 }

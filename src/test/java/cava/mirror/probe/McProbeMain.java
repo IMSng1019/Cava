@@ -70,6 +70,18 @@ public final class McProbeMain {
         System.out.println("[probe] upload=" + uploaded + " wall=" + upWall + " ms ffm="
                 + (stats == null ? -1 : stats.uploadNanos / 1_000_000.0) + " ms failure=" + BlockStateTable.get().failure());
 
+        // ---- isFlagsReadyFor：真实表下对多种 caps 必须**真的**返回 true ----
+        int[] capsSamples = {0, cava.mirror.NavCaps.CAN_OPEN_DOORS,
+                cava.mirror.NavCaps.AMPHIBIOUS | cava.mirror.NavCaps.PENALIZE_DEEP_WATER,
+                cava.mirror.NavCaps.CAN_WALK_OVER_FENCES, cava.mirror.NavCaps.KNOWN_MASK, 0x7FFFFFFF};
+        cava.mirror.RegionMirror flagsMirror = cava.mirror.RegionMirror.create();
+        for (int caps : capsSamples) {
+            boolean ok = flagsMirror.isFlagsReadyFor(caps);
+            System.out.println("[probe] isFlagsReadyFor(0x" + Integer.toHexString(caps) + ") = " + ok
+                    + (ok ? "" : "  原因: " + flagsMirror.flagsNotReadyReason()));
+        }
+        System.out.println("[probe] 状态表自检不一致条数 = " + cava.mirror.BlockStateTable.get().selfCheckMismatches());
+
         // ---- flags 推类型 vs 原版直接算 ----
         McStateProbe probe = new McStateProbe();
         StateSample sample = new StateSample();
@@ -128,6 +140,17 @@ public final class McProbeMain {
         System.out.println("[probe] 覆写 canPathfindThrough(BlockView,BlockPos,NavigationType)=" + pathfind.size() + " " + pathfind);
         System.out.println("[probe] 覆写 getCollisionShape(BlockState,BlockView,BlockPos,ShapeContext)=" + shape4.size() + " " + shape4);
         System.out.println("[probe] 覆写 getCollisionShape(BlockState,BlockView,BlockPos)=" + shape3.size() + " " + shape3);
+
+        // ---- 碰撞盒到底会不会随邻居/上下文变？（守卫范围的关键证据）----
+        net.minecraft.block.Block[] probeBlocks = {
+                net.minecraft.block.Blocks.OAK_FENCE, net.minecraft.block.Blocks.COBBLESTONE_WALL,
+                net.minecraft.block.Blocks.IRON_BARS, net.minecraft.block.Blocks.SCAFFOLDING,
+                net.minecraft.block.Blocks.STONE, net.minecraft.block.Blocks.WATER,
+                net.minecraft.block.Blocks.OAK_FENCE_GATE, net.minecraft.block.Blocks.OAK_STAIRS};
+        for (net.minecraft.block.Block b : probeBlocks) {
+            System.out.println("[probe] shapes " + net.minecraft.registry.Registries.BLOCK.getId(b).getPath()
+                    + ": " + cava.mirror.McStateProbe.debugShapes(b.getDefaultState()));
+        }
 
         // ---- getRawIdFromState 单次成本 ----
         BlockState[] states = new BlockState[1024];

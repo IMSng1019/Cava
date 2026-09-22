@@ -1,0 +1,9 @@
+# Cava P0-E: boot + RCON smoke test for one mod wave.
+#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/wave-smoke.txt -Name wave1
+[steps]
+ready 300
+sleep 5
+cmd list
+cmd spark tps
+sleep 3
+stop

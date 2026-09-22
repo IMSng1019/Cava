@@ -1,0 +1,17 @@
+# Cava P0-E: create a deterministic test world (fixed level-seed from server.properties),
+# generate the spawn area, save, stop, snapshot it. Run once per snapshot name:
+#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/create-base-world.txt -Name base-a
+#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/create-base-world.txt -Name base-b
+[pre]
+deleteworld
+[steps]
+ready 300
+sleep 5
+cmd save-all flush
+sleep 3
+cmd save-off
+sleep 1
+stop
+[post]
+snapshot %NAME%
+hash %NAME%

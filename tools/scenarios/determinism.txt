@@ -1,0 +1,33 @@
+# Cava P0-E: determinism acceptance -- same snapshot, same mods, same tick count, two runs.
+# The datapack installed in [pre] freezes the game from the #minecraft:load tag, so the
+# number of ticks that elapse before the first RCON command is zero and absolute game
+# time is identical across runs. Then /tick sprint N advances exactly N ticks.
+#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/determinism.txt -Name det1
+#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/determinism.txt -Name det2
+# compare testbed/hashes/det1-*.json vs det2-*.json (digestPayload) and the .chunks.tsv diffs
+[pre]
+restore base-a
+datapack
+[steps]
+ready 300
+sleep 3
+cmd tick sprint 200
+sleep 4
+cmd save-all flush
+sleep 3
+hash t200
+cmd tick sprint 200
+sleep 4
+cmd save-all flush
+sleep 3
+hash t400
+cmd tick sprint 600
+sleep 6
+cmd save-all flush
+sleep 3
+hash t1000
+cmd tick query
+sleep 1
+stop
+[post]
+hash final

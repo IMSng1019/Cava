@@ -1,0 +1,15 @@
+# Cava P0-E: can an existing CLIENT save be loaded by the dedicated server?
+# Run tools/import-client-save.ps1 first, then:
+#   pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/import-client-save.txt -Name client-save
+# A failure is a legitimate result: the log tail is the evidence.
+[steps]
+ready 300
+sleep 8
+cmd list
+cmd save-all flush
+sleep 3
+cmd save-off
+sleep 1
+stop
+[post]
+hash client-save-after-boot

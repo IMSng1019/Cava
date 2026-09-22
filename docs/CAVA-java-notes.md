@@ -273,6 +273,15 @@ TraceDiff 零差异 / 首个差异 tick 与字段 / 行数不同 / 头行不同�
      `HeightLimitView.getBottomSectionCoord → method_32891`。
    - Fabric 事件名用 javap 核实：`ServerTickEvents.END_SERVER_TICK` + `EndTick.onEndTick(MinecraftServer)`、
      `ServerLifecycleEvents.SERVER_STARTED/SERVER_STOPPING`。
+   - **补充（语法/类型自检）**：按上表手写了 24 个 MC/Fabric 类型的**一次性桩**（放 gitignored 的
+     `build/selftest/stubs/`），把 `Cava.java` / `TickSampler.java` / `CavaClient.java` 对着桩编译：
+     ```
+     stub javac exit=0
+     mc-side javac exit=0   （产出 3 个 class）
+     ```
+     这只证明**代码自身的语法与类型使用自洽**（含 `Iterable<ServerWorld>` 迭代、`ChunkSection[]`、
+     泛型 `RegistryKey<World>`、lambda 与事件接口签名），**不证明与真实 MC API 匹配** —— 桩的签名是我按
+     映射表转录的，真实 API 的对编仍然要做（等 P0-A 的 Gradle/named jar）。
 2. `ChunkManager.getWorldChunk(int,int)` **不会加载区块**：按 yarn 名与 2/3 参重载推断，**未在运行期验证**。
 3. `server.stop(false)` 的 `false`：vanilla 里这个参数是 `waitForServer`，**不是「是否保存」**。
    确定性还需要 `/save-off` 或停服前不落盘（P0-F 的测试服脚本要覆盖）。P0 任务书写的是「false = 不保存」，**存疑**。

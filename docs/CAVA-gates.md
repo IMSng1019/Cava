@@ -82,6 +82,52 @@ Java 侧整体回退纯 Java，不会有任何一次原生调用落在错误的�
 
 ---
 
+## 门禁 #7：**P1 的 ABI 扩展在两侧同时落地并端到端复验 → 通过**
+
+**为什么单列一条**：扩 ABI 是本轮风险最高的一次改动 —— 它同时动 C 结构体、原生布局注册表、
+Java 的 `MemoryLayout` 镜像、以及**两侧算出的 `layout_hash_sum`**。任何一侧漏改，
+`cava_open` 就会 fail-closed，整个 mod 静默回退纯 Java（**看起来"能用"，其实原生一次都没被调用**）。
+
+### 最终状态（captain 亲自复跑）
+
+| 检查 | 结果 |
+| --- | --- |
+| 原生自测（三种构建：c++17 / c++20 / `CAVA_SAFE=1`） | 各 **130 passed, 0 failed** / exit 0 |
+| `ctest`（4 个用例：dll_loadtest / fp_probe / pathfind_vectors / selftest） | **4/4 passed** |
+| Java 侧 `CavaLayouts.checkAgainstCAbi()` | **problems = 0**（逐字段 (offset,size) 与 C 编译器一致） |
+| 两侧 `layout_hash_sum` | Java `0x6975CBF9` == native `0x6975CBF9` |
+| `cava.ffm.NativeSelfTest`（真实 dll） | `status=OPEN`、`handle=4294967297`、`java_layout_sum == native_layout_sum`、**`SELF-TEST: PASS`** |
+
+9 个结构体（实测 size/fields）：
+`CavaLayoutEntry 544/8`、`CavaLayoutReport 34848/8`、`CavaOpenParams 32/5`、`CavaOpenResult 24/4`、
+`CavaPathRequest 56/13`、`CavaPathNode 32/8`、`CavaMobProfile 192/18`、`CavaStateRecord 20/5`、`CavaCollisionBox 24/6`。
+
+### 这条门禁真正抓到的四个坑（每一个都会静默错）
+1. **`CAVA_PNT_*` 序号表是从记忆里编的**：从索引 5 起全错位，且含 4 个 1.20.4 **不存在**的常量、缺 4 个真实常量。
+   惩罚表 `float penalty[26]` 按它索引 ⇒ **路径照样算得出来，只是不与原版一致**。已用 `PathNodeType` 的 `static{}` 字节码逐条重建。
+2. **`CavaPathNode` 在原生注册表里漏登记了 2 个字段**（`type` / `flags`，只登记了 6/8）。
+   靠**和值不等**定位：原生 `0x80b49975` vs Java `0x6975CBF9`；
+   在 Java 侧只哈希前 6 个字段**恰好**复现 `0x80b49975`，从而钉死根因。
+   > **教训：布局自检的"和值不等"是真实信号，绝不能当噪声跳过。**
+3. **FFM 的 `structLayout` 不会自动插填充，而是直接拒绝错位成员**；同时 JDK 21 的 `paddingLayout`
+   **无法命名**，导致两侧字段数/大小不一致。最终把字段顺序选成两侧都零内部填充，尾部填充改成显式具名字段。
+4. **我手算的 offset 错了 3 处** —— 全部由编译器的 `offsetof/sizeof` 实测值纠正。
+
+### 由这次事故派生的**永久护栏**（P0-B 主动加的，值得推广）
+每个结构体现在做**两套**比对：
+- **硬编码期望表**（变更探测器：结构体被改动时它会红）；
+- **用 `offsetof/sizeof` 现算的机械表**（连字段名顺序都比）。
+
+> 为什么两套都要：如果只把"人给的字段表"抄进硬编码表，**两张表会照同一份错理解一起错**，测试反而"通过"。
+> 只有机械表能抓住 `CavaPathNode` 漏字段那一类。**"测试通过"不等于"理解正确"。**
+
+### 已知且可接受的弱点
+`layout_hash` 公式**不区分字段数/形状相同的结构体**：`CavaPathNode` 与 `CavaCollisionBox` 的
+hash 都是 `0x250ECBE1`。所以**哈希只做"整体漂移"的粗筛**，真正的护栏是**逐字段全表比对**。
+这条已写进契约 2.3。
+
+---
+
 ## 门禁 #6：**真实 Cava jar 在真实服务端里跑起来（启动横幅 + 原生库加载 + 布局自检）→ 通过**
 
 这是"MC 侧代码从未在服务端里跑过"这个缺口的闭合验证（captain 亲自做）。

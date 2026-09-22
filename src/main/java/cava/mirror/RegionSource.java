@@ -46,22 +46,36 @@ public interface RegionSource {
     void clear();
 
     /**
-     * 该生物档案对应的 {@code path_type_idx} 语义是否已就绪。
+     * 该生物档案对应的**方块状态 flags 语义**是否已就绪。
      *
      * <p>原版 {@code getCommonNodeType} 依赖实体上下文（开门能力、能否越过栅栏、体型……），
      * 所以"一个状态一个 pathType"不足以表达。镜像流负责把这个差异消化掉；
      * 在它确认"这个 profile 语义已就绪"之前，<b>注入流必须回退原逻辑</b>。
      *
+     * <p><b>注意通道</b>：原生内核**只读 {@code CavaStateRecord.flags}**，
+     * <b>不读</b> {@code path_type_idx} / {@code malus}（2026-09-22 由镜像流 grep 实证）。
+     * 所以"就绪"指的是 <b>flags 的 19 个谓词位已按该 profile 填对</b>，
+     * 而不是某张 pathType 表已上传。
+     *
      * @param profileKey 生物档案的稳定标识（镜像流决定其构成，例如 caps 的组合）
      */
-    boolean isProfileReady(long profileKey);
+    boolean isProfileReadyForSolve(long profileKey);
 
     /**
-     * 上传当前生物的档案（{@code CavaMobProfile}）。
+     * 上传当前生物的档案（{@code CavaMobProfile}）以供**本次求解**使用。
+     *
+     * <p><b>语义（captain 2026-09-22 裁决，不要按字面之外的方式理解）</b>：
+     * {@code CavaMobProfile} 里含实体的<b>当前位姿</b>（{@code start_x/y/z}），而
+     * {@code CavaPathRequest} 里<b>没有</b>起点字段。因此该档案
+     * <b>必须在每次求解前重新上传</b>，<b>不得跨 tick 复用</b> —— 否则起点是陈旧的，
+     * 会算出一条"看起来正常但起点错了"的路径。
+     *
+     * <p>成本是可接受的：192 字节 + 一次 FFM 调用（实测边界 ≈ 14–16 ns/次），
+     * 相对一次完整寻路可忽略。
      *
      * @return 成功与否；false 表示调用方必须回退
      */
-    boolean uploadProfile(long handle, long profileKey);
+    boolean uploadProfileForSolve(long handle, long profileKey);
 
     /** 镜像侧不可用（原生关闭 / 表未上传 / 世界未就绪 / 参数非法）。 */
     class MirrorUnavailableException extends RuntimeException {

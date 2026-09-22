@@ -165,6 +165,53 @@ Java 的 `MemoryLayout` 镜像、以及**两侧算出的 `layout_hash_sum`**。�
 **凡是依赖"配置期文件是否存在"的验证，必须加 `--no-configuration-cache` 重跑**，
 否则你测的是缓存，不是代码。（我是用一个临时测试打印测试 JVM 真正看到的系统属性才确认这一点的。）
 
+### 门禁 #6 的未闭合项：**金丝雀已在真实服务端里真的 +1 → 已闭合**
+
+`docs/CAVA-execution-plan.md` 之前记着「金丝雀 0/3，从未在真实环境里被验证过一次」，
+而"**静默失效**"是三种失效模式里最危险的一种（服务器正常启动、TPS 正常，但原生从未被调用）。
+注入流把它验成了真的 —— 真实服务端（Fabric 1.20.4 + Lithium + ServerCore + VMP + FerriteCore + Carpet + TIS）：
+
+    [cava/pathfind] 金丝雀 PASS：主动触发 findPathToAny 一次，计数 0 -> 1（原版返回 Path(4 节点)）；
+      canary=1 takeovers=0 nativeCalls=0 errors=0 disabled=false reasons={skipped=1}
+    [cava/pathfind] BENCH n=20000 ns/op=102731.8 avgNodes=4.00 canaryDelta=20000(expect 20000)
+
+**"+1"不是调 `hook.hit()` 伪造的**：探测在真实世界 + 真实生物上真调了一次 `PathNodeNavigator.findPathToAny`；
+bench 里 20000 次真实调用 `canaryDelta=20000/20000`（一次不多不少）。
+旁证：`remapJar` 后注解已是 `method_52`/`method_54`、accessor 是 `field_61`/`field_18708`，**jar 里不需要 refmap**。
+
+> **仍未闭合的**：`takeovers=0` —— **原生从未成功接管过一次**。
+> 原因已定位（captain 的接口设计错误：档案需要实体位姿与惩罚表，而只有注入点拿得到，
+> 所以"镜像流产出档案"注定恒返回未就绪）。接口已改（`6a925ef`），等镜像侧跟进后复测。
+
+### 从"金丝雀从未被验证"这件事里学到的三条（都来自注入流的真实踩坑）
+
+1. **金丝雀会"鸡生蛋"**：只在注入体里自举 ⇒ 服务端跑 75 秒日志里**一条 `[cava/pathfind]` 都没有**，
+   于是**无法区分「mixin 没生效」和「这段窗口里根本没有寻路」**。
+   修法：加一个**只做自举**的 `MinecraftServer.<init>` HEAD 注入。
+   > ⚠️ **附带硬约束**：**构造器 `@At("HEAD")` 的 handler 必须是 `static`**，
+   > 否则 Mixin 抛 `InvalidInjectionException` 且**整个服务端起不来**（实测崩溃）。这是"启动即崩"级。
+2. **反射读原版 private 字段在生产环境必然失效**：MC 在运行时是 **intermediary** 命名，
+   实测 `NoSuchFieldException: net.minecraft.class_15.penalizeDeepWater`。
+   **必须用 `@Accessor`**，不能用反射。
+3. **性能测量不该依赖 profiler**：本机 async-profiler 不可用、spark 采不到内层帧，
+   注入流改用 `/cava pathfind bench <n>`（同一 jar/存档/mod 集，只改一个 `-D`）。
+   它的**诚实读法**值得推广：
+   > A/B/C 三腿的差（106–131 µs）**小于本机噪声**（B 比 A/C 还慢，物理上不可能）⇒ **钩子边际开销本机测不出**；
+   > 而 D 腿（诊断开关跳过门禁）**396.7 µs ≈ 3.0× 原版**，远超噪声 ⇒
+   > **只要 `cava_pathfind` 还保守回退，开原生就是净亏约 3 倍。**
+   > **在原生真能出路径之前，不宣布任何性能结论。**
+
+### 一条被证伪的担忧（记录下来免得后人重复投入）
+
+注入流担心「档案/区域是每句柄一份可变状态，而寻路跑在工作线程上 ⇒ 只能加锁，并行度=1」，
+并建议做"每线程一句柄"或"档案改成入参"的 ABI 改造。
+
+**captain 用字节码核过：这个前提不成立。**
+`EntityNavigation.findPathToAny` 是**直接 `invokevirtual`** 调 `PathNodeNavigator.findPathToAny`，
+整条调用链上**没有任何 executor 交接** ⇒ **原版寻路是同步跑在调用（主）线程上的**。
+所以那把锁是**防御性**的，不是吞吐瓶颈；**不做 ABI 改造**（拿高风险变更去换一个不存在的问题）。
+新增显式约束：**"原生路径假定主线程调用"** —— 将来若有 mod 把寻路挪到工作线程，这条门禁要重评。
+
 ### 已知且可接受的弱点
 `layout_hash` 公式**不区分字段数/形状相同的结构体**：`CavaPathNode` 与 `CavaCollisionBox` 的
 hash 都是 `0x250ECBE1`。所以**哈希只做"整体漂移"的粗筛**，真正的护栏是**逐字段全表比对**。

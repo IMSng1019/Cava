@@ -178,14 +178,14 @@ Exception in thread "File watcher server" net.rubygrapefruit.platform.NativeExce
 $cmake = 'J:\mc\Cava\tools\cmake\cmake-3.31.2-windows-x86_64\bin\cmake.exe'
 
 # 1) 配置（⚠️ 必须显式给 CMAKE_MAKE_PROGRAM，否则报 "unable to find a build program"）
-& $cmake -S 'J:\mc\Cava' -B 'J:\mc\Cava\build\native-mingw' -G 'MinGW Makefiles' `
+& $cmake -S 'J:\mc\Cava' -B 'J:\mc\Cava\build\native-mingw-p0d' -G 'MinGW Makefiles' `
     -DCMAKE_BUILD_TYPE=Release `
     -DCMAKE_MAKE_PROGRAM=C:/mingw64/bin/mingw32-make.exe `
     -DCMAKE_C_COMPILER=C:/mingw64/bin/gcc.exe `
     -DCMAKE_CXX_COMPILER=C:/mingw64/bin/g++.exe
 
 # 2) 构建
-& $cmake --build 'J:\mc\Cava\build\native-mingw' --parallel
+& $cmake --build 'J:\mc\Cava\build\native-mingw-p0d' --parallel
 ```
 
 **真实输出摘要（✅，2026-09-22，HEAD `6608606`）**：
@@ -275,7 +275,7 @@ CMake Error at native/cmake/CavaFlags.cmake:29 (message):
 # MinGW 产物运行时要 MinGW 运行库；测试 exe 在 build 目录，DLL 在 natives 目录
 $env:PATH = 'C:\mingw64\bin;J:\mc\Cava\natives\windows-x64;' + $env:PATH
 & 'J:\mc\Cava\tools\cmake\cmake-3.31.2-windows-x86_64\bin\ctest.exe' `
-    --test-dir 'J:\mc\Cava\build\native-mingw' --output-on-failure
+    --test-dir 'J:\mc\Cava\build\native-mingw-p0d' --output-on-failure
 ```
 
 **症状与根因（✅）**：直接用 `ctest`（不加 PATH）时三个测试**全部** `Exit code 0xc0000135`（= STATUS_DLL_NOT_FOUND），
@@ -314,8 +314,12 @@ platform     : 1   pointer_size=8
 | --- | --- | --- |
 | `natives/windows-x64/cava.dll` | MinGW（§4.1） | **当前值**：114904 B（13:53，P0-A 修 `PREFIX ""` 之后），导出 10 个 `cava_*` 符号 |
 | ~~`natives/windows-x64/libcava.dll`~~ | MinGW（修复前） | 116933 B，13:51 的产物，已被后续构建覆盖（命名坑见 §4.1） |
-| `build/native-mingw/` | CMake（MinGW） | 目标文件、测试 exe、`import-lib/` |
-| `build/native-msvc2/` | CMake（MSVC） | 同上（MSVC 版） |
+| `build/native-mingw-p0d/` | CMake（MinGW） | 目标文件、测试 exe、`import-lib/` |
+| `build/native-p0d-msvc2/` | CMake（MSVC） | 同上（MSVC 版） |
+
+> **并行纪律（captain 决定 #3，2026-09-22）**：CMake build dir **必须带流标识**（如 `build/native-mingw-p0d`），
+> **不要复用别人的 build 目录**——`check_cxx_compiler_flag` 的结果写进 `CMakeCache.txt`，复用会拿到过期结论（我实测踩过）。
+> 同一时刻只有一个流跑原生构建；`natives/<平台标签>/` 是共享输出目录，**整合与最终产物由 captain 统一构建**。
 | `build/libs/cava-<version>.jar` | Gradle `build` | **❓ 未验证**：当前 Gradle 构建受阻，还没产出 |
 
 `natives/`、`build/`、`tools/`、`.gradle-home/` 都在 `.gitignore` 里——**原生库和构建目录不进 git**。
@@ -359,9 +363,9 @@ platform     : 1   pointer_size=8
 ```powershell
 $env:GRADLE_USER_HOME = 'J:\mc\Cava\.gradle-home'      # 1. 先设这个，否则一切免谈
 $cmake = 'J:\mc\Cava\tools\cmake\cmake-3.31.2-windows-x86_64\bin\cmake.exe'
-& $cmake -S 'J:\mc\Cava' -B 'J:\mc\Cava\build\native-mingw' -G 'MinGW Makefiles' `
+& $cmake -S 'J:\mc\Cava' -B 'J:\mc\Cava\build\native-mingw-p0d' -G 'MinGW Makefiles' `
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_MAKE_PROGRAM=C:/mingw64/bin/mingw32-make.exe `
     -DCMAKE_C_COMPILER=C:/mingw64/bin/gcc.exe -DCMAKE_CXX_COMPILER=C:/mingw64/bin/g++.exe
-& $cmake --build 'J:\mc\Cava\build\native-mingw' --parallel     # 2. 出 natives/windows-x64/libcava.dll
+& $cmake --build 'J:\mc\Cava\build\native-mingw-p0d' --parallel     # 2. 出 natives/windows-x64/libcava.dll
 & '.\gradlew.bat' build --console=plain                            # 3. 归 P0-A（当前受阻于 loom）
 ```

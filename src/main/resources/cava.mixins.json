@@ -9,7 +9,9 @@
 		"pathfind.AmphibiousPathNodeMakerAccessor",
 		"entity.VoxelShapeAccessor",
 		"entity.McMoveAccess",
-		"entity.EntityMoveMixin"
+		"entity.EntityMoveMixin",
+		"push.EntityPushAwayFromMixin",
+		"push.SectionedEntityCacheMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

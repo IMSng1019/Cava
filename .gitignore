@@ -46,6 +46,10 @@ tools/
 .gradle-home/
 testbed/
 
+# 服务端 modpack 参考 jar（174.6 MB / 49 个）—— 明确不入库（用户决定 2026-09-22）。
+# 部署测试服时用脚本从该目录拷贝到 testbed/server/mods/，不要提交。
+优化模组/
+
 
 # java
 

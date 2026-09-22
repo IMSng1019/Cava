@@ -294,3 +294,165 @@
 **6. Lithium × TIS 的交互**：TIS 的 optimizedTNTHighPriority 明说要用更高优先级覆盖 Lithium 的爆炸优化；optimizedFastEntityMovement.compat.lithium 是 @Dynamic 条件注入。TIS fabric.mod.json 声明 breaks lithium<=0.11.0，装的是 0.12.1 不在范围内。
 
 **未验证**：TIS「默认关规则零副作用」只做到常量池门控字符串级；wetExplosionReintroduced 默认值自动提取失败；fastRedstoneDust=true 与 Cava 同点注入的实际执行顺序需真实环境验证。
+
+---
+
+## 7. 测试服部署清单（P0-D 追加，2026-09-22）
+
+> **编号说明**：本文件上方原有的「## 7. 分片调研状态」与附录 A 保持原样（任务书要求不动已有内容），
+> 本节按任务书以「第 7 节：测试服部署清单」为题**追加在文件末尾**。
+> 实际部署由 **P0-E** 落地（`tools/setup-testbed.ps1` 等）；本节把【确切步骤 + 版本核实 + 配置理由 + 卡点】写死，供复现与回填。
+
+### 7.1 现状（全部本机实测）
+
+- 工作区里**没有**现成的服务端根目录（见 `docs/CAVA-launch-notes.md` §3）；`J:\mc\mods\run\saves\新的世界`（17.7 MB）是**客户端存档，未验证**能否给服务端用。
+- 49 个服务端 mod 全在 `J:\mc\Cava\优化模组\服务端模组\`（174.6 MB）。
+  **该目录里没有服务端加载器 jar**：按 `loader|server-launch|installer|fabric-server` 过滤只命中
+  `server-CustomSkinLoader_Universal-15.0.1.jar`（那是 env=client 的误装件，不是加载器）。
+- **已实测落地**（P0-E）：`testbed/server/`（真 Fabric 服务端）、`testbed/dl/`（加载器 jar）、
+  `testbed/mod-plan.tsv`（49 行三档计划）、`testbed/runs/wave0..wave4/`（分波冒烟日志）、
+  `testbed/gate-preview/`（**架构级门**验证目录）。
+- 全部在 `testbed/`（`.gitignore`）——**jar 一个都不进 git**。
+
+### 7.2 装哪种加载器、从哪下（URL 全部 node fetch 实测 200）
+
+| 组件 | 版本 | 来源 / URL | 实测 |
+| --- | --- | --- | --- |
+| **Fabric Server Launcher**（推荐） | loader **0.19.5** + installer **1.1.2** | `https://meta.fabricmc.net/v2/versions/loader/1.20.4/0.19.5/1.1.2/server/jar` | **200** `application/java-archive`；落盘名 `fabric-server-mc1.20.4-loader0.19.5-installer1.1.2.jar`（`testbed/dl/` 实测 181840 B） |
+| 原版服务端 | 1.20.4 | piston-meta → `https://piston-data.mojang.com/v1/objects/8dd1a28015f51b1803213892b50b7b4fc76e594d/server.jar` | size **49150256**、sha1 `8dd1a280…594d`；`testbed/server/server.jar` 实测 **49150256 B** ✅ |
+| Fabric API | **0.96.11+1.20.4**（整合包实际版本） | `https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/0.96.11+1.20.4/fabric-api-0.96.11+1.20.4.jar` | 200 ✅ |
+| （对比）Fabric API | 0.97.3+1.20.4（**项目 `gradle.properties` 里的版本**） | 同 maven 路径 | 200 ✅ |
+
+**版本判据**：meta `v2/versions/loader/1.20.4` 共 253 条，**0.19.5 = 最新 stable**；
+`v2/versions/installer` 最新 stable = **1.1.2**；与 `gradle.properties` 的 `loader_version=0.19.5` 一致。
+
+> ⚠️ **fabric-api 版本分叉（需要 captain 拍板）**：项目构建声明 **0.97.3+1.20.4**，
+> 而整合包实际装的是 **0.96.11+1.20.4**（P0-E 的 `mod-plan.tsv` 也按 0.96.11 铺的）。
+> 本项目的验收语言是「与同一整合包一致」→ **运行侧应当用 0.96.11**；是否把构建侧也降到 0.96.11（或反之）属版本决策。
+
+**Carpet / TIS / GCA 的确切版本（jar 文件名 + jar 内 `fabric.mod.json` 实读）**
+
+| jar 文件名 | modid / version | 声明的依赖 |
+| --- | --- | --- |
+| `[地毯] fabric-carpet-1.20.3-1.4.128+v231205.jar` | `carpet 1.4.128+v231205` | minecraft >1.20.1、fabricloader >=0.14.18、java >=17 |
+| `server-carpet-tis-addition-v1.82.3-mc1.20.4.jar` | `carpet-tis-addition 1.82.3` | **carpet >=1.4.128**、fabricloader >=0.14.25、mixinextras >=0.3.0 |
+| `[Gugle的Carpet附加包] gugle-carpet-addition-2.7.0-1.20.4.jar` | GCA 2.7.0-1.20.4 | — |
+
+### 7.3 一键部署（P0-E 的脚本，均已实测存在）
+
+```powershell
+# 全量 keep 档（默认 -Wave 4）；要最小冒烟用 -Wave 0
+pwsh -File tools/setup-testbed.ps1
+pwsh -File tools/setup-testbed.ps1 -Wave 0
+pwsh -File tools/setup-testbed.ps1 -Force            # 重新下载 jar
+
+# 只重铺 mod（三档策略 + 分波）
+pwsh -File tools/copy-mods.ps1 -Wave 4
+pwsh -File tools/copy-mods.ps1 -Profile full-minus-must-off
+pwsh -File tools/copy-mods.ps1 -Probe easyauth,voicechat
+
+# 起服（就绪判据 = 日志出现 "Done ("；超时用 RCON 优雅停）
+pwsh -File tools/start-server.ps1 -Name smoke -MaxSeconds 180
+pwsh -File tools/start-server.ps1 -Name vanilla-probe -Vanilla -MaxSeconds 60
+```
+
+脚本行为（读源码实测）：
+
+| 脚本 | 做什么 |
+| --- | --- |
+| `tools/setup-testbed.ps1` | node 解析 meta 的 loader/installer → 下 launcher → 下 vanilla 并校验 sha1 → 写**确定性** `eula.txt` / `server.properties` / `fabric-server-launcher.properties`（`serverJar=server.jar`）→ 调 `copy-mods.ps1` |
+| `tools/copy-mods.ps1` | 按三档 + wave 把 49 个 jar 分级拷进 `testbed/server/mods`，其余移到 `testbed/disabled/<tier>/` |
+| `tools/start-server.ps1` | 固定 JVM 参数起服，等 `Done (` 就绪，超时走 RCON 停服；日志落 `testbed/runs/<name>/` |
+| `tools/dl.cjs` / `meta.cjs` / `get-vanilla.cjs` | 下载与 meta 解析（**一律走 node**：本机 PowerShell 的 `Invoke-WebRequest` TLS 全失败） |
+
+### 7.4 三档处理（`testbed/mod-plan.tsv` 实测分档）
+
+| 档 | 数量 | 处置与内容 |
+| --- | --- | --- |
+| `keep` | **33** | 拷进 mods（优化九件套 + 库 + Carpet 三件套 + 功能类） |
+| `noise` | **8** | **必须关**：BlueMap / Axiom / Ledger / ledger-databases / Geyser / AutoModpack / RandomTP / MCMOD |
+| `suggested` | **4** | **建议关**：Floodgate / Syncmatica / voicechat / EasyAuth |
+| `clientenv` | **4** | env=client 误装件（sodium / continuity / CustomSkinLoader / malilib），专用服务端不会加载 |
+
+合计 33+8+4+4 = **49** ✅
+
+> ⚠️ **实测踩到的依赖不变量（务必遵守）**：**TIS 硬依赖 Carpet**。13:55 的 `testbed/server/logs/latest.log` 里服务器**加载失败**：
+>
+> ```
+> Mod resolution failed
+> Immediate reason: [HARD_DEP_NO_CANDIDATE carpet-tis-addition 1.82.3 {depends carpet @ [>=1.4.128]}, ROOT_FORCELOAD_SINGLE …]
+> Fix: add [add:carpet 1.4.128 ([[1.4.128,∞)])], remove [], replace []
+> ```
+>
+> → `keep` 档里 **carpet / gca / tis-addition 必须同进同出**（分波时 wave3 三件一起上）。
+
+### 7.5 server.properties 与启动参数的推荐配置（含理由）
+
+```properties
+# 确定性锚点（改任何一个都会让「逐 tick 一致」失去意义）
+level-seed=20260922
+level-type=minecraft:normal
+generate-structures=true
+randomTickSpeed=3
+difficulty=normal
+view-distance=10
+simulation-distance=10
+sync-chunk-writes=true
+
+# 测量相关
+max-tick-time=-1              # 关看门狗：测量期绝不能被 watchdog 杀进程
+player-idle-timeout=0
+rate-limit=0
+white-list=false
+
+# 布场 / 自动化
+gamemode=creative
+spawn-protection=0
+allow-flight=true
+enable-command-block=true
+function-permission-level=2
+op-permission-level=4
+online-mode=false             # EasyAuth 需要离线模式
+enable-rcon=true
+rcon.port=25575
+rcon.password=cava            # P0-E 用它优雅停服 / 远程执行
+```
+
+**启动参数（`tools/start-server.ps1` 默认值，实测）**：
+
+```
+-Xms2G -Xmx4G -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-preview --enable-native-access=ALL-UNNAMED
+```
+
+- `--enable-preview`：**硬约束**（预览版 class 版本 65.65535；见契约 §2）。
+- `--enable-native-access=ALL-UNNAMED`：消除 FFM 受限方法警告（契约 §2.4）。
+- 自动保存：采集期用 `/save-off`，结束再 `/save-all flush`（`server.properties` 里没有直接的开关；由 scenario 脚本负责）。
+
+### 7.6 EasyAuth 测试账号「必须已登录」怎么落地
+
+- **为什么**：EasyAuth 的 `ServerPlayerEntityMixin.playerTick()` 是 `@Inject(HEAD, cancellable)` →
+  **未登录玩家的整个 playerTick 被取消**，会扭曲实体侧负载分布（清单附录 A.2）。
+- **怎么做**（命令字面量从 EasyAuth 3.2.1 的 `data/easyauth/lang/en_us.json` **实读**）：
+
+| 时机 | 命令 | lang 键 |
+| --- | --- | --- |
+| 首次注册 | `/register <password> <password>` | `registerRequired` |
+| （配了全局密码时） | `/register <global password> <password> <password>` | `registerRequiredWithGlobalPassword` |
+| 每次进服 | `/login <password>`（别名 `/l`） | `loginRequired`：「You are not authenticated! Use /login, /l to authenticate!」 |
+
+- 前提：`online-mode=false`（正版登录时 EasyAuth 直接放行：lang `onlinePlayerLogin = "You are using an online account. No need to log in."`）。
+- **采样前的检查项**：测试账号在 `/list` 里在线，且日志里**没有** `loginRequired` 提示，才可以开始计时采样。
+- 更稳的做法（也是 `mod-plan.tsv` 的默认选择）：**基线测量期间不装 EasyAuth**（`suggested` 档），需要时用 `-Probe easyauth` 单独跑一轮。
+
+### 7.7 已通过的门 / 仍未验证的项
+
+| 项 | 状态 | 证据 |
+| --- | --- | --- |
+| 服务端能真实跑起来（MC 1.20.4 + loader 0.19.5） | ✅ | `testbed/gate-preview/logs/latest.log:80` → `Done (14.193s)! For help, type "help"` |
+| **预览版 class 能被 Fabric Loader 加载（架构级门）** | ✅ **通过** | 同文件 18–24 行：`[CAVA-GATE] mod class file major.minor = 65.65535`、`runtime = 21.0.10+8-LTS-217`、`java.lang.foreign = java.lang.foreign.Linker`、`native strlen("cava") = 4`、`VERDICT = PREVIEW_OK` |
+| 49 个 jar 三档分档 | ✅ | `testbed/mod-plan.tsv`（49 行；33/8/4/4） |
+| 客户端存档 `新的世界` 能否给服务端用 | ❓ 未验证 | 需要拷进 `testbed/server/world` 实跑一次 |
+| wave4 全量 keep 档启动 | ⛔ 当前失败 | `testbed/runs/wave4/server.log`：TIS 缺 Carpet 的 `HARD_DEP_NO_CANDIDATE`（见 §7.4） |
+| spark 四块占比基线 | ❓ 待回填 | 归 **P0-E**（`docs/CAVA-baseline.md`） |
+| 确定性证明（同存档两次运行逐 tick 一致） | ❓ 待回填 | 归 **P0-E + P0-C**（黄金轨迹） |
+

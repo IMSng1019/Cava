@@ -60,6 +60,12 @@ param(
   [string]$JavaProps = '',
   # 跑缺陷 1 的反面证据：cava pathfind invalidate <preset>（改窗口内方块 ⇒ 下一次求解必须看到）
   [switch]$Invalidate,
+  # P1-CROSS：**跨 tick 复用**的失效实测（arm → tick sprint N → check）。
+  # 与 -Invalidate 的区别：中间**真的推进了 N 个真实 tick**（tick freeze 下同 tick 与跨 tick 分不开）。
+  #   -XTick -XTickArms write,nowrite -XTickGaps 1,5,20,100
+  [switch]$XTick,
+  [string]$XTickGaps = '1,5,20,100',
+  [string]$XTickArms = 'write,nowrite',
   # 只跑 invalidate / diag，不跑 perf 计时循环（对照腿省时间）
   [switch]$SkipPerf
 )
@@ -565,6 +571,37 @@ foreach ($preset in $want) {
     Select-String -LiteralPath $srv.Log -Pattern $invPat | Select-Object -Last 1 |
       ForEach-Object { Write-Host "  $($_.Line.Trim())" }
   }
+  # --- P1-CROSS：跨 tick 复用正确性（arm → **推进真实 tick** → check）---
+  if ($XTick) {
+    $arms = @($XTickArms.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $gaps = @($XTickGaps.Split(',') | ForEach-Object { [int]$_.Trim() } | Where-Object { $_ -ge 1 })
+    foreach ($arm in $arms) {
+      foreach ($gap in $gaps) {
+        $armPat = "XTICK phase=arm preset=$preset arm=$arm "
+        $b1 = (Select-String -LiteralPath $srv.Log -Pattern $armPat -ErrorAction SilentlyContinue | Measure-Object).Count
+        Rcon "cava pathfind xtick arm $preset $arm" | Out-Null
+        if (-not (Wait-LogCount $armPat $b1 300)) { Write-Host "[perf] !! XTICK arm 没有回执行（$preset/$arm）" }
+        Select-String -LiteralPath $srv.Log -Pattern $armPat | Select-Object -Last 1 |
+          ForEach-Object { Write-Host "  $($_.Line.Trim())" }
+        # **推进真实 tick**：tick sprint 会真的跑 tick（真实服务器上世界变更只在 tick 内发生）
+        Rcon 'tick freeze' | Out-Null
+        Rcon ("tick sprint " + $gap) | Out-Null
+        $swS = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($swS.Elapsed.TotalSeconds -lt 120) {
+          Start-Sleep -Milliseconds 500
+          $q = Rcon 'tick query'
+          if ("$q" -notmatch 'sprint') { break }
+        }
+        Start-Sleep -Milliseconds 800
+        $chkPat = "XTICK phase=check preset=$preset "
+        $b2 = (Select-String -LiteralPath $srv.Log -Pattern $chkPat -ErrorAction SilentlyContinue | Measure-Object).Count
+        Rcon "cava pathfind xtick check $preset" | Out-Null
+        if (-not (Wait-LogCount $chkPat $b2 300)) { Write-Host "[perf] !! XTICK check 没有回执行（$preset/$arm/gap=$gap）" }
+        Select-String -LiteralPath $srv.Log -Pattern $chkPat | Select-Object -Last 1 |
+          ForEach-Object { Write-Host "  $($_.Line.Trim())" }
+      }
+    }
+  }
   if ($SkipPerf) { continue }
   foreach ($mode in $modeList) {
     $n = if ($mode -eq 'repush') { $RepushN[$preset] } else { $PresetN[$preset] }
@@ -580,7 +617,7 @@ foreach ($preset in $want) {
 }
 
 Start-Sleep -Seconds 1
-$lines = Select-String -LiteralPath $srv.Log -Pattern 'PERF id=|PERFDETAIL id=|SITE |DIAG |EXPLORE |INVALIDATE |BENCH id=|SWEEP id=|AIDIST|TICKSTAT ticks=|接管条件|pathfind\] 原生接管|PROBE_|ai-load' -ErrorAction SilentlyContinue |
+$lines = Select-String -LiteralPath $srv.Log -Pattern 'PERF id=|PERFDETAIL id=|SITE |DIAG |EXPLORE |INVALIDATE |XTICK |BENCH id=|SWEEP id=|AIDIST|TICKSTAT ticks=|接管条件|pathfind\] 原生接管|PROBE_|ai-load' -ErrorAction SilentlyContinue |
   ForEach-Object { $_.Line.Trim() }
 Stop-LegServer $srv
 
@@ -604,6 +641,7 @@ $head += "#javaProp=$($extraProps -join ' ')"
 $head += "#aiZombies=$AiZombies aiTicks=$AiTicks aiWarmup=$AiWarmup aiLoad=$AiLoad"
 $head += "#sweep=$Sweep sweepN=$SweepN sweepMode=$SweepMode"
 $head += "#gateMin=$GateMin"
+$head += "#xTick=$XTick xTickArms=$XTickArms xTickGaps=$XTickGaps"
 $head += "#aidistA=$aidistAfter"
 $head += "#tickstatA=$tickAfter"
 $head += "#javaArgs=$($srv.CommandLine)"

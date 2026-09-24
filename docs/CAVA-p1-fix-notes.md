@@ -546,3 +546,25 @@ pwsh -File tools/parity-perf-pathfind.ps1 -Compare -OffTag off -OnTag on
   成对对照（`compareAll`）进一步给出：接管调用上原生 157.7 µs vs Java 129.6 µs（**1.22x 慢**）。
 - 结论：**开关仍然是 NO-GO**（R2 判据①②③ 全不满足），而且**按规模分流不能翻正**（逐距离桶全亏、回退率与规模无关）。
   本文件 §8.4 建议的第 1 条（分流）到此**已被数据否决**，第 2 条（窗口策略/ABI）才是唯一有希望的方向。
+
+---
+
+## 附录 O【P1-CROSS 追加】§9 第 7 条缺口已闭合：跨 tick 复用在**活 tick 服务器**上的实测 = **命中率 0.05%，这一注判负**
+
+`docs/CAVA-p1-cross-notes.md`（P1-CROSS 流，响应 R7）把本文件 §9 第 7 条"跨 tick 复用在活 tick 服务器上的
+收益/风险实测"做完了，并把 §2.2 留的"金丝雀计数还没有出口"接上了
+（`RegionMirror.report()` 的计数现在同时出现在 `/cava pathfind stats` 与 `AIDIST` 回执行里）：
+
+- **命中率**：跨 tick 复用的前提是"同一个矩形再次被求解"。两条 `crosstick=false` 对照腿实测
+  **1 次 / 1002 次调用 = 0.0998%**；四条腿（1972 次调用）合计 **1 次**；**同 tick 复用 0 次**
+  ⇒ 真实 AI 负载下每一次原生调用都**冷推一个新窗口**（`pushes == nativeCalls`：499/503/497/473）。
+- **跨 tick 失效正确性（真实 tick 推进）**：新增 `cava pathfind xtick arm/check`，改窗口内方块 →
+  推进 **2 / 6 / 21 / 101** 个真实 tick → 再求解**看到新地形**（四条 `write` 臂全 PASS）；
+  关掉失效钩子（`-Dcava.mirror.invalidation=false`）⇒ **全变红**（`no-invalidation` +
+  `stale-result(B==A)` / `B!=javaRef`）。
+- **净收益（P1-NET 同一套配对口径）**：**−25.64 / −15.38 / −17.41 / −11.52 µs/tick**（四条腿全负）；
+  把镜像推送成本**整块抹掉**（不可达上界）之后仍然 **≤ 0**（−14.63 ~ −2.51）⇒ 推送不是符号所在的位置，
+  **回退白付**（20–40 ms / 2400 tick）才是。
+- 结论：`cava.mirror.reuse.crosstick` **保持默认 false**；R4 的打开条件只完成了一半
+  （金丝雀有了，**区段卸载失效源仍未补**，且身份表按 `ChunkSection` 实例建 ⇒ 重载即漏失效）。
+

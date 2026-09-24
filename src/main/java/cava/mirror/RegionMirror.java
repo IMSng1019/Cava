@@ -567,6 +567,40 @@ public final class RegionMirror implements RegionSource {
         return lastDetail;
     }
 
+    // ------------------------------------------------------------------
+    // P1-CROSS：推送成本的**累计出口**（跨 tick 复用这一注的判决需要一个数：
+    // "被省掉的那些推送，每次本来要花多少钱"）。
+    // 为什么不能从 report() 里拿：它只给"平均值"，而窗口内的增量要按 reset 前后的差算。
+    // ------------------------------------------------------------------
+
+    /** 累计推送耗时（ns；与 {@link #pushes()} 相除 = 每次冷推送的平均成本）。 */
+    public long pushNanos() {
+        synchronized (lock) {
+            return totalNanos;
+        }
+    }
+
+    /** 累计推送耗时里"读世界填缓冲"的那一段（ns）。 */
+    public long pushFillNanos() {
+        synchronized (lock) {
+            return fillNanos;
+        }
+    }
+
+    /** 累计推送耗时里"分配 + 拷贝到原生内存"的那一段（ns）。 */
+    public long pushAllocNanos() {
+        synchronized (lock) {
+            return allocNanos;
+        }
+    }
+
+    /** 累计推送耗时里"跨界上传"的那一段（ns）。 */
+    public long pushUploadNanos() {
+        synchronized (lock) {
+            return uploadNanos;
+        }
+    }
+
     /** 已推送次数。 */
     public long pushes() {
         return pushes;

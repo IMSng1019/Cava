@@ -132,9 +132,24 @@ public final class PathfindPerfBench {
                     .then(CommandManager.argument("preset", StringArgumentType.word())
                             .executes(ctx -> invalidate(ctx.getSource(),
                                     StringArgumentType.getString(ctx, "preset"))));
+            // P1-CROSS：**跨 tick 复用**的失效实测（P1-FIX 那条只覆盖"同一个 tick"）：
+            //   xtick arm <preset> <write|nowrite>  → 解一次 + （write 时）改窗口内方块，记指纹与 tick
+            //   （脚本在两条命令之间跑 tick sprint N = **推进真实 tick**）
+            //   xtick check <preset>                → 再解一次 + Java 参考 + 还原地形 + 判定
+            LiteralArgumentBuilder<ServerCommandSource> xtick = CommandManager.literal("xtick")
+                    .then(CommandManager.literal("arm")
+                            .then(CommandManager.argument("preset", StringArgumentType.word())
+                                    .then(CommandManager.argument("arm", StringArgumentType.word())
+                                            .executes(ctx -> xtickArm(ctx.getSource(),
+                                                    StringArgumentType.getString(ctx, "preset"),
+                                                    StringArgumentType.getString(ctx, "arm"))))))
+                    .then(CommandManager.literal("check")
+                            .then(CommandManager.argument("preset", StringArgumentType.word())
+                                    .executes(ctx -> xtickCheck(ctx.getSource(),
+                                            StringArgumentType.getString(ctx, "preset")))));
             dispatcher.register(CommandManager.literal("cava")
                     .then(CommandManager.literal("pathfind").then(perf).then(site).then(explore).then(diag)
-                            .then(sweep).then(invalidate)));
+                            .then(sweep).then(invalidate).then(xtick)));
             LOG.info("[cava/pathfind] /cava pathfind {{perf <preset> <count> [reuse|repush]|site <preset>}} 已注册（presets={}）",
                     PathfindPerfScenario.names());
         } catch (Throwable t) {
@@ -983,6 +998,238 @@ public final class PathfindPerfBench {
         LOG.info(line);
         source.sendFeedback(() -> Text.literal(line), false);
         return verdict.startsWith("PASS") ? 1 : 0;
+    }
+
+
+    // ------------------------------------------------------------------
+    // P1-CROSS：**跨 tick 复用**的正确性实测（xtick arm / check）
+    // ------------------------------------------------------------------
+
+    /**
+     * 一次"跨 tick 复用"实验的状态：{@code arm} 阶段存，{@code check} 阶段用。
+     *
+     * <p>为什么要拆成两条命令 + 中间推进真实 tick：P1-FIX 的 {@code invalidate} 只覆盖
+     * **同一个 tick**（{@code tick freeze} 下连"同 tick"与"跨 tick"都分不开）。跨 tick 复用的
+     * 判决必须让**世界真的 tick 过**：脚本在 arm 与 check 之间跑 {@code tick sprint N}，
+     * check 回执里的 {@code ticksElapsed} 就是"真的推进了几个 tick"的原文证据。
+     */
+    private record XtickState(String preset, String arm, long tickA, String fa,
+                              BlockPos putPos, BlockState old, String put,
+                              long hookIn0, long inval0, long mirrorInval0,
+                              long pushes0, long reuse0, long same0, long cross0, long blocked0) {
+    }
+
+    private static final java.util.concurrent.atomic.AtomicReference<XtickState> XTICK =
+            new java.util.concurrent.atomic.AtomicReference<>();
+
+    private static RegionMirror mirrorOf(ServerWorld world) {
+        RegionSource src = PathfindMirrorBridge.get(world);
+        return (src instanceof RegionMirror rm) ? rm : null;
+    }
+
+    /**
+     * {@code cava pathfind xtick arm <preset> <write|nowrite>}：解一次（A），必要时改窗口内方块。
+     *
+     * <p>{@code write} = 缺陷 1 的跨 tick 版（改窗口内方块 ⇒ 推进 tick ⇒ 再解必须看到新地形）；
+     * {@code nowrite} = **复用真的命中**的那条（什么都不改 ⇒ 推进 tick ⇒ 再解必须复用且结果与 Java 一致）。
+     * 两条缺一不可：只有 write 的话，"复用根本没命中"也会 PASS（测试是空的）。
+     */
+    private static int xtickArm(ServerCommandSource source, String name, String armRaw) {
+        String arm = armRaw == null ? "" : armRaw.toLowerCase(Locale.ROOT);
+        if (!arm.equals("write") && !arm.equals("nowrite")) {
+            source.sendError(Text.literal("xtick arm: 第二参数只能是 write|nowrite"));
+            return 0;
+        }
+        PathfindPerfScenario.Preset p = PathfindPerfScenario.byName(name);
+        if (p == null) {
+            source.sendError(Text.literal("未知 preset：" + name));
+            return 0;
+        }
+        ServerWorld world = source.getServer().getOverworld();
+        PathfindPerfScenario.build(world, p);
+        BlockPos target = PathfindPerfScenario.target(p);
+        MobEntity mob = PathfindPerfScenario.realizeMob(world, p);
+        if (mob == null) {
+            source.sendError(Text.literal("xtick arm: 造不出生物"));
+            return 0;
+        }
+        RegionMirror mirror = mirrorOf(world);
+        long pushes0 = mirror == null ? -1 : mirror.pushes();
+        long reuse0 = mirror == null ? -1 : mirror.reuseSkips();
+        long same0 = mirror == null ? -1 : mirror.reuseSameTickHits();
+        long cross0 = mirror == null ? -1 : mirror.crossTickReuseHits();
+        long blocked0 = mirror == null ? -1 : mirror.crossTickReuseBlocked();
+        try {
+            Path a = PathfindPerfScenario.invoke(world, mob, p, target);
+            String fa = fingerprint(a);
+            long hookIn0 = SectionOriginRegistry.inWindowHits();
+            long inval0 = SectionOriginRegistry.invalidations();
+            long mirrorInval0 = mirror == null ? -1 : mirror.invalidationCount();
+            BlockPos putPos = null;
+            BlockState old = null;
+            String put = "(none)";
+            if (arm.equals("write")) {
+                PathNode pick = null;
+                if (a != null) {
+                    for (int i = 1; i < a.getLength(); i++) {
+                        PathNode n = a.getNode(i);
+                        if (n != null && n.type != net.minecraft.entity.ai.pathing.PathNodeType.BLOCKED) {
+                            pick = n;
+                            break;
+                        }
+                    }
+                }
+                if (pick == null) {
+                    String bad = "[cava/pathfind] XTICK phase=arm preset=" + p.name() + " arm=" + arm
+                            + " verdict=RED(no-usable-node)";
+                    LOG.warn(bad);
+                    source.sendError(Text.literal(bad));
+                    return 0;
+                }
+                putPos = new BlockPos(pick.x, pick.y, pick.z);
+                old = world.getBlockState(putPos);
+                put = "(" + pick.x + "," + pick.y + "," + pick.z + ")";
+                // 走 ServerWorld.setBlockState ⇒ WorldChunk.setBlockState ⇒ ChunkSection.setBlockState（主钩子）
+                world.setBlockState(putPos, Blocks.STONE.getDefaultState(), 3);
+            }
+            long tickA = world.getTime();
+            XTICK.set(new XtickState(p.name(), arm, tickA, fa, putPos, old, put,
+                    hookIn0, inval0, mirrorInval0, pushes0, reuse0, same0, cross0, blocked0));
+            String line = "[cava/pathfind] XTICK phase=arm preset=" + p.name() + " arm=" + arm
+                    + " tickA=" + tickA + " a=" + fa + " put=" + put
+                    + " crossTickEnabled=" + RegionMirror.crossTickReuseEnabled()
+                    + " invalidationEnabled=" + SectionOriginRegistry.invalidationEnabled()
+                    + " mirrorPushes=" + pushes0 + " mirrorCrossTick=" + cross0
+                    + " mirrorCrossBlocked=" + blocked0;
+            LOG.info(line);
+            source.sendFeedback(() -> Text.literal(line), false);
+            return 1;
+        } finally {
+            mob.discard();
+        }
+    }
+
+    /**
+     * {@code cava pathfind xtick check <preset>}：再解一次（B）+ Java 参考（C）+ 还原地形 + 判定。
+     *
+     * <p><b>不重铺场地</b>：{@link PathfindPerfScenario#build} 会把通道层清成空气 ⇒ 会把 arm 阶段
+     * 放的那块石头抹掉，测试就空了。地形是 arm 阶段留下的现场。
+     */
+    private static int xtickCheck(ServerCommandSource source, String name) {
+        PathfindPerfScenario.Preset p = PathfindPerfScenario.byName(name);
+        if (p == null) {
+            source.sendError(Text.literal("未知 preset：" + name));
+            return 0;
+        }
+        XtickState st = XTICK.getAndSet(null);
+        if (st == null || !st.preset().equals(p.name())) {
+            String bad = "[cava/pathfind] XTICK phase=check preset=" + name
+                    + " verdict=ERROR(no-arm)（必须先跑 xtick arm " + name + " write|nowrite）";
+            LOG.warn(bad);
+            source.sendError(Text.literal(bad));
+            return 0;
+        }
+        ServerWorld world = source.getServer().getOverworld();
+        BlockPos target = PathfindPerfScenario.target(p);
+        MobEntity mob = PathfindPerfScenario.realizeMob(world, p);
+        if (mob == null) {
+            source.sendError(Text.literal("xtick check: 造不出生物"));
+            return 0;
+        }
+        String verdict;
+        String extra = "";
+        try {
+            RegionMirror mirror = mirrorOf(world);
+            boolean mobAtStart = mob.getBlockPos().equals(p.start());
+            long tickB = world.getTime();
+            long ticks = tickB - st.tickA();
+            Path b = PathfindPerfScenario.invoke(world, mob, p, target);
+            String fb = fingerprint(b);
+            long hookIn1 = SectionOriginRegistry.inWindowHits();
+            long inval1 = SectionOriginRegistry.invalidations();
+            long mirrorInval1 = mirror == null ? -1 : mirror.invalidationCount();
+            long pushes1 = mirror == null ? -1 : mirror.pushes();
+            long reuse1 = mirror == null ? -1 : mirror.reuseSkips();
+            long same1 = mirror == null ? -1 : mirror.reuseSameTickHits();
+            long cross1 = mirror == null ? -1 : mirror.crossTickReuseHits();
+            long blocked1 = mirror == null ? -1 : mirror.crossTickReuseBlocked();
+            // Java 参考 C：同一条入口、同一块地形、同一只生物的位置，只把原生接管临时关掉
+            String prop = PathfindSwitches.PROP_NATIVE;
+            String oldProp = System.getProperty(prop);
+            System.setProperty(prop, "false");
+            Path c;
+            try {
+                c = PathfindPerfScenario.invoke(world, mob, p, target);
+            } finally {
+                if (oldProp == null) {
+                    System.clearProperty(prop);
+                } else {
+                    System.setProperty(prop, oldProp);
+                }
+            }
+            String fc = fingerprint(c);
+            // 还原地形（**在读完所有计数之后**：还原本身也会触发一次失效钩子）
+            if (st.putPos() != null) {
+                world.setBlockState(st.putPos(), st.old(), 3);
+            }
+            extra = " restored=" + (st.old() == null ? "(none)" : st.old().getBlock().getTranslationKey());
+            StringBuilder red = new StringBuilder();
+            boolean stale = fb.equals(st.fa());
+            boolean matchJava = fb.equals(fc);
+            if (st.arm().equals("write")) {
+                if (hookIn1 - st.hookIn0() <= 0) {
+                    red.append("hook-no-window-hit;");
+                }
+                if (inval1 - st.inval0() <= 0) {
+                    red.append("no-invalidation;");
+                }
+                if (stale) {
+                    red.append("stale-result(B==A);");
+                }
+                if (!matchJava) {
+                    red.append("B!=javaRef;");
+                }
+            } else {
+                // nowrite：只有"跨 tick 复用真的命中了"才算测到东西；否则这次对照是空的
+                if (cross1 - st.cross0() <= 0) {
+                    red.append("no-cross-tick-reuse(blocked=+").append(blocked1 - st.blocked0()).append(");");
+                }
+                if (!stale) {
+                    red.append("A!=B;");
+                }
+                if (!matchJava) {
+                    red.append("B!=javaRef;");
+                }
+            }
+            verdict = red.length() == 0 ? "PASS" : "RED(" + red + ")";
+            String line = "[cava/pathfind] XTICK phase=check preset=" + p.name() + " arm=" + st.arm()
+                    + " verdict=" + verdict
+                    + " tickA=" + st.tickA() + " tickB=" + tickB + " ticksElapsed=" + ticks
+                    + " a=" + st.fa() + " b=" + fb + " c=" + fc
+                    + " hookIn=" + st.hookIn0() + "->" + hookIn1 + "(+" + (hookIn1 - st.hookIn0()) + ")"
+                    + " invalidations=" + st.inval0() + "->" + inval1 + "(+" + (inval1 - st.inval0()) + ")"
+                    + " mirrorInval=" + st.mirrorInval0() + "->" + mirrorInval1
+                    + "(+" + (mirrorInval1 - st.mirrorInval0()) + ")"
+                    + " mirrorPushes=" + st.pushes0() + "->" + pushes1 + "(+" + (pushes1 - st.pushes0()) + ")"
+                    + " mirrorReuse=" + st.reuse0() + "->" + reuse1 + "(+" + (reuse1 - st.reuse0()) + ")"
+                    + " mirrorSameTick=" + st.same0() + "->" + same1 + "(+" + (same1 - st.same0()) + ")"
+                    + " mirrorCrossTick=" + st.cross0() + "->" + cross1 + "(+" + (cross1 - st.cross0()) + ")"
+                    + " mirrorCrossBlocked=" + st.blocked0() + "->" + blocked1
+                    + "(+" + (blocked1 - st.blocked0()) + ")"
+                    + " put=" + st.put()
+                    + " mobAtStart=" + mobAtStart
+                    + " crossTickEnabled=" + RegionMirror.crossTickReuseEnabled()
+                    + " invalidationEnabled=" + SectionOriginRegistry.invalidationEnabled()
+                    + extra;
+            LOG.info(line);
+            source.sendFeedback(() -> Text.literal(line), false);
+            return verdict.startsWith("PASS") ? 1 : 0;
+        } catch (Throwable t) {
+            LOG.error("[cava/pathfind] XTICK phase=check preset=" + name + " 抛出异常", t);
+            return 0;
+        } finally {
+            mob.discard();
+        }
     }
 
     private static void fail(ServerCommandSource source, long id, String preset, String mode, int count, String reason) {

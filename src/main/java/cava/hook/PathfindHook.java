@@ -4,6 +4,7 @@ import cava.canary.HookCanary;
 import cava.ffm.CavaLayouts;
 import cava.ffm.CavaNative;
 import cava.mirror.RegionSource;
+import cava.mirror.SectionOriginRegistry;
 import cava.mixin.pathfind.PathNodeNavigatorAccessor;
 import cava.subsystem.SubsystemRegistry;
 import java.lang.foreign.Arena;
@@ -94,6 +95,93 @@ public final class PathfindHook {
     private final AtomicLong unaccounted = new AtomicLong();
     /** 不在服务端线程上跑的调用数（"寻路是不是主线程"的直接证据）。 */
     private final AtomicLong offThreadCalls = new AtomicLong();
+
+    // ------------------------------------------------------------------
+    // P1-CROSS：镜像账本窗口（"跨 tick 复用"这一注的**核心观测量**）
+    // ------------------------------------------------------------------
+    // 为什么放在这里：RegionMirror.report() 在此之前**没有调用点**（R5 记的可观测性待办），
+    // 而跨 tick 复用的判决线就是 pushes / reuseSkips / crossTickReuseBlocked 三个数的比例。
+    // 口径与其它账本一致：reset 时打一次快照，报告时给**窗口内增量**（sprint 前后相减）。
+
+    /** reset 时的镜像计数快照（-1 = 当时拿不到镜像实例）。 */
+    private final AtomicLong mPush0 = new AtomicLong(-1);
+    private final AtomicLong mReuse0 = new AtomicLong(-1);
+    private final AtomicLong mSame0 = new AtomicLong(-1);
+    private final AtomicLong mCross0 = new AtomicLong(-1);
+    private final AtomicLong mBlocked0 = new AtomicLong(-1);
+    private final AtomicLong mInval0 = new AtomicLong(-1);
+    private final AtomicLong mFail0 = new AtomicLong(-1);
+    private final AtomicLong mCells0 = new AtomicLong(-1);
+    private final AtomicLong mPushNanos0 = new AtomicLong(-1);
+    private final AtomicLong hSection0 = new AtomicLong(-1);
+    private final AtomicLong hInWindow0 = new AtomicLong(-1);
+    private final AtomicLong hInval0 = new AtomicLong(-1);
+
+    /** 当前进程内的镜像实现（拿不到 = null）。 */
+    public static cava.mirror.RegionMirror mirrorInstance() {
+        return PathfindMirrorBridge.getGlobal() instanceof cava.mirror.RegionMirror m ? m : null;
+    }
+
+    /** 快照镜像侧计数（{@link #resetLedger()} 里调用）：此后 {@link #aiDistReport()} 报窗口内增量。 */
+    public void snapshotMirrorCounters() {
+        cava.mirror.RegionMirror m = mirrorInstance();
+        mPush0.set(m == null ? -1 : m.pushes());
+        mReuse0.set(m == null ? -1 : m.reuseSkips());
+        mSame0.set(m == null ? -1 : m.reuseSameTickHits());
+        mCross0.set(m == null ? -1 : m.crossTickReuseHits());
+        mBlocked0.set(m == null ? -1 : m.crossTickReuseBlocked());
+        mInval0.set(m == null ? -1 : m.invalidationCount());
+        mFail0.set(m == null ? -1 : m.failures());
+        mCells0.set(m == null ? -1 : m.cellsCopied());
+        mPushNanos0.set(m == null ? -1 : m.pushNanos());
+        hSection0.set(SectionOriginRegistry.sectionHits());
+        hInWindow0.set(SectionOriginRegistry.inWindowHits());
+        hInval0.set(SectionOriginRegistry.invalidations());
+    }
+
+    /** 增量（快照缺失时按"从 0 开始"处理，绝不返回负数）。 */
+    private static long win(long now, AtomicLong base) {
+        long b = base.get();
+        return b < 0 ? now : Math.max(0L, now - b);
+    }
+
+    /**
+     * 镜像账本一行（**窗口内增量**）：跨 tick 复用能不能省下推送，就看
+     * {@code mirrorCrossBlocked / (mirrorCrossBlocked + mirrorPushes)} 这个比例。
+     */
+    public String mirrorReport() {
+        cava.mirror.RegionMirror m = mirrorInstance();
+        if (m == null) {
+            return "mirror=(none)";
+        }
+        long pushes = win(m.pushes(), mPush0);
+        long cross = win(m.crossTickReuseHits(), mCross0);
+        long blocked = win(m.crossTickReuseBlocked(), mBlocked0);
+        long pushNanos = win(m.pushNanos(), mPushNanos0);
+        StringBuilder sb = new StringBuilder();
+        sb.append("mirrorPushes=").append(pushes)
+                .append(" mirrorReuse=").append(win(m.reuseSkips(), mReuse0))
+                .append(" mirrorSameTick=").append(win(m.reuseSameTickHits(), mSame0))
+                .append(" mirrorCrossTick=").append(cross)
+                .append(" mirrorCrossBlocked=").append(blocked)
+                .append(" mirrorInval=").append(win(m.invalidationCount(), mInval0))
+                .append(" mirrorFail=").append(win(m.failures(), mFail0))
+                .append(" mirrorCells=").append(win(m.cellsCopied(), mCells0))
+                .append(" mirrorPushMs=").append(ms(pushNanos))
+                .append(" mirrorPushUs=").append(pushes == 0 ? "0.0"
+                        : String.format(java.util.Locale.ROOT, "%.2f", pushNanos / 1000.0 / pushes))
+                .append(" mirrorCrossTickEnabled=").append(cava.mirror.RegionMirror.crossTickReuseEnabled())
+                .append(" mirrorInvalidationEnabled=").append(SectionOriginRegistry.invalidationEnabled())
+                .append(" hookSectionHits=").append(win(SectionOriginRegistry.sectionHits(), hSection0))
+                .append(" hookInWindow=").append(win(SectionOriginRegistry.inWindowHits(), hInWindow0))
+                .append(" hookInvalidations=").append(win(SectionOriginRegistry.invalidations(), hInval0));
+        return sb.toString();
+    }
+
+    /** 原生一侧的耗时拆分（窗口内增量）：{@code prepMs} = 镜像推送 + 档案上传，{@code solveMs} = cava_pathfind。 */
+    public String nativeSplitReport() {
+        return "prepMs=" + ms(uploadNanos.get()) + " solveMs=" + ms(solveNanos.get());
+    }
 
     /** 起点→目标 3D 切比雪夫距离（方块）——分流的判据量，也是"真实 AI 规模分布"的一半。 */
     private final CallStats distStats = new CallStats();
@@ -853,6 +941,9 @@ public final class PathfindHook {
         sb.append(' ').append(budgetStats.fields("budget", 1.0, ""));
         sb.append(" budgetHist=").append(budgetStats.histogram(new long[] {
                 256, 512, 1024, 2048, 4096, 8192, 16384, 32768}));
+        // P1-CROSS：镜像账本（推送/复用/跨tick/失效）+ 原生耗时拆分（推送+档案 vs 求解）
+        sb.append(' ').append(mirrorReport());
+        sb.append(' ').append(nativeSplitReport());
         return sb.toString();
     }
 
@@ -905,6 +996,8 @@ public final class PathfindHook {
         java.util.Arrays.fill(bucketFallback, 0L);
         java.util.Arrays.fill(bucketGated, 0L);
         java.util.Arrays.fill(bucketLenSum, 0L);
+        // P1-CROSS：镜像账本的窗口起点（pushes / reuse / crossTick / invalidations）
+        snapshotMirrorCounters();
     }
 
     /**
@@ -1062,6 +1155,9 @@ public final class PathfindHook {
                 + " errors=" + errors.get()
                 + " disabled=" + disabled
                 + " " + fallbackReport()
+                // R5 的可观测性待办（P1-CROSS 落地）：RegionMirror.report() 在此之前没有调用点，
+                // /cava pathfind stats 里看不到镜像账本 —— 打开跨 tick 复用必须看得见这三个数。
+                + " " + mirrorReport()
                 + " reasons=" + reasonSummary();
     }
 

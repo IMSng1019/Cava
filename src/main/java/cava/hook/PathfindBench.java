@@ -111,7 +111,9 @@ public final class PathfindBench {
                                                     IntegerArgumentType.integer(1, MAX_ITERATIONS))
                                             .executes(ctx -> bench(ctx.getSource(),
                                                     IntegerArgumentType.getInteger(ctx, "count")))))));
-            LOG.info("[cava/pathfind] /cava pathfind {{stats|probe|bench <n>}} 已注册");
+            // P1-PERF：大搜索空间的 perf bench 与 site 命令（同一个注册时机，避免时序问题）
+            PathfindPerfBench.ensureRegistered(server);
+            LOG.info("[cava/pathfind] /cava pathfind {{stats|probe|bench <n>|perf <preset> <n> [reuse|repush]|site <preset>}} 已注册");
         } catch (Throwable t) {
             REGISTERED.set(false);
             LOG.error("[cava/pathfind] 命令注册失败（不影响寻路）", t);

@@ -426,3 +426,39 @@ vs 起服后 `client-save-after-boot.json`（`e49afcd3…`，2933 区块，`Time
     pwsh -File tools/run-scenario.ps1 -Scenario tools/scenarios/measure-jfr-loaded.txt -Name measure-jfr-loaded -JfrFile J:\mc\Cava\testbed\runs\measure-jfr-loaded\cava.jfr
     & 'C:\Program Files\Java\jdk-21\bin\jfr.exe' print --events jdk.ExecutionSample --stack-depth 40 testbed\runs\measure-jfr-loaded\cava.jfr > testbed\runs\measure-jfr-loaded\jfr-samples.txt
     & $node tools/jfr-buckets.cjs testbed\runs\measure-jfr-loaded\jfr-samples.txt --report
+
+---
+
+## 7. 【追加】P1-PERF：大搜索空间下的 native on/off 性能与一致性（2026-09-24）
+
+P0-E 这份基线里的"寻路"两格（4.3 节：`class_13` 采样 0.0%，判定为**采样器分辨率不可信**）
+在本轮被**另一条路**补上了：不靠采样器，直接构造大搜索空间的合成场景，逐调用计时 + 逐字段比对。
+
+- **全文（含命令、回执原文、产物哈希、两处缺陷的定位）**：`docs/CAVA-pathfind-perf.md`
+- 驱动脚本：`tools/parity-perf-pathfind.ps1`（私有测试服 `testbed\perf-pathfind`，端口 25660/25661）
+- 场景与 bench：`src/main/java/cava/hook/PathfindPerf{Scenario,Bench}.java`（`/cava pathfind perf|site|diag|explore`）
+
+三条直接与这份基线有关的实测结论：
+
+1. **原 4.3 节"寻路占比 0.0%"确实只是采样器问题**：本整合包上 40 僵尸 + 1 村民的负载实测
+   **0.22 次寻路/tick**（1200 tick 冲刺、前后金丝雀差值），单次调用从 33 µs（1 节点）
+   到 10.6 ms（138 节点强制绕行）/ 1.86 ms（503 节点迷宫，vanilla 侧）不等。
+2. **大场景下 native 更快，且随规模增长**：去掉两腿共有的 ChunkCache 构建后
+   128 节点 2.53x、200 节点 2.62x、503 节点 3.04x；强制每次重推镜像窗口时仍有 1.28x–1.60x。
+   把实测频率 0.22 次/tick 乘上去，maze63 规模每 tick 约省 **269 µs**（投影，不是直测）。
+3. **但一致性不通过**：`detour128` 场景两腿在 reuse/repush 两种模式下都出现差异 ——
+   ①镜像窗口（起点终点包围盒 + 4）装不下绕行路径 ⇒ native 停在墙前（64 vs 128 节点）；
+   ②镜像的"同矩形复用"**没有任何失效来源**（`ChunkSection.setBlockState` 主钩子在仓库里不存在）
+   ⇒ 地形改了 native 不知道，实测**路径穿过 8 格实心石头**。
+   **在这两条修掉之前，P1 不能算"与同整合包 native 关闭逐 tick 一致"。**
+
+另外两条与基线环境有关的实测更正：
+
+- **"生物被静默移除"在 `testbed\perf-pathfind` 上没有复现**：NoAI 与带 AI 的猪在解冻世界里
+  30 秒（661 tick）后都还活着；40 只僵尸在 1200 tick 里真实发起了 259/278 次寻路。
+  （共享 `testbed\gate-preview` 上当年的观测没有在本目录复现，两者 mod/config 不完全一样。）
+- **`/forceload add` 有 256 区块/次的硬上限**，超了整条命令被拒（`Too many chunks in the specified
+  area (maximum 256, specified 484)`）⇒ 需要分片；而"原版 `findPathToAny` 只看得见
+  `followRange+8` 半径内的方块"这条约束会让**终点在半径外时两腿都返回 1 个节点的路径**，
+  看起来还"一致" —— 做寻路场景时这是第一个要查的坑。
+

@@ -21,6 +21,13 @@
 #       -DCMAKE_MAKE_PROGRAM=C:/mingw64/bin/mingw32-make.exe
 #   & $cmake --build J:\mc\Cava\build\native-mingw-<流名> --parallel
 # 或者走 Gradle：.\gradlew.bat buildNative（它会自动把 C:/mingw64/bin 加进子进程 PATH）
+#
+# 平台矩阵（5 平台）的数值一致性套件是**独立**的一棵 CMake 树，刻意不挂在这里：
+#   & $cmake -S J:\mc\Cava\native\tests\platform -B J:\mc\Cava\build\platform-suite -DCMAKE_BUILD_TYPE=Release
+#   & $cmake --build J:\mc\Cava\build\platform-suite
+#   $env:CAVA_SUITE_LIB = 'J:\mc\Cava\natives\windows-x64\cava.dll'
+#   & J:\mc\Cava\build\platform-suite\cava_platform_suite.exe --golden J:\mc\Cava\native\tests\vectors\fp_probe.txt
+# 详见 native/tests/platform/README.md 与 docs/CAVA-platform-notes.md。
 # =============================================================================
 
 cmake_minimum_required(VERSION 3.24)
@@ -102,7 +109,10 @@ endif()
 # -----------------------------------------------------------------------------
 # 配置摘要（写进构建日志，便于报告/排障取证）
 # -----------------------------------------------------------------------------
-message(STATUS "cava: platform=${CAVA_PLATFORM_TAG} id=${CAVA_PLATFORM_ID} system=${CMAKE_SYSTEM_NAME} processor=${CMAKE_SYSTEM_PROCESSOR}")
+# 平台推导取证：把"目标架构是哪来的"打出来 —— 交叉编译出错时这一行就能定位
+# （host 与 target 不同 = 真的在交叉编译；processor_source=CMAKE_OSX_ARCHITECTURES 表示 Apple 分支生效）。
+message(STATUS "cava: platform=${CAVA_PLATFORM_TAG} id=${CAVA_PLATFORM_ID} system=${CMAKE_SYSTEM_NAME} processor=${CAVA_PLATFORM_PROCESSOR} processor_source=${CAVA_PLATFORM_PROCESSOR_SOURCE}")
+message(STATUS "cava: host=${CMAKE_HOST_SYSTEM_NAME}/${CMAKE_HOST_SYSTEM_PROCESSOR} crosscompiling=${CMAKE_CROSSCOMPILING} osx_architectures='${CMAKE_OSX_ARCHITECTURES}'")
 message(STATUS "cava: compiler=${CAVA_BUILD_COMPILER} (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
 message(STATUS "cava: fp-flags=${CAVA_HARDENED_FP_FLAGS}")
 message(STATUS "cava: safe=${CAVA_SAFE} asan=${CAVA_ASAN} ubsan=${CAVA_UBSAN} build_type=${CMAKE_BUILD_TYPE}")

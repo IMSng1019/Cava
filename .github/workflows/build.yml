@@ -1,11 +1,27 @@
-# Cava —— CI（文件所有权：P0-A 构建基建流）
+# Cava —— CI（文件所有权：P0-A 构建基建流；P4-B 平台与 CI 轮扩充了 native 矩阵）
 #
-# 两条关键约束（本机实测，详见 docs/CAVA-p0a-build-infra.md，这里只留结论）：
+# 三条关键约束（本机实测，详见 docs/CAVA-p0a-build-infra.md / docs/CAVA-gates.md，这里只留结论）：
 #   1. **JDK 固定 21**。项目用 --release 21 + --enable-preview 编译（预览 class 版本 65.65535），
 #      更高的 JDK 即使加 --enable-preview 也拒绝加载预览 class。
 #   2. **Loom 固定 1.17.x**（gradle.properties 里 pin）。更新的 Loom 版本要求更高的 JVM 运行时，
 #      与本项目的 JDK 21 硬约束冲突 —— 模板自带的 workflow 之所以写高版本 JDK 就是这个原因，
 #      已按上面的约束改回 21。换 Loom 前先看文档里那条 module metadata 检查命令。
+#   3. **每个 native job 都必须跑数值一致性套件**（native/tests/platform/**）：
+#      逐位一致性（对签入的 windows-x64 黄金向量 15456 行）+ 编译开关自检 + ABI 布局自检
+#      （14 个结构体 / layout_hash_sum = 0x1C12265E）。这是 prompts/07 第 1 条的验收内容。
+#
+# !! 本文件里的 native / sanitize job 在开发机上从来没有被执行过一次。
+#    本机没有 Linux/macOS/ARM 环境、Docker 守护进程未运行、WSL 枚举被拒（E_ACCESSDENIED），
+#    所以这些 job 只是**写全了的矩阵**，不是"已经跑绿的矩阵"。
+#    第一次真正运行时最可能出问题的地方（按概率排序，见 docs/CAVA-platform-notes.md $7）：
+#      a) macos-13 这个 runner 标签**已被 GitHub 下线**（2025-12-04 退役），本文件改用 macos-15-intel；
+#      b) Apple Clang 的 -ffp-contract=off 行为（本机无法验证，已在 CMake 里显式传并有探针）；
+#      c) arm64 上 FMA 收缩探针与 NaN 载荷豁免行数可能与 x64 不同；
+#      d) 非 x86 平台上的反汇编一节（macOS 上大概率是 SKIP，不是失败）。
+#
+# 开发机上已经真跑过的等价路径（不是 CI；命令与真实输出见 docs/CAVA-platform-notes.md）：
+#   * windows-x64 + MinGW：CMake 构建 / 数值一致性套件 32 项全过 / 从产物反查编译开关 38 项全过
+#     / 平台标签推导 17 个组合全过 / 真实交叉 configure（Linux x64 + arm64，try_compile=STATIC_LIBRARY）
 name: build
 on: [pull_request, push]
 
@@ -33,45 +49,153 @@ jobs:
           path: build/libs/
 
   # ---------------------------------------------------------------------------
-  # 原生 5 平台矩阵：**P4 才真做**。本轮只有 windows-x64 真跑，其余 4 个是占位（enabled: false），
-  # 目的是让 CI 结构一次定型：P4 只需把 enabled 改成 true 并补对应交叉工具链。
-  # 交叉编译注意：CMakeLists.txt 用 CMAKE_SYSTEM_PROCESSOR 推平台标签（不是 HOST_*），
-  # 交叉编译时必须在 toolchain file 里正确设置（见 native/cmake/CavaPlatform.cmake）。
+  # 原生 5 平台矩阵。**每个 job 的名字里都带 [unverified-local]：本机从未跑过这一条路径。**
+  # runner 本身就是目标平台，所以**不需要交叉工具链**（交叉能力另由
+  # native/tests/platform/tag_matrix.cmake 与 tools/platform-tagmatrix.ps1 -RealCrossConfigure 覆盖）。
   # ---------------------------------------------------------------------------
   native:
+    name: native (${{ matrix.tag }}) [unverified-local]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          # windows-x64：MSVC（/O2 /fp:strict）。开发机只跑过 MinGW 那条路。
+          - os: windows-2022
             tag: windows-x64
-            enabled: true
+            libname: cava.dll
+            generator: 'Visual Studio 17 2022'
+            configure-args: '-A x64'
+          # ubuntu-24.04 是 x64；ubuntu-24.04-arm 是 arm64 公共 runner（2025-08 GA）。
           - os: ubuntu-24.04
             tag: linux-x64
-            enabled: false # TODO(P4): gcc + -DCMAKE_SYSTEM_PROCESSOR=x86_64
+            libname: libcava.so
+            generator: 'Unix Makefiles'
+            configure-args: ''
           - os: ubuntu-24.04-arm
             tag: linux-arm64
-            enabled: false # TODO(P4)
-          - os: macos-13
+            libname: libcava.so
+            generator: 'Unix Makefiles'
+            configure-args: ''
+          # macOS x64：**macos-13 已被 GitHub 下线**（2025-12-04 退役，
+          # https://github.blog/changelog/2025-09-19-github-actions-macos-13-runner-image-is-closing-down/ ），
+          # 现存 Intel 镜像是 macos-15-intel。要退回旧标签就把下面这行改回 macos-13。
+          - os: macos-15-intel
             tag: macos-x64
-            enabled: false # TODO(P4)
+            libname: libcava.dylib
+            generator: 'Unix Makefiles'
+            configure-args: ''
+          # macOS arm64：Apple Clang 默认 -ffp-contract=on 且 arm64 有 FMA，
+          # CMake 侧已显式传 -ffp-contract=off（native/cmake/CavaFlags.cmake）并在配置日志打印一行，
+          # 套件里还有一条 FMA 收缩探针（在 arm64 上是**可判**的）。
           - os: macos-14
             tag: macos-arm64
-            enabled: false # TODO(P4)
+            libname: libcava.dylib
+            generator: 'Unix Makefiles'
+            configure-args: ''
     runs-on: ${{ matrix.os }}
-    if: ${{ matrix.enabled }}
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
-      - name: configure native (MSVC x64)
-        run: cmake -S . -B build/native -G "Visual Studio 17 2022" -A x64
+
+      - name: unverified banner (本机从未验证过这条路径)
+        shell: pwsh
+        run: |
+          Write-Output "::warning::native(${{ matrix.tag }}) has NEVER been executed on the development machine."
+          Write-Output "This job is part of the written-out matrix, not of a proven-green matrix."
+          Write-Output "See docs/CAVA-platform-notes.md section 7 before trusting any result from it."
+
+      # 平台标签推导：只需要 cmake，不需要任何工具链。10 个纯函数组合 + 7 个真实 configure。
+      - name: verify platform tag derivation
+        run: cmake -DCAVA_TAGMATRIX_WORK=${{ runner.temp }}/tagmatrix -P native/tests/platform/tag_matrix.cmake
+
+      - name: configure native
+        run: >
+          cmake -S . -B build/native
+          -G "${{ matrix.generator }}"
+          ${{ matrix.configure-args }}
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
       - name: build native
         run: cmake --build build/native --config Release --parallel
+
+      - name: configure the numerical-consistency suite
+        run: >
+          cmake -S native/tests/platform -B build/platform-suite
+          -G "${{ matrix.generator }}"
+          ${{ matrix.configure-args }}
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: build the numerical-consistency suite
+        run: cmake --build build/platform-suite --config Release --parallel
+
+      # 套件本体：逐位一致性 + 编译开关自检 + ABI 布局自检。
+      # --expect-rows 15456 钉住黄金向量没被截断；--lib 指到本平台刚编出来的库。
+      - name: run the numerical-consistency suite
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build/platform-suite -Recurse -Filter 'cava_platform_suite*' |
+                 Where-Object { $_.Extension -in @('.exe','') } | Select-Object -First 1
+          Write-Output "suite exe = $($exe.FullName)"
+          & $exe.FullName --golden native/tests/vectors/fp_probe.txt --expect-rows 15456 --lib "natives/${{ matrix.tag }}/${{ matrix.libname }}"
+          exit $LASTEXITCODE
+
+      # 从产物反查编译开关：flags.make / compile_commands.json / 导入表 / 反汇编（AVX + sqrt 路径）。
+      # Visual Studio 生成器不写 flags.make，工具会 SKIP 那一节并说明原因（不是失败）。
+      - name: verify compile switches from the artifacts
+        shell: pwsh
+        run: |
+          $exe = "natives/${{ matrix.tag }}/${{ matrix.libname }}"
+          & ./tools/platform-flagcheck.ps1 -BuildDir build/native -Lib $exe
+          exit $LASTEXITCODE
+
       - name: run native tests
         run: ctest --test-dir build/native --build-config Release --output-on-failure
+
       - name: capture native artifacts
         uses: actions/upload-artifact@v7
         with:
           name: cava-natives-${{ matrix.tag }}
           path: natives/${{ matrix.tag }}/
           if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # ASan / UBSan（prompts/07 $3）。**同样 [unverified-local]：本机跑不了**，原因是实打实的：
+  #   * MinGW g++ 15.2 不带 libsanitizer（实测 g++ -fsanitize=address 报
+  #     "cannot read spec file 'libsanitizer.spec'"；C:\mingw64 下搜不到 libasan/libubsan）；
+  #   * 本机 MSVC 19.44 只装了 **i386** 的 ASan 运行时（clang_rt.asan_dynamic-i386.dll），
+  #     x64 的 clang_rt.asan_*_x86_64.* 缺失 ⇒ cl 报 LNK1104。
+  # 所以这一条只能在 Linux/macOS runner 上跑；CMake 选项 CAVA_ASAN / CAVA_UBSAN 已存在。
+  # ---------------------------------------------------------------------------
+  sanitize:
+    name: sanitizers (ubuntu-24.04) [unverified-local]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+      - name: unverified banner
+        shell: pwsh
+        run: Write-Output "::warning::sanitize job has NEVER been executed on the development machine (no libsanitizer locally)."
+      - name: configure (ASan + UBSan)
+        run: >
+          cmake -S . -B build/native-san
+          -G "Unix Makefiles"
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCAVA_ASAN=ON -DCAVA_UBSAN=ON
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: build
+        run: cmake --build build/native-san --parallel
+      - name: run the numerical-consistency suite under sanitizers
+        run: |
+          cmake -S native/tests/platform -B build/platform-san -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCAVA_ASAN=ON -DCAVA_UBSAN=ON
+          cmake --build build/platform-san --parallel
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+            ./build/platform-san/cava_platform_suite \
+            --golden native/tests/vectors/fp_probe.txt --expect-rows 15456 \
+            --lib natives/linux-x64/libcava.so
+      - name: run native tests under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build/native-san --output-on-failure

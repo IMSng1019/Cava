@@ -31,7 +31,9 @@ param(
     [string]$Seed = '0x5EEDC0DE5EEDC0DE',
     [switch]$SkipBuild,
     [string]$Dll = '',
-    [switch]$EveryCase
+    [switch]$EveryCase,
+    [switch]$NoThreads,
+    [int]$ThreadsPerRole = 2
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -110,17 +112,21 @@ function Invoke-Fuzz([string]$Label, [string]$DllPath, [string]$LogName) {
     Write-Host "log  = $log"
     # | Out-Host: the driver's stdout must NOT enter this function's output stream, otherwise
     # the caller's "$rc = Invoke-Fuzz ..." would receive an array instead of the exit code.
-    & $exe $DllPath --cases $Cases --seed $Seed --every $every --log $log 2>&1 | Out-Host
+    $mtArgs = if ($NoThreads) { @() } else { @('--threads', "$ThreadsPerRole") }
+    & $exe $DllPath --cases $Cases --seed $Seed --every $every @mtArgs --log $log 2>&1 | Out-Host
     $rc = $LASTEXITCODE
     Write-Host "exit=$rc"
     if (Test-Path $log) {
         Get-Content $log -TotalCount 9 | ForEach-Object { Write-Host "  | $_" }
         Write-Host "  | ..."
         Get-Content $log -Tail 3 | ForEach-Object { Write-Host "  | $_" }
+        # the multi-threaded phase has its own summary; surface it or it is invisible in CI
+        Select-String -Path $log -Pattern '^MT SUMMARY|^MT RESULT|^mt-cases|^mt-rc-hist|^mt-torn|^mt-contract|^mt-overruns|^mt-region' |
+            ForEach-Object { Write-Host "  | $($_.Line)" }
     }
     if ($rc -ne 0) {
         Write-Host "*** [$Label] RESULT: FAIL (exit=$rc) -- failure lines: ***"
-        Select-String -Path $log -Pattern 'UNDEFINED|MUTATION|OVERRUN|UNEXPECTED' | Select-Object -First 20 |
+        Select-String -Path $log -Pattern 'UNDEFINED|MUTATION|OVERRUN|UNEXPECTED|TORN|CONTRACT' | Select-Object -First 20 |
             ForEach-Object { Write-Host "  ! $($_.Line)" }
     } else {
         Write-Host "[$Label] RESULT: PASS"
@@ -161,6 +167,8 @@ foreach ($r in $results) {
     if ($r.Rc -ne 0) { $bad++ }
 }
 Write-Output "cases per dll = $Cases random + systematic families; seed = $Seed"
+if ($NoThreads) { Write-Output "multi-threaded phase: SKIPPED (-NoThreads)" }
+else { Write-Output "multi-threaded phase: $($ThreadsPerRole * 4) threads (roles unload/read/path/tables) x 4000 rounds" }
 Write-Output "logs under $logDir"
 if ($bad -gt 0) { Write-Output "OVERALL: FAIL ($bad target(s))"; exit 1 }
 Write-Output "OVERALL: PASS"

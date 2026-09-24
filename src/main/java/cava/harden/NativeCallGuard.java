@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.IntSupplier;
@@ -94,6 +95,20 @@ public final class NativeCallGuard {
     private final AtomicLong lastNanos = new AtomicLong(-1);
     private final AtomicLong callFailureEmissions = new AtomicLong();
 
+    // ------------------------------------------------------------------
+    // 线程归属检查（P4-C）：**只计数 + 首次打一条日志**，绝不改变行为
+    // ------------------------------------------------------------------
+    /** 第一次调用原生的那个线程 = owner。之后只读，不再变。 */
+    private volatile Thread ownerThread = null;
+    /** 从非 owner 线程打到原生入口的次数（P4 上线要看的第二个计数，第一个是 unavailableCalls）。 */
+    private final AtomicLong offThreadCalls = new AtomicLong();
+    /** 首次违规是否已经报告过（每个进程最多一条 WARN）。 */
+    private final AtomicBoolean offThreadReported = new AtomicBoolean();
+    /** 第一次违规的现场，写进日志用。 */
+    private volatile String firstOffThread = "";
+    /** 线程归属检查是否启用（默认开；{@code -Dcava.native.threadcheck=false} 关）。 */
+    private final boolean threadCheck;
+
     private volatile Consumer<String> errorSink = NativeCallGuard::logError;
 
     public NativeCallGuard() {
@@ -103,7 +118,11 @@ public final class NativeCallGuard {
     public NativeCallGuard(CircuitBreaker breaker, CallWatchdog watchdog) {
         this.breaker = (breaker == null) ? new CircuitBreaker() : breaker;
         this.watchdog = (watchdog == null) ? new CallWatchdog() : watchdog;
+        this.threadCheck = !"false".equalsIgnoreCase(System.getProperty(PROP_THREAD_CHECK, "true"));
     }
+
+    /** 系统属性：{@code false} = 关闭线程归属检查（只关检查，不关计数以外的东西）。 */
+    public static final String PROP_THREAD_CHECK = "cava.native.threadcheck";
 
     private static void logError(String msg) {
         LOG.error(msg);
@@ -164,6 +183,7 @@ public final class NativeCallGuard {
      */
     public int call(String symbol, IntSupplier attempt) {
         symbolsSeen.add(symbol);
+        noteThreadOwnership(symbol);
         if (breaker.tripped()) {
             return unavailable();
         }
@@ -183,6 +203,85 @@ public final class NativeCallGuard {
         }
         noteResult(symbol, rc);
         return rc;
+    }
+
+    /**
+     * 线程归属检查：**第一条原生调用所在的线程就是 owner**，之后任何别的线程调用只计数。
+     *
+     * <p><b>为什么是"只计数 + 首次一条日志"而不是断言或抛异常</b>：本项目的铁律是
+     * 语义必须与"native 关闭"时逐 tick 一致，而这个检查是在热路径上。抛异常或强制回退都会
+     * <b>改变行为</b>（把一次可用的原生调用变成一次纯 Java 回退），那比"多线程调用"本身更危险。
+     * 所以这里只做两件零语义成本的事：{@code offThreadCalls++} 与首次 WARN。
+     *
+     * <p><b>为什么必须有这个检查</b>：{@code docs/CAVA-工程接口契约.md} 与
+     * {@code native/include/cava_abi.h} 都<b>没有写过线程模型</b>。实测（P4-C，8 线程 × 4000 轮）
+     * 说明原生库<b>不是数据损坏</b>的（无段错误 / 无未定义返回 / 无越界写），但确实有
+     * 0.38% 的 {@code cava_resolve_move} 在并发替换形状表期间返回 {@code CAVA_ERR_ARG}。
+     * 结论写在 {@code docs/CAVA-concurrency-notes.md}：invariant 是"单线程调用"，本计数就是它的
+     * 运行期证据（{@code offThreadCalls} 必须恒为 0）。
+     *
+     * <p>成本：一次 {@code Thread.currentThread()} 与一次 {@code ==} 比较（owner 命中路径），
+     * 不分配、不加锁、不写日志。{@code -Dcava.native.threadcheck=false} 可整体关闭。
+     */
+    private void noteThreadOwnership(String symbol) {
+        if (!threadCheck) {
+            return;
+        }
+        try {
+            final Thread cur = Thread.currentThread();
+            final Thread owner = ownerThread;
+            if (owner == null) {
+                // 首个调用者认领 owner；两者同时竞争时只有先 set 的那次生效
+                if (ownerThread == null) {
+                    ownerThread = cur;
+                    return;
+                }
+                if (ownerThread == cur) {
+                    return;
+                }
+            } else if (owner == cur) {
+                return;
+            }
+            offThreadCalls.incrementAndGet();
+            if (offThreadReported.compareAndSet(false, true)) {
+                firstOffThread = "owner=" + describe(ownerThread) + " caller=" + describe(cur)
+                        + " symbol=" + symbol;
+                try {
+                    LOG.warn("[cava/native] 原生调用来自非 owner 线程（只计数，不改变行为）："
+                            + firstOffThread
+                            + " —— 契约要求原生入口只从 owner 线程调用；实测原生库不是内存不安全的，"
+                            + "但并发替换形状/状态表期间会有少量 cava_resolve_move 返回 CAVA_ERR_ARG。"
+                            + "详见 docs/CAVA-concurrency-notes.md。");
+                } catch (Throwable ignored) {
+                    // 日志失败绝不影响返回值
+                }
+            }
+        } catch (Throwable ignored) {
+            // 归属检查自己出错也只当"没检查"：绝不改变调用结果
+        }
+    }
+
+    private static String describe(Thread t) {
+        if (t == null) {
+            return "(none)";
+        }
+        return t.getName() + "#" + t.threadId();
+    }
+
+    /** owner 线程名（还没有任何原生调用时为 null）。 */
+    public String ownerThreadName() {
+        Thread t = ownerThread;
+        return (t == null) ? null : describe(t);
+    }
+
+    /** 从非 owner 线程打到原生入口的次数 —— 上线判据是它恒为 0。 */
+    public long offThreadCalls() {
+        return offThreadCalls.get();
+    }
+
+    /** 首次越线现场（一行；没有则空串）。 */
+    public String firstOffThread() {
+        return firstOffThread;
     }
 
     private void noteResult(String symbol, int rc) {
@@ -221,7 +320,9 @@ public final class NativeCallGuard {
     /** 单行报告（banner / 运维命令共用）。 */
     public String report() {
         return breaker.report() + " " + watchdog.report() + " attempts=" + attempts.get()
-                + " unavailableCalls=" + unavailableCalls.get();
+                + " unavailableCalls=" + unavailableCalls.get()
+                + " ownerThread=" + (ownerThreadName() == null ? "(none)" : ownerThreadName())
+                + " offThreadCalls=" + offThreadCalls.get();
     }
 
     /** 分入口的连续失败计数快照（"可查询计数"）。 */

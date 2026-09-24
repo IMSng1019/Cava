@@ -33,7 +33,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -55,6 +57,19 @@ static uint64_t g_unexpected_ok = 0;
 static uint64_t g_crashes = 0;          /* always 0 if we reach SUMMARY */
 static uint64_t g_verbose_every = 1;    /* print every Nth case line */
 static FILE* g_log = nullptr;
+
+/* ------------------------------------------------------------------ */
+/* multi-threaded phase counters (P4-C: "concurrent section unload")   */
+/* ------------------------------------------------------------------ */
+static std::atomic<uint64_t> mt_cases(0);
+static std::atomic<uint64_t> mt_undefined(0);
+static std::atomic<uint64_t> mt_torn(0);        /* a result that contradicts its own return code */
+static std::atomic<uint64_t> mt_contract(0);    /* error rc but the callee wrote to its out param */
+static std::atomic<uint64_t> mt_guard_bad(0);   /* sentinel/overrun seen by a worker thread     */
+static std::atomic<uint64_t> mt_rc_hist[16];    /* rc 0..>7 bucketed, so the mix is inspectable */
+static std::atomic<uint64_t> mt_per_role[8];    /* calls issued per role index                  */
+static std::atomic<uint64_t> mt_region_upload_ok(0);
+static std::atomic<uint64_t> mt_region_clear_ok(0);
 
 /* ------------------------------------------------------------------ */
 /* deterministic PRNG (xorshift64*) -- fixed default seed             */
@@ -107,6 +122,23 @@ static uint64_t rnd_interesting_u64() {
     const int n = (int) (sizeof(pool) / sizeof(pool[0]));
     return pool[rnd_next() % (uint64_t) n];
 }
+
+/* Per-thread deterministic PRNG so the multi-threaded phase does not share the global stream
+ * (a shared g_rng across threads would be a data race in the DRIVER, which would make any
+ * finding unattributable). Same algorithm and same fixed-seed derivation => reproducible input
+ * streams per worker, independent of scheduling. */
+struct CavaRng {
+    uint64_t s;
+    explicit CavaRng(uint64_t seed) : s(seed ? seed : kDefaultSeed) {}
+    uint64_t next() {
+        uint64_t x = s;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        s = x;
+        return x * 0x2545F4914F6CDD1Dull;
+    }
+};
 
 /* ------------------------------------------------------------------ */
 /* guarded allocation: [ptr, ptr+size) ends exactly at a guard page    */
@@ -1299,6 +1331,337 @@ static void probe_cap_too_small() {
 }
 
 /* ------------------------------------------------------------------ */
+/* multi-threaded phase: "concurrent section unload"                   */
+/*                                                                     */
+/* This is the part of the P4 task list that the single-threaded       */
+/* families above cannot reach: while one thread uploads and unloads   */
+/* ("unloads" = cava_region_clear, the section-unload shape the Java   */
+/* side produces when a chunk section leaves the mirror) a second      */
+/* thread reads the very same region, a third runs pathfind/resolve    */
+/* against it, and a fourth keeps replacing the shared state/shape     */
+/* tables.                                                             */
+/*                                                                     */
+/* The ABI header says NOTHING about a thread model, so the honest     */
+/* question is not "is it locked" but "what does it actually do".      */
+/* What is measured and asserted here:                                 */
+/*   1. the process survives (a crash means the harness never reaches  */
+/*      the MT SUMMARY line and the script sees a non-zero exit);      */
+/*   2. every return code is legal (>=0) or an ABI error (-1..-7);     */
+/*      anything else counts as an undefined return;                   */
+/*   3. no worker writes past the declared output capacity (guard page */
+/*      + 0xA5 sentinel, same mechanism as the single-threaded phase); */
+/*   4. a return code that CONTRADICTS its own output struct counts as */
+/*      a torn read and is reported separately from a crash.           */
+/*                                                                     */
+/* The result is deliberately allowed to vary (region_clear really     */
+/* removes the region, so pathfind legitimately answers either "path"  */
+/* or "region not uploaded"). The pass criterion is "defined, bounded, */
+/* non-corrupting", NOT "same answer every time" -- see                 */
+/* docs/CAVA-concurrency-notes.md for what the run actually produced.  */
+/* ------------------------------------------------------------------ */
+
+/* Fixed thread work: every thread runs the same number of rounds, so the run is reproducible in
+ * its shape even though the interleaving is not. threads_per_role = how many workers per role
+ * (1 => 4 threads, 2 => 8 threads, which is what the task asked for). */
+static const int kMtRounds = 4000;
+
+static void mt_note_rc(int32_t rc, bool allow_positive, int role) {
+    mt_cases.fetch_add(1, std::memory_order_relaxed);
+    mt_per_role[role & 7].fetch_add(1, std::memory_order_relaxed);
+    /* bucket: 0 => rc==0, 1..7 => -rc, 8 => positive, 9 => other */
+    int bucket;
+    if (rc == 0) {
+        bucket = 0;
+    } else if (rc > 0 && allow_positive) {
+        bucket = 8;
+    } else if (rc <= -1 && rc >= -7) {
+        bucket = -rc;
+    } else {
+        bucket = 9;
+        mt_undefined.fetch_add(1, std::memory_order_relaxed);
+        std::fprintf(g_log, "%-16s *** UNDEFINED RETURN *** rc=%d role=%d\n", "mt", rc, role);
+    }
+    mt_rc_hist[bucket].fetch_add(1, std::memory_order_relaxed);
+}
+
+/* thread A: upload / unload ("section unload") storm */
+static void mt_worker_unload(int rounds, uint64_t seed, int role) {
+    std::vector<int32_t> ids((size_t) kRegX * kRegY * kRegZ, 0);
+    CavaRng rng(seed);
+    for (int i = 0; i < rounds; ++i) {
+        const int32_t ox = (int32_t) (rng.next() % 7) - 3;
+        const int32_t oz = (int32_t) (rng.next() % 7) - 3;
+        for (size_t k = 0; k < ids.size(); ++k) { ids[k] = 0; }
+        for (int32_t z = 0; z < kRegZ; ++z) {
+            for (int32_t x = 0; x < kRegX; ++x) {
+                ids[((size_t) 0 * kRegZ + z) * kRegX + x] = 1;
+            }
+        }
+        int32_t rc = p_region_upload(g_handle, kRegX, kRegY, kRegZ, ox, kRegOY, oz,
+                                     ids.data(), (int32_t) ids.size());
+        mt_note_rc(rc, false, role);
+        if (rc == CAVA_OK) { mt_region_upload_ok.fetch_add(1, std::memory_order_relaxed); }
+
+        if ((rng.next() & 1) != 0) {
+            rc = p_region_clear(g_handle);
+            mt_note_rc(rc, false, role);
+            if (rc == CAVA_OK) { mt_region_clear_ok.fetch_add(1, std::memory_order_relaxed); }
+        }
+    }
+}
+
+/* thread B: read the same coordinates while they are being replaced */
+static void mt_worker_read(int rounds, uint64_t seed, int role) {
+    Guarded out = guarded_alloc(sizeof(int32_t));
+    CavaRng rng(seed);
+    static const int32_t xs[8] = {0, 1, 3, 7, 2, 5, 6, 4};
+    static const int32_t zs[8] = {0, 7, 3, 1, 6, 2, 5, 4};
+    static const int32_t ys[4] = {-1, 0, 1, 2};
+    for (int i = 0; i < rounds; ++i) {
+        const uint64_t r = rng.next();
+        const int32_t x = xs[r & 7] + (int32_t) ((r >> 3) & 7) - 3;
+        const int32_t y = ys[(r >> 6) & 3];
+        const int32_t z = zs[(r >> 8) & 7] + (int32_t) ((r >> 11) & 7) - 3;
+        int32_t* slot = (int32_t*) out.ptr;
+        *slot = 0x5A5A5A5A;   /* sentinel: if the callee does not write, we see it */
+        const int32_t rc = p_region_at(g_handle, x, y, z, slot);
+        mt_note_rc(rc, false, role);
+        if (rc == CAVA_OK && *slot == 0x5A5A5A5A) {
+            /* a legal query always writes a state id (0 = air), so an untouched slot is torn */
+            mt_torn.fetch_add(1, std::memory_order_relaxed);
+            std::fprintf(g_log, "%-16s *** TORN *** region_state_id_at rc=0 but the output was untouched\n", "mt");
+        }
+        if (!guarded_tail_intact(out, sizeof(int32_t))) {
+            mt_guard_bad.fetch_add(1, std::memory_order_relaxed);
+            std::fprintf(g_log, "%-16s *** SENTINEL/OVERRUN *** region_state_id_at wrote past 4 bytes\n", "mt");
+        }
+    }
+    guarded_free(out);
+}
+
+/* thread C: pathfind + resolve while the region table is being replaced underneath */
+static void mt_worker_path(int rounds, uint64_t seed, int role) {
+    Guarded nodes = guarded_alloc(sizeof(CavaPathNode) * 64);
+    Guarded ev = guarded_alloc(sizeof(CavaMoveEvent) * 16);
+    Guarded res = guarded_alloc(sizeof(CavaMoveResult));
+    CavaRng rng(seed);
+    for (int i = 0; i < rounds; ++i) {
+        const uint64_t r = rng.next();
+        if ((r & 1) == 0) {
+            CavaPathRequest req;
+            build_legal_req(req);
+            req.tx = (int32_t) (r % 9) - 4;
+            req.tz = (int32_t) ((r >> 8) % 9) - 4;
+            const int32_t rc = p_pathfind(g_handle, &req, (CavaPathNode*) nodes.ptr, 64);
+            mt_note_rc(rc, true, role);
+            if (rc > 64) {
+                mt_torn.fetch_add(1, std::memory_order_relaxed);
+                std::fprintf(g_log, "%-16s *** TORN *** pathfind returned %d nodes for cap=64\n", "mt", rc);
+            }
+            if (rc > 0 && !guarded_tail_intact(nodes, (size_t) rc * sizeof(CavaPathNode))) {
+                mt_guard_bad.fetch_add(1, std::memory_order_relaxed);
+                std::fprintf(g_log, "%-16s *** SENTINEL/OVERRUN *** pathfind wrote past a %d-node buffer\n",
+                             "mt", rc);
+            }
+        } else {
+            CavaMoveRequest req;
+            CavaMoveShapeRef ref;
+            build_legal_move(req, ref);
+            req.move_x = ((double) (int32_t) (r % 21) - 10) / 10.0;
+            /* Pre-fill the result with a sentinel so "did the callee write?" is observable.
+             * The ABI says an error return must NOT write out at all, so this also tests that
+             * rule under concurrency (~114/18000 calls failed with -4 in the first run). */
+            std::memset(res.ptr, 0xA5, sizeof(CavaMoveResult));
+            const int32_t rc = p_resolve(g_handle, &req, &ref, 1, nullptr, 0, nullptr, 0, nullptr, 0,
+                                         (CavaMoveEvent*) ev.ptr, 16, (CavaMoveResult*) res.ptr);
+            mt_note_rc(rc, false, role);
+            const CavaMoveResult* out = (const CavaMoveResult*) res.ptr;
+            if (rc >= 0 && out->status != rc) {
+                mt_torn.fetch_add(1, std::memory_order_relaxed);
+                std::fprintf(g_log, "%-16s *** TORN *** resolve rc=%d but out->status=%d\n",
+                             "mt", rc, out->status);
+            }
+            if (rc < 0 && out->status != (int32_t) 0xA5A5A5A5) {
+                /* the callee wrote to a buffer it is required to leave untouched */
+                mt_contract.fetch_add(1, std::memory_order_relaxed);
+                std::fprintf(g_log, "%-16s *** CONTRACT *** resolve rc=%d but out was written "
+                                    "(status=0x%08X)\n", "mt", rc, (unsigned) out->status);
+            }
+            if (rc == CAVA_OK) {
+                const double* d = &out->delta_x;
+                for (int a = 0; a < 3; ++a) {
+                    if (d[a] != d[a] || d[a] > 1e7 || d[a] < -1e7) {
+                        mt_torn.fetch_add(1, std::memory_order_relaxed);
+                        std::fprintf(g_log, "%-16s *** TORN *** resolve delta[%d]=%g is not a sane step\n",
+                                     "mt", a, d[a]);
+                    }
+                }
+            }
+            if (!guarded_tail_intact(res, sizeof(CavaMoveResult))) {
+                mt_guard_bad.fetch_add(1, std::memory_order_relaxed);
+                std::fprintf(g_log, "%-16s *** SENTINEL/OVERRUN *** resolve wrote past CavaMoveResult\n", "mt");
+            }
+        }
+    }
+    guarded_free(nodes);
+    guarded_free(ev);
+    guarded_free(res);
+}
+
+/* thread D: keep replacing the shared state / shape / profile tables */
+static void mt_worker_tables(int rounds, uint64_t seed, int role) {
+    std::vector<CavaStateRecord> recs;
+    std::vector<CavaCollisionBox> boxes;
+    build_state_table(recs, boxes);
+    boxes.resize(2, boxes[0]);
+
+    std::vector<CavaShapeRecord> srecs;
+    std::vector<uint64_t> bits;
+    build_legal_shape_table(srecs, bits);
+
+    CavaRng rng(seed);
+    for (int i = 0; i < rounds; ++i) {
+        const uint64_t r = rng.next();
+        int32_t rc;
+        switch (r % 3) {
+            case 0:
+                rc = p_state_upload(g_handle, recs.data(), (int32_t) recs.size(),
+                                    boxes.data(), (int32_t) boxes.size());
+                mt_note_rc(rc, false, role);
+                break;
+            case 1:
+                rc = p_shape_upload(g_handle, srecs.data(), (int32_t) srecs.size(),
+                                    nullptr, 0, bits.data(), (int32_t) bits.size());
+                mt_note_rc(rc, false, role);
+                break;
+            default:
+                rc = upload_legal_profile();
+                mt_note_rc(rc, false, role);
+                break;
+        }
+    }
+}
+
+struct MtWorker {
+    void (*fn)(int, uint64_t, int);
+    int rounds;
+    uint64_t seed;
+    int role;
+};
+
+static void mt_thread_entry(MtWorker w) {
+    w.fn(w.rounds, w.seed, w.role);
+}
+
+/* Returns true when the phase found nothing to report. */
+static bool multithread_phase(int threads_per_role, uint64_t seed, unsigned role_mask) {
+    int active_roles = 0;
+    for (int r = 0; r < 4; ++r) { if ((role_mask & (1u << r)) != 0) { ++active_roles; } }
+    if (active_roles == 0) { role_mask = 0xF; active_roles = 4; }
+    const int nthreads = threads_per_role * active_roles;
+    std::vector<std::thread> pool;
+    pool.reserve((size_t) nthreads);
+    std::vector<MtWorker> workers;
+
+    /* Establish the shared state the workers contend over BEFORE any thread starts.
+     *
+     * MEASURED (and the reason this is here): without it, every cava_resolve_move in the path
+     * role returned CAVA_ERR_ARG (-4) -- in the mask=4 run exactly 4088 of 4088 resolve calls --
+     * because cava_shape_table_upload had never been called and a CavaMoveShapeRef with
+     * kind == CAVA_MSHAPE_STATE requires state_id < record_count. That is a legal, contract
+     * defined rejection ("state table not uploaded"), NOT a race and NOT thread unsafety.
+     * A -4 storm in this phase therefore means "the baseline was not established", while a -4
+     * that appears ONLY while the tables role runs is the interesting one. */
+    {
+        const int32_t rcState = upload_legal_state_table();
+        const int32_t rcRegion = upload_legal_region();
+        const int32_t rcProfile = upload_legal_profile();
+        std::vector<CavaShapeRecord> srecs;
+        std::vector<uint64_t> sbits;
+        build_legal_shape_table(srecs, sbits);
+        const int32_t rcShape = p_shape_upload(g_handle, srecs.data(), (int32_t) srecs.size(),
+                                               nullptr, 0, sbits.data(), (int32_t) sbits.size());
+        std::fprintf(g_log, "mt-baseline    : state=%d region=%d profile=%d shape=%d (all must be 0)\n",
+                     rcState, rcRegion, rcProfile, rcShape);
+        if (rcState != CAVA_OK || rcRegion != CAVA_OK || rcProfile != CAVA_OK || rcShape != CAVA_OK) {
+            ++g_unexpected_ok;   /* recorded as a failure: the phase has no baseline to contend on */
+        }
+    }
+
+    std::fprintf(g_log, "\n--- multi-threaded phase: %d threads x %d rounds, role mask 0x%X "
+                        "(bit0=unload bit1=read bit2=path bit3=tables), base seed 0x%016llX ---\n",
+                 nthreads, kMtRounds, role_mask, (unsigned long long) seed);
+
+    for (int role = 0; role < 4; ++role) {
+        if ((role_mask & (1u << role)) == 0) { continue; }
+        for (int k = 0; k < threads_per_role; ++k) {
+            MtWorker w;
+            switch (role) {
+                case 0: w.fn = mt_worker_unload; break;
+                case 1: w.fn = mt_worker_read;   break;
+                case 2: w.fn = mt_worker_path;   break;
+                default: w.fn = mt_worker_tables; break;
+            }
+            w.rounds = kMtRounds;
+            w.seed = seed ^ (0x9E3779B97F4A7C15ull * (uint64_t) (role * 16 + k + 1));
+            w.role = role;
+            workers.push_back(w);
+        }
+    }
+    for (size_t i = 0; i < workers.size(); ++i) {
+        pool.push_back(std::thread(mt_thread_entry, workers[i]));
+    }
+    for (size_t i = 0; i < pool.size(); ++i) {
+        pool[i].join();
+    }
+
+    const uint64_t cases = mt_cases.load();
+    const uint64_t undef = mt_undefined.load();
+    const uint64_t torn = mt_torn.load();
+    const uint64_t contract = mt_contract.load();
+    const uint64_t guard = mt_guard_bad.load();
+
+    std::fprintf(g_log, "mt-threads     : %d (%d per active role, mask 0x%X)\n",
+                 nthreads, threads_per_role, role_mask);
+    std::fprintf(g_log, "mt-cases       : %llu calls issued from %d threads\n",
+                 (unsigned long long) cases, nthreads);
+    std::fprintf(g_log, "mt-per-role    : unload=%llu read=%llu path=%llu tables=%llu\n",
+                 (unsigned long long) mt_per_role[0].load(),
+                 (unsigned long long) mt_per_role[1].load(),
+                 (unsigned long long) mt_per_role[2].load(),
+                 (unsigned long long) mt_per_role[3].load());
+    std::fprintf(g_log, "mt-rc-hist     : ok=%llu positive=%llu ABI(-1..-7)=%llu/%llu/%llu/%llu/%llu/%llu/%llu "
+                        "undefined=%llu\n",
+                 (unsigned long long) mt_rc_hist[0].load(),
+                 (unsigned long long) mt_rc_hist[8].load(),
+                 (unsigned long long) mt_rc_hist[1].load(), (unsigned long long) mt_rc_hist[2].load(),
+                 (unsigned long long) mt_rc_hist[3].load(), (unsigned long long) mt_rc_hist[4].load(),
+                 (unsigned long long) mt_rc_hist[5].load(), (unsigned long long) mt_rc_hist[6].load(),
+                 (unsigned long long) mt_rc_hist[7].load(),
+                 (unsigned long long) mt_rc_hist[9].load());
+    std::fprintf(g_log, "mt-region      : uploads_ok=%llu clears_ok=%llu\n",
+                 (unsigned long long) mt_region_upload_ok.load(),
+                 (unsigned long long) mt_region_clear_ok.load());
+    std::fprintf(g_log, "mt-torn        : %llu\n", (unsigned long long) torn);
+    std::fprintf(g_log, "mt-contract    : %llu (error rc but the out param was written)\n",
+                 (unsigned long long) contract);
+    std::fprintf(g_log, "mt-overruns    : %llu\n", (unsigned long long) guard);
+    std::fprintf(g_log, "mt-undefined   : %llu\n", (unsigned long long) undef);
+    std::fprintf(g_log, "MT SUMMARY threads=%d rounds=%d calls=%llu undefined_returns=%llu torn=%llu "
+                        "contract_violations=%llu overruns=%llu\n",
+                 nthreads, kMtRounds, (unsigned long long) cases, (unsigned long long) undef,
+                 (unsigned long long) torn, (unsigned long long) contract, (unsigned long long) guard);
+
+    const bool ok = (undef == 0) && (torn == 0) && (contract == 0) && (guard == 0);
+    std::fprintf(g_log, "MT RESULT: %s\n", ok ? "PASS" : "FAIL");
+    std::printf("MT SUMMARY threads=%d calls=%llu undefined_returns=%llu torn=%llu contract_violations=%llu "
+                "overruns=%llu\n",
+                nthreads, (unsigned long long) cases, (unsigned long long) undef,
+                (unsigned long long) torn, (unsigned long long) contract, (unsigned long long) guard);
+    return ok;
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 int main(int argc, char** argv) {
@@ -1307,6 +1670,9 @@ int main(int argc, char** argv) {
     uint64_t random_cases = 5000;
     const char* log_path = nullptr;
     bool safe_probe = false;
+    bool mt = false;
+    int mt_threads_per_role = 2;   /* 2 per role x 4 roles = 8 threads (the task's number) */
+    unsigned mt_role_mask = 0xF;   /* bit i = run role i (0=unload 1=read 2=path 3=tables) */
 
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
@@ -1319,6 +1685,15 @@ int main(int argc, char** argv) {
             g_verbose_every = std::strtoull(argv[++i], nullptr, 0);
         } else if (std::strcmp(argv[i], "--safe-probe") == 0) {
             safe_probe = true;
+        } else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+            mt_threads_per_role = (int) std::strtol(argv[++i], nullptr, 0);
+            mt = true;
+        } else if (std::strcmp(argv[i], "--mt") == 0) {
+            mt = true;
+        } else if (std::strcmp(argv[i], "--roles") == 0 && i + 1 < argc) {
+            /* role mask, e.g. 12 = path+tables only: used to attribute a failure to a role pair */
+            mt_role_mask = (unsigned) std::strtoul(argv[++i], nullptr, 0) & 0xFu;
+            mt = true;
         }
     }
     g_rng = seed ? seed : kDefaultSeed;
@@ -1436,6 +1811,16 @@ int main(int argc, char** argv) {
     std::fprintf(g_log, "\nrandom sweep: %llu cases (seed 0x%016llX)\n",
                  (unsigned long long) (g_cases - before_random), (unsigned long long) seed);
 
+    /* Multi-threaded phase (opt-in; the script passes --threads 2 for 8 worker threads).
+     * It runs LAST on purpose: it replaces and clears the shared tables/region, so any family
+     * that depends on the single-threaded baseline would have to rebuild it. */
+    bool mtOk = true;
+    if (mt) {
+        mtOk = multithread_phase(mt_threads_per_role, seed, mt_role_mask);
+    } else {
+        std::fprintf(g_log, "\n(multi-threaded phase skipped: pass --threads N to run it)\n");
+    }
+
     std::fprintf(g_log, "\n");
     std::fprintf(g_log, "SUMMARY dll=%s cases=%llu crashes=%llu undefined_returns=%llu "
                         "state_mutations=%llu overruns=%llu unexpected_ok=%llu seed=0x%016llX abi_touch=%lld\n",
@@ -1445,7 +1830,7 @@ int main(int argc, char** argv) {
                  (unsigned long long) seed, (long long) f_touch());
 
     const bool pass = (g_undefined == 0) && (g_state_mutations == 0) && (g_guard_violations == 0)
-                      && (g_unexpected_ok == 0);
+                      && (g_unexpected_ok == 0) && mtOk;
     std::fprintf(g_log, "RESULT: %s\n", pass ? "PASS" : "FAIL");
     if (g_log != stdout) {
         std::fclose(g_log);

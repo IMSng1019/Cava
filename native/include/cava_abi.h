@@ -10,6 +10,12 @@
  *      sin/cos/tan/atan2/exp/log/pow 一律留在 Java。
  *   6. 编译固定：-O2 -fwrapv -ffp-contract=off -fno-fast-math（MSVC: /O2 /fp:strict），禁 -march=native。
  *   7. 任何入口都必须能在"未初始化/已释放/参数非法"时安全返回错误码，绝不段错误。
+ *   8. 线程模型：**所有入口都由 Java 侧从同一个线程调用**（1.20.4 服务端里就是 Server thread）。
+ *      原生侧**不保证**并发安全，也**不提供调用序列级原子性** —— 并发替换形状表时 cava_resolve_move
+ *      可能返回 CAVA_ERR_ARG（契约内的合法拒绝，实测 8 线程下 0.381%，单线程 0%）。
+ *      上线判据：unavailableCalls == 0 且 offThreadCalls == 0 且 tripped == false。
+ *      细节与理由见 docs/CAVA-工程接口契约.md §2.1 第 10 条与 docs/CAVA-concurrency-notes.md。
+ *      （本行只是提示，**规范文本在契约里**；改线程模型必须先改契约。）
  */
 #ifndef CAVA_ABI_H
 #define CAVA_ABI_H

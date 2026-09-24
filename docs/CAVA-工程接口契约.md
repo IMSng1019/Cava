@@ -95,6 +95,22 @@
    >
    > **新加的符号一律要走"改头文件 + 两侧同时更新 + 重算 layout_hash_sum"的正规通道**，
    > 不许靠"反正它会自动导出"溜进来；`cava_push_*` 是历史遗留的例外，不是可以照抄的先例。
+10. **线程模型：所有 `cava_*` 入口都由 Java 侧从同一个线程调用**（1.20.4 服务端里就是 Server thread）。
+    原生侧**不保证**并发安全，也**不提供"调用序列级原子性"**：并发替换形状表期间，
+    `cava_resolve_move` 可能返回 `CAVA_ERR_ARG` —— 那是**契约内的合法拒绝，不是内存损坏**
+    （P4-C 实测：8 线程 × 4000 轮 × 三份产物，`crashes=0 undefined_returns=0 torn=0 contract_violations=0 overruns=0`；
+    用角色掩码归因：只跑求解 0/11736 = 0%，求解+换表 0/35736 = 0%，四角色全开 367/96439 = **0.381%**）。
+    **为什么用条款而不是加锁**：给热路径加全局锁的代价远大于收益（本项目的核心指标是每次调用的开销），
+    而并发调用在今天的调用图里**不存在** —— 注入点逐条读过（`MinecraftServer.<init>/runServer`、
+    `PathNodeNavigator.findPathToAny`、`Entity.move/setBoundingBox`、`Entity.pushAwayFrom`、
+    `SectionedEntityCache.addSection/removeSection/forEachInBox` 全在 Server thread），
+    且 `PathfindHook.nativeLock` 与 `RegionMirror` 的对象锁已把原生调用串行化；
+    全仓 `src/main/java` 除 ThreadLocal / 原子类 / shutdown hook 外没有别的工作线程。
+    **守卫（只计数，绝不改行为、不加锁、不强制回退）**：`NativeCallGuard` 首次调用记 owner 线程，
+    越线 `offThreadCalls++`（首次一条 WARN），`-Dcava.native.threadcheck=false` 可关。
+    **上线判据（三项必须同时成立）**：`unavailableCalls == 0`、`offThreadCalls == 0`、`tripped == false`。
+    **触发重开这条决策的条件**：引入任何**异步寻路/异步实体**的 mod（本整合包 49 个 mod 里没有），
+    届时走候选方案 B（原生侧加锁/快照，估 3–8 人日）。
 
 ### 2.2 句柄生命周期
 

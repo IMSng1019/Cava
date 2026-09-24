@@ -2,6 +2,7 @@ package cava.hook;
 
 import cava.mirror.RegionMirror;
 import cava.mirror.RegionSource;
+import cava.mirror.SectionOriginRegistry;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
@@ -11,6 +12,8 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.entity.ai.pathing.Path;
 import net.minecraft.entity.ai.pathing.PathNode;
 import net.minecraft.entity.ai.pathing.PathNodeNavigator;
@@ -109,8 +112,14 @@ public final class PathfindPerfBench {
                                     .executes(ctx -> explore(ctx.getSource(),
                                             StringArgumentType.getString(ctx, "preset"),
                                             StringArgumentType.getString(ctx, "ranges")))));
+            // **失效钩子实测**（缺陷 1 的直接反面证据）：改窗口内的方块 ⇒ 下一次求解必须看到新方块。
+            LiteralArgumentBuilder<ServerCommandSource> invalidate = CommandManager.literal("invalidate")
+                    .then(CommandManager.argument("preset", StringArgumentType.word())
+                            .executes(ctx -> invalidate(ctx.getSource(),
+                                    StringArgumentType.getString(ctx, "preset"))));
             dispatcher.register(CommandManager.literal("cava")
-                    .then(CommandManager.literal("pathfind").then(perf).then(site).then(explore).then(diag)));
+                    .then(CommandManager.literal("pathfind").then(perf).then(site).then(explore).then(diag)
+                            .then(invalidate)));
             LOG.info("[cava/pathfind] /cava pathfind {{perf <preset> <count> [reuse|repush]|site <preset>}} 已注册（presets={}）",
                     PathfindPerfScenario.names());
         } catch (Throwable t) {
@@ -190,6 +199,12 @@ public final class PathfindPerfBench {
         long mirrorReuse0 = mirror == null ? -1 : mirror.reuseSkips();
         long mirrorFail0 = mirror == null ? -1 : mirror.failures();
         long mirrorCells0 = mirror == null ? -1 : mirror.cellsCopied();
+        long sameTick0 = mirror == null ? -1 : mirror.reuseSameTickHits();
+        long crossTick0 = mirror == null ? -1 : mirror.crossTickReuseHits();
+        long crossBlocked0 = mirror == null ? -1 : mirror.crossTickReuseBlocked();
+        long hookHits0 = SectionOriginRegistry.sectionHits();
+        long hookIn0 = SectionOriginRegistry.inWindowHits();
+        long hookInv0 = SectionOriginRegistry.invalidations();
 
         float followRange = p.followRange();
         float maxRange = p.maxRange();
@@ -214,6 +229,8 @@ public final class PathfindPerfBench {
         }
 
         long canary0 = PathfindHook.INSTANCE.canaryCount();
+        long fallbacks0 = PathfindHook.INSTANCE.windowFallbacks();
+        long[] guard0 = guardCounts();
         long takeovers0 = PathfindHook.INSTANCE.takeovers();
         long nativeCalls0 = PathfindHook.INSTANCE.nativeCalls();
         long uploadNanos0 = PathfindHook.INSTANCE.uploadNanos();
@@ -264,6 +281,8 @@ public final class PathfindPerfBench {
             reached[i] = path.reachesTarget();
         }
         long canaryDelta = PathfindHook.INSTANCE.canaryCount() - canary0;
+        long fallbacks = PathfindHook.INSTANCE.windowFallbacks() - fallbacks0;
+        long[] guard = guardDeltas(guard0);
         long takeovers = PathfindHook.INSTANCE.takeovers() - takeovers0;
         long nativeDelta = PathfindHook.INSTANCE.nativeCalls() - nativeCalls0;
         long uploadNanos = PathfindHook.INSTANCE.uploadNanos() - uploadNanos0;
@@ -395,20 +414,32 @@ public final class PathfindPerfBench {
                 "[cava/pathfind] PERFDETAIL id=%d preset=%s mode=%s targetOffset=%d "
                         + "sig_coords=0x%016x sig_types=0x%016x sigDistinct=%d analyzeNulls=%d analyzeLen=%d "
                         + "startNode=%s endNode=%s solidNodes=0 collisionNodes=%d firstBadNode=%s "
-                        + "canaryDelta=%d expectDelta=%d takeovers=%d nativeCallsDelta=%d upload_avg_ns=%.1f solve_avg_ns=%.1f "
+                        + "canaryDelta=%d expectDelta=%d takeovers=%d fallbacks=%d nativeCallsDelta=%d "
+                        + "upload_avg_ns=%.1f solve_avg_ns=%.1f "
+                        + "%s fb_shell=%d fb_goalShell=%d fb_notReached=%d fb_earlyStop=%d fb_structural=%d "
                         + "mirror=pushes:%d,reuse:%d,fail:%d,cells:%d "
+                        + "mirrorReuse=sameTick:%d,crossTick:%d,crossTickBlocked:%d "
+                        + "blockHook=hits:%d,inWindow:%d,invalidations:%d "
                         + "site:cells=%d,changed=%d,hash=0x%016x,verify=%s preset:%s "
                         + "params=navRange:%d,followRange:%.1f,maxRange:%.1f,reachRange:%d,budget:%d,minNodes:%d,horizDist:%.1f "
                         + "env=%s startProbe=%s",
                 id, p.name(), mode, PathfindPerfScenario.targetOffset(),
                 sigCoords, sigTypes, sigDistinct, analyzeNulls, analyzeLen, startNode, endNode,
-                collisionNodes, firstBadNode, canaryDelta, count + WARMUP, takeovers, nativeDelta,
+                collisionNodes, firstBadNode, canaryDelta, count + WARMUP, takeovers, fallbacks, nativeDelta,
                 nativeDelta == 0 ? 0.0 : uploadNanos / (double) nativeDelta,
                 nativeDelta == 0 ? 0.0 : solveNanos / (double) nativeDelta,
+                WindowTruncationGuard.describe(),
+                guard[0], guard[1], guard[2], guard[3], guard[4],
                 mirror == null ? -1 : mirror.pushes() - mirrorPushes0,
                 mirror == null ? -1 : mirror.reuseSkips() - mirrorReuse0,
                 mirror == null ? -1 : mirror.failures() - mirrorFail0,
                 mirror == null ? -1 : mirror.cellsCopied() - mirrorCells0,
+                mirror == null ? -1 : mirror.reuseSameTickHits() - sameTick0,
+                mirror == null ? -1 : mirror.crossTickReuseHits() - crossTick0,
+                mirror == null ? -1 : mirror.crossTickReuseBlocked() - crossBlocked0,
+                SectionOriginRegistry.sectionHits() - hookHits0,
+                SectionOriginRegistry.inWindowHits() - hookIn0,
+                SectionOriginRegistry.invalidations() - hookInv0,
                 built.cells(), built.changed(), built.siteHash(), siteBad == null ? "PASS" : "FAIL",
                 p.name(), navRange, followRange, maxRange, reachRange, p.budget(), p.minNodes(),
                 p.horizontalDistance(), env, startProbe);
@@ -614,6 +645,177 @@ public final class PathfindPerfBench {
             mob.discard();
         }
         return 1;
+    }
+
+    // ------------------------------------------------------------------
+    // 失效钩子实测（缺陷 1 的反面证据）
+    // ------------------------------------------------------------------
+
+    private static long[] guardCounts() {
+        PathfindHook h = PathfindHook.INSTANCE;
+        return new long[] {
+                h.guardHits(WindowTruncationGuard.REASON_SHELL),
+                h.guardHits(WindowTruncationGuard.REASON_GOAL_SHELL),
+                h.guardHits(WindowTruncationGuard.REASON_NOT_REACHED),
+                h.guardHits(WindowTruncationGuard.REASON_NOT_REACHED_EARLY),
+                h.guardHits(WindowTruncationGuard.REASON_NOT_REACHED_STRUCTURAL)};
+    }
+
+    private static long[] guardDeltas(long[] before) {
+        long[] now = guardCounts();
+        for (int i = 0; i < now.length; i++) {
+            now[i] -= before[i];
+        }
+        return now;
+    }
+
+    /** 路径指纹（节点数 / 末节点 / 整条坐标序列 FNV-1a），用于逐字段比较。 */
+    private static String fingerprint(Path path) {
+        if (path == null) {
+            return "len=null";
+        }
+        int len = path.getLength();
+        long hc = 0xcbf29ce484222325L;
+        for (int i = 0; i < len; i++) {
+            PathNode n = path.getNode(i);
+            hc = fnv(hc, n.x);
+            hc = fnv(hc, n.y);
+            hc = fnv(hc, n.z);
+        }
+        PathNode end = path.getEnd();
+        return "len=" + len + ",end=" + (end == null ? "(空)"
+                : "(" + end.x + "," + end.y + "," + end.z + ")")
+                + ",sig=0x" + String.format(Locale.ROOT, "%016x", hc);
+    }
+
+    /**
+     * {@code cava pathfind invalidate <preset>}：**"改了窗口内的方块 ⇒ 下一次求解必须看到新方块"**的实测。
+     *
+     * <p>步骤（全程同一个 tick ⇒ 复用**只可能**由"同 tick + 无失效事件"命中）：
+     * <ol>
+     *   <li>A：正常求解一次（原生接管；这一步会把镜像窗口推进原生）；</li>
+     *   <li>把 A 路径上第一个非 BLOCKED 节点（起点之后）改成石头 —— 走
+     *       {@code ServerWorld.setBlockState} ⇒ {@code WorldChunk.setBlockState} ⇒
+     *       {@code ChunkSection.setBlockState}（**主钩子**）；</li>
+     *   <li>B：再求解一次 —— 失效源真的接上了才会看到新方块（路径必须变）；</li>
+     *   <li>C：临时把 {@code -Dcava.pathfind.native} 置 false 再求解 = **Java 参考结果**；</li>
+     *   <li>还原方块并把系统属性改回去。</li>
+     * </ol>
+     *
+     * <p>判定 {@code PASS} 需要四条同时成立：钩子窗口内命中 +1、失效 +1、B≠A、B==C。
+     * 只要把失效源关掉（{@code -Dcava.mirror.invalidation=false}）就会在第二条 + 第三条上变红
+     * —— 这就是缺陷 1 的**可证伪对照**。
+     */
+    private static int invalidate(ServerCommandSource source, String name) {
+        PathfindPerfScenario.Preset p = PathfindPerfScenario.byName(name);
+        if (p == null) {
+            source.sendError(Text.literal("未知 preset：" + name));
+            return 0;
+        }
+        ServerWorld world = source.getServer().getOverworld();
+        PathfindPerfScenario.build(world, p);
+        BlockPos target = PathfindPerfScenario.target(p);
+        MobEntity mob = PathfindPerfScenario.realizeMob(world, p);
+        if (mob == null) {
+            source.sendError(Text.literal("invalidate: 造不出生物"));
+            return 0;
+        }
+        String verdict;
+        String detail = "";
+        String put = "(none)";
+        String fa = "(none)";
+        String fb = "(none)";
+        String fc = "(none)";
+        long h0 = 0;
+        long h1 = 0;
+        long i0 = 0;
+        long i1 = 0;
+        long m0 = 0;
+        long m1 = 0;
+        boolean nativeOn = PathfindHook.INSTANCE.enabled();
+        try {
+            RegionSource src = PathfindMirrorBridge.get(world);
+            RegionMirror mirror = (src instanceof RegionMirror rm) ? rm : null;
+            Path a = PathfindPerfScenario.invoke(world, mob, p, target);
+            fa = fingerprint(a);
+            h0 = SectionOriginRegistry.inWindowHits();
+            i0 = SectionOriginRegistry.invalidations();
+            m0 = mirror == null ? -1 : mirror.invalidationCount();
+            if (a == null || a.getLength() < 2) {
+                // 路径只有 1 个节点（例如 long128hash 那种原版哈希同键的非法场景）⇒ 没有"第一步"可堵，
+                // 这一项测不了。**明确记 SKIP**，不要伪装成 PASS/RED。
+                verdict = "SKIP(path-too-short:" + (a == null ? "null" : a.getLength()) + ")";
+                h1 = h0;
+                i1 = i0;
+                m1 = m0;
+            } else {
+                PathNode pick = null;
+                for (int i = 1; i < a.getLength(); i++) {
+                    PathNode n = a.getNode(i);
+                    if (n != null && n.type != net.minecraft.entity.ai.pathing.PathNodeType.BLOCKED) {
+                        pick = n;
+                        break;
+                    }
+                }
+                if (pick == null) {
+                    verdict = "RED(no-usable-node)";
+                } else {
+                    BlockPos putPos = new BlockPos(pick.x, pick.y, pick.z);
+                    BlockState old = world.getBlockState(putPos);
+                    put = "(" + pick.x + "," + pick.y + "," + pick.z + ")";
+                    world.setBlockState(putPos, Blocks.STONE.getDefaultState(), 3);
+                    Path b = PathfindPerfScenario.invoke(world, mob, p, target);
+                    fb = fingerprint(b);
+                    h1 = SectionOriginRegistry.inWindowHits();
+                    i1 = SectionOriginRegistry.invalidations();
+                    m1 = mirror == null ? -1 : mirror.invalidationCount();
+                    // Java 参考：把原生接管临时关掉（同一进程内改系统属性，调用时读取）
+                    Path c;
+                    String prop = PathfindSwitches.PROP_NATIVE;
+                    String oldProp = System.getProperty(prop);
+                    System.setProperty(prop, "false");
+                    try {
+                        c = PathfindPerfScenario.invoke(world, mob, p, target);
+                    } finally {
+                        if (oldProp == null) {
+                            System.clearProperty(prop);
+                        } else {
+                            System.setProperty(prop, oldProp);
+                        }
+                    }
+                    fc = fingerprint(c);
+                    world.setBlockState(putPos, old, 3);
+                    StringBuilder red = new StringBuilder();
+                    if (h1 - h0 <= 0) {
+                        red.append("hook-no-window-hit;");
+                    }
+                    if (i1 - i0 <= 0) {
+                        red.append("no-invalidation;");
+                    }
+                    if (fb.equals(fa)) {
+                        red.append("stale-result(B==A);");
+                    }
+                    if (!fb.equals(fc)) {
+                        red.append("B!=javaRef;");
+                    }
+                    verdict = red.length() == 0 ? "PASS" : "RED(" + red + ")";
+                    detail = "oldState=" + old.getBlock().getTranslationKey();
+                }
+            }
+        } catch (Throwable t) {
+            LOG.error("[cava/pathfind] INVALIDATE preset=" + name + " 抛出异常", t);
+            verdict = "RED(exception:" + t.getClass().getSimpleName() + ")";
+        } finally {
+            mob.discard();
+        }
+        String line = String.format(Locale.ROOT,
+                "[cava/pathfind] INVALIDATE preset=%s verdict=%s nativeOn=%s put=%s a=%s b=%s c=%s "
+                        + "hookHits=%d->%d(+%d) invalidations=%d->%d(+%d) mirrorInvalidations=%d->%d(+%d) %s",
+                p.name(), verdict, nativeOn, put, fa, fb, fc,
+                h0, h1, h1 - h0, i0, i1, i1 - i0, m0, m1, m1 - m0, detail);
+        LOG.info(line);
+        source.sendFeedback(() -> Text.literal(line), false);
+        return verdict.startsWith("PASS") ? 1 : 0;
     }
 
     private static void fail(ServerCommandSource source, long id, String preset, String mode, int count, String reason) {

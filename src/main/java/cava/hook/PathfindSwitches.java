@@ -50,6 +50,21 @@ public final class PathfindSwitches {
      */
     public static final String PROP_BYPASS_PROFILE_GATE = "cava.pathfind.diagnostic.bypassProfileGate";
 
+    /**
+     * **窗口截断检测总开关**（默认 true，2026-09-24 P1-FIX 加）。
+     *
+     * <p>false = 完全不做窗口截断检测 ⇒ 原生会把"到最接近点"的截断路径当答案交回去
+     * （实测 {@code detour128} 两腿不一致）。**只给可证伪对照用**，生产不要关。
+     */
+    public static final String PROP_WINDOW_GUARD = "cava.pathfind.window.guard";
+    /**
+     * "原生没抵达目标"时的处置策略（默认 {@code early-stop}，见 {@link WindowTruncationGuard}）：
+     * {@code early-stop} = 只在"搜索停得太早"（路径步数 < 起点目标直线距离）时回退；
+     * {@code always} = 一律回退（最保守，会把 maze63 那种**已实测逐字段一致**的预算耗尽场景也拖回 Java）；
+     * {@code off} = 不回退（只计数）。
+     */
+    public static final String PROP_WINDOW_NOT_REACHED = "cava.pathfind.window.notReached";
+
     /** {@link #PROP_PROBE_TICKS} 的默认值。 */
     public static final int DEFAULT_PROBE_TICKS = 600;
 
@@ -82,6 +97,24 @@ public final class PathfindSwitches {
 
     private static boolean readBoolean(String key, boolean def) {
         return parseBoolean(System.getProperty(key), def);
+    }
+
+    /** true = 做窗口截断检测（默认 true）。 */
+    public static boolean windowGuardEnabled() {
+        return readBoolean(PROP_WINDOW_GUARD, true);
+    }
+
+    /** {@link #PROP_WINDOW_NOT_REACHED} 的策略串（非法值一律回默认 {@code early-stop}）。 */
+    public static String windowNotReachedPolicy() {
+        String v = System.getProperty(PROP_WINDOW_NOT_REACHED);
+        if (v == null) {
+            return "early-stop";
+        }
+        String t = v.trim().toLowerCase(java.util.Locale.ROOT);
+        return switch (t) {
+            case "always", "off", "early-stop" -> t;
+            default -> "early-stop";
+        };
     }
 
     private static long readLong(String key, long def) {
@@ -122,6 +155,7 @@ public final class PathfindSwitches {
                 + " native=" + nativeTakeoverEnabled()
                 + " probe=" + probeEnabled()
                 + " bypassProfileGate=" + bypassProfileGate()
-                + " probeTicks=" + probeTicks();
+                + " probeTicks=" + probeTicks()
+                + " " + WindowTruncationGuard.describe();
     }
 }

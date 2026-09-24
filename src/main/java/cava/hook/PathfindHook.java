@@ -73,6 +73,10 @@ public final class PathfindHook {
     private final AtomicLong consecutiveErrors = new AtomicLong();
     private final AtomicLong uploadNanos = new AtomicLong();
     private final AtomicLong solveNanos = new AtomicLong();
+    /** 原生调用之后**被窗口截断检测判回退**的次数（回退率的分母之一）。 */
+    private final AtomicLong windowFallbacks = new AtomicLong();
+    /** 各判据的命中次数（含"计数但不回退"的 not-reached-structural）。 */
+    private final Map<String, AtomicLong> guardHits = new ConcurrentHashMap<>();
 
     private volatile boolean disabled;
     private volatile String disabledReason = "";
@@ -316,8 +320,9 @@ public final class PathfindHook {
             // 窗口策略归**镜像侧**（captain 2026-09-22 裁决，契约 pushForSolve）：
             // 实测"注入流每次自己算并重推 35³=42875 格"≈320 µs/次，而 vanilla 整个求解只要 ≈33 µs
             // ⇒ 打开原生反而慢 13.9 倍。现在只给起点/终点/体型，推什么、要不要复用由镜像侧决定。
+            RegionSource.Pushed window;
             try {
-                mirror.pushForSolve(mob.getBlockX(), mob.getBlockY(), mob.getBlockZ(),
+                window = mirror.pushForSolve(mob.getBlockX(), mob.getBlockY(), mob.getBlockZ(),
                         target.getX(), target.getY(), target.getZ(),
                         profile.width, profile.height, profile.safeFallDistance);
             } catch (RegionSource.MirrorUnavailableException e) {
@@ -344,7 +349,28 @@ public final class PathfindHook {
                             : "native-" + CavaLayouts.errorName(rc));
                     return null;
                 }
-                Path path = NativePathBuilder.toPath(NativeNodeCodec.decode(out, rc), target, reachRange);
+                List<NativeNodeCodec.Node> nodes = NativeNodeCodec.decode(out, rc);
+                if (nodes == null) {
+                    count("decode-rejected");
+                    return null;
+                }
+                // **窗口截断检测**（缺陷 2 的修复件）：原生只看得到 pushForSolve 推的那个矩形，
+                // 而原版最优路径可以离开它（实测 detour128/repush：原生 64 节点停在墙前 vs 原版 128 节点绕过墙）。
+                // 判定为"可能被窗口截断" ⇒ 这次调用**整体回退 Java**（返回 null，原逻辑照跑）。
+                WindowTruncationGuard.Verdict verdict = WindowTruncationGuard.check(
+                        window.originX(), window.originY(), window.originZ(),
+                        window.dimX(), window.dimY(), window.dimZ(),
+                        world.getBottomY(), world.getTopY() - 1,
+                        nodes, target.getX(), target.getY(), target.getZ(), reachRange);
+                if (!verdict.reason().isEmpty()) {
+                    guardHits.computeIfAbsent(verdict.reason(), k -> new AtomicLong()).incrementAndGet();
+                }
+                if (verdict.fallback()) {
+                    windowFallbacks.incrementAndGet();
+                    count("window-" + verdict.reason());
+                    return null;
+                }
+                Path path = NativePathBuilder.toPath(nodes, target, reachRange);
                 if (path == null) {
                     count("decode-rejected");
                     return null;
@@ -431,6 +457,7 @@ public final class PathfindHook {
                 + " nativeCalls=" + nativeCalls.get()
                 + " errors=" + errors.get()
                 + " disabled=" + disabled
+                + " " + fallbackReport()
                 + " reasons=" + reasonSummary();
     }
 
@@ -454,6 +481,49 @@ public final class PathfindHook {
         return solveNanos.get();
     }
 
+    /** 被窗口截断检测判回退的次数。 */
+    public long windowFallbacks() {
+        return windowFallbacks.get();
+    }
+
+    /** 某条判据的命中次数（含未回退的 {@code not-reached-structural}）。 */
+    public long guardHits(String reason) {
+        AtomicLong v = guardHits.get(reason);
+        return v == null ? 0L : v.get();
+    }
+
+    /**
+     * 回退率一行（分母 = 原生真的被调用过的次数）：
+     * {@code nativeCalls=..., takeovers=..., fallbacks=... (x%), 判据分布={...}}。
+     * 没有它就看不出"收益还剩多少"。
+     */
+    public String fallbackReport() {
+        long calls = nativeCalls.get();
+        long fb = windowFallbacks.get();
+        double pct = calls == 0 ? 0.0 : 100.0 * fb / calls;
+        StringBuilder sb = new StringBuilder();
+        sb.append("nativeCalls=").append(calls)
+                .append(",takeovers=").append(takeovers.get())
+                .append(",fallbacks=").append(fb)
+                .append(String.format(java.util.Locale.ROOT, " (%.2f%%)", pct))
+                .append(",judge={");
+        boolean first = true;
+        for (String k : new String[] {WindowTruncationGuard.REASON_SHELL,
+                WindowTruncationGuard.REASON_GOAL_SHELL,
+                WindowTruncationGuard.REASON_NOT_REACHED,
+                WindowTruncationGuard.REASON_NOT_REACHED_EARLY,
+                WindowTruncationGuard.REASON_NOT_REACHED_STRUCTURAL}) {
+            long v = guardHits(k);
+            if (!first) {
+                sb.append(' ');
+            }
+            sb.append(k).append('=').append(v);
+            first = false;
+        }
+        sb.append('}');
+        return sb.toString();
+    }
+
     /** 测试用：清掉统计与禁用状态。 */
     public void resetForTest() {
         reasons.clear();
@@ -463,6 +533,8 @@ public final class PathfindHook {
         consecutiveErrors.set(0);
         uploadNanos.set(0);
         solveNanos.set(0);
+        windowFallbacks.set(0);
+        guardHits.clear();
         canary.reset();
         disabled = false;
         disabledReason = "";

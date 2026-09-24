@@ -49,6 +49,11 @@ public record RegionRect(int minX, int minY, int minZ, int dimX, int dimY, int d
         return minZ + dimZ - 1;
     }
 
+    /** 坐标是否在本矩形内（含边界）。**O(1)** —— 镜像失效钩子的热路径要用它。 */
+    public boolean contains(int x, int y, int z) {
+        return x >= minX && x <= maxX() && y >= minY && y <= maxY() && z >= minZ && z <= maxZ();
+    }
+
     /** 由两个**含端点**的角点构造。 */
     public static RegionRect ofCorners(int x0, int y0, int z0, int x1, int y1, int z1) {
         int lx = Math.min(x0, x1);

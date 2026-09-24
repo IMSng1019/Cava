@@ -32,8 +32,11 @@ import org.slf4j.LoggerFactory;
  * <ol>
  *   <li>窗口尺寸由 {@link RegionRect#forSolve} 统一推导（边距出处写在那个类里），
  *       并有"推送耗时 vs 窗口尺寸"实测表（{@code RegionMirrorPerfTest}）；</li>
- *   <li><b>默认每次求解都重推</b>（数据必然新鲜）；同 tick 同矩形可用
- *       {@link #pushReusingSameTick}（快，但会漏 tick 内的方块变化）；</li>
+ *   <li><b>复用只在"同一次推送所在的 tick 内"生效</b>（{@link #pushReusingSameTick}）：
+ *       跨 tick 复用要求失效源**完备**，而 2026-09-24 的实测证明它过去并不完备
+ *       （失效方法一次都没被调用 ⇒ mob 穿墙）；现在方块变更由
+ *       {@link SectionOriginRegistry}（{@code ChunkSection.setBlockState} 主钩子）驱动，
+ *       但跨 tick 复用仍然**默认关**、要显式开（{@link #PROP_CROSSTICK_REUSE}）并带金丝雀计数；</li>
  *   <li>区段卸载 / 世界变更：本轮只做"最简失效"，{@link #onSectionUnloaded} /
  *       {@link #onBlockChanged} / {@link #onWorldChanged} 是留给后续脏跟踪流的**口子**。</li>
  * </ol>
@@ -50,6 +53,15 @@ public final class RegionMirror implements RegionSource {
      * 直接回退原逻辑。设 {@code -Dcava.mirror.shape.guard=false} 可关掉（只用于 A/B 对比）。
      */
     public static final String PROP_SHAPE_GUARD = "cava.mirror.shape.guard";
+    /**
+     * 跨 tick 复用开关（**默认 false**，2026-09-24 P1-FIX 加）。
+     *
+     * <p>打开它 = 声明"镜像失效源已经完备"。当前只有方块变更钩子
+     * （{@link SectionOriginRegistry}）与换世界/换维度两个来源，**区段卸载还没有来源**
+     * ⇒ 默认关。打开时必须先看 {@link #crossTickReuseHits()} / {@link #crossTickReuseBlocked()}
+     * 两个金丝雀计数，并跑 {@code detour128} 的 reuse 腿做逐字段比对。
+     */
+    public static final String PROP_CROSSTICK_REUSE = "cava.mirror.reuse.crosstick";
     /** 默认上限。 */
     public static final int DEFAULT_MAX_VOLUME = 1 << 21;
 
@@ -81,6 +93,9 @@ public final class RegionMirror implements RegionSource {
     private long pushes;
     private long failures;
     private long reuseSkips;
+    private long reuseSameTickHits;
+    private long crossTickReuseHits;
+    private long crossTickReuseBlocked;
     private long cellsCopied;
     private long fillNanos;
     private long allocNanos;
@@ -331,6 +346,9 @@ public final class RegionMirror implements RegionSource {
             }
             int cells = (int) rect.volume();
             ensureBuffer(cells);
+            // 方块变更失效源：本次推送覆盖到的区段要**全部登记**（含空区段），
+            // 这样 ChunkSection.setBlockState 的钩子才能把"区段局部坐标"还原成世界坐标。
+            SectionOriginRegistry.beginWindow();
 
             long t0 = System.nanoTime();
             r.fill(rect.minX(), rect.minY(), rect.minZ(), rect.dimX(), rect.dimY(), rect.dimZ(),
@@ -377,9 +395,12 @@ public final class RegionMirror implements RegionSource {
             }
             if (rc != CavaLayouts.CAVA_OK) {
                 failures++;
+                SectionOriginRegistry.clearWindow();   // 上传失败 ⇒ 原子里到底是什么不知道，宁可不复用
                 throw new MirrorUnavailableException("cava_region_upload → " + CavaLayouts.errorName(rc)
                         + " " + rect.describe());
             }
+            // 上传成功之后才发布登记：此后这个矩形内的方块写入都会让复用失效。
+            SectionOriginRegistry.publish(rect);
             long end = System.nanoTime();
             fillNanos += t1 - t0;
             allocNanos += allocCost;
@@ -403,54 +424,84 @@ public final class RegionMirror implements RegionSource {
     }
 
     /**
-     * 同 tick / 同维度 / 同矩形时复用上一次推送（**可选优化**，默认不用）。
+     * 同矩形 / 同维度 / 同 tick（**或**显式打开的跨 tick）时复用上一次推送。
      *
-     * <p>风险：同一 tick 内的方块变化（玩家/其他 mod 放置）会被漏掉 —— 所以默认路径是 {@link #push}。
+     * <p><b>为什么默认只允许"同 tick"复用（2026-09-24 P1-FIX 改，理由是构造性的）</b>：
+     * <ol>
+     *   <li>跨 tick 复用要正确，前提是"自上次上传以来的所有世界变更都能让镜像失效"——
+     *       也就是失效源必须**完备**。2026-09-22 那一版把它写成结构性保证，靠的是
+     *       {@code onBlockChanged / onSectionUnloaded / onWorldChanged} 三个入口；
+     *       但实测（{@code docs/CAVA-pathfind-perf.md} §6.3）证明**这三个入口在生产路径里
+     *       一次都没被调用过**，于是"有变更就不复用"这条保证是空的 ⇒
+     *       {@code detour128/reuse} 腿原生路径**穿过 8 格实心石头**。</li>
+     *   <li>1.20.4 的世界变更只发生在服务端主线程、且发生在 tick 内 ⇒
+     *       **"同 tick 复用"原理上不可能拿到陈旧地形**（上一次推送与本次复用在同一个 tick 内，
+     *       中间不可能插入跨 tick 的地形变更）。这一条不需要任何失效源就能成立。</li>
+     * </ol>
+     * 于是现在的默认是：{@code lastTick == r.currentTick()}（同 tick）**加上**失效事件哨兵
+     * （同 tick 内的方块变化由 {@link SectionOriginRegistry} 的主钩子补上）。两者缺一不可：
+     * 只有同 tick 会漏 tick 内的改动，只有失效哨兵会漏"根本没有事件源"的情况。
+     *
+     * <p><b>跨 tick 复用现在是显式可选项</b>：{@code -D}{@link #PROP_CROSSTICK_REUSE}{@code =true}
+     * 打开，并且带金丝雀计数 {@link #crossTickReuseHits()}（"跨 tick 复用真的命中了几次"）。
+     * **没有金丝雀证据就不许把它设成默认**。
      */
     public Pushed pushReusingSameTick(RegionRect rect) {
         RegionReader r = requireReader();
         synchronized (lock) {
-            /* 复用条件（2026-09-22 captain 修改）：
-             *   原实现要求 `lastTick == r.currentTick()` —— 那是**按 tick 判定**，
-             *   会漏掉**同一 tick 内**的方块变化（玩家/别的 mod 放置），所以它只能当"可选快路径"。
+            /* 复用条件（2026-09-24 P1-FIX 定稿）：
+             *   rect 相同 + 维度相同 + 表与上传器可用 + （同 tick 或 显式打开跨 tick）
+             *   + **没有失效事件**（lastTick != Long.MIN_VALUE 是"没有失效事件"的哨兵：
+             *     成功推送后写成真实 tick；invalidate() 把它写回 Long.MIN_VALUE）。
              *
-             *   现在改成按**"自上次上传以来没有发生任何会让区域失效的事件"**判定：
-             *   `invalidate()` 已经把 lastTick 置为 Long.MIN_VALUE，而它同时被
-             *   `onBlockChanged` / `onSectionUnloaded` / `onWorldChanged` 调用 ——
-             *   于是"有变更就不复用"成为**结构性保证**，而不是"赌 tick 内没有变更"。
-             *   代价为零（复用条件里已经比较了 rect 与维度），而收益是：
-             *   **同一片地形上的连续多次求解不再需要重推几万格**（实测瓶颈）。
-             *
-             *   注意：lastTick == Long.MIN_VALUE 同时覆盖"从未推过"与"刚失效"两种情况。*/
-            /* 复用条件（2026-09-22 captain 定稿）：
-             *   rect 相同 + 维度相同 + **自上次上传以来没有发生失效事件** + 表与上传器可用。
-             *
-             *   `lastTick != Long.MIN_VALUE` 就是"没有失效事件"的哨兵：
-             *   成功推送后 lastTick 被写成真实 tick 值；而 invalidate() 会把它写回 Long.MIN_VALUE，
-             *   且 invalidate() 由 onBlockChanged / onSectionUnloaded / onWorldChanged 调用 ——
-             *   于是"有变更就不复用"是**结构性保证**，不是"赌 tick 内没有变更"。
-             *
-             *   ⚠️ **不要再把 `lastTick == r.currentTick()` 加回来**：那是按 tick 判定，
-             *   会漏掉同一 tick 内的方块变化（玩家/别的 mod 放置），因而只能当可选快路径。
-             *   早先的版本同时写了这两个条件，结果复用**永远不可能命中**（实测 6000 次求解 0 命中）。*/
+             *   ⚠️ 历史注记（不要照抄旧注释）：2026-09-22 那版明确写着
+             *   "不要再把 lastTick == r.currentTick() 加回来"，理由是"按 tick 判定会漏同一 tick 内的
+             *   方块变化"。那条理由**只对了一半**：漏 tick 内变化是真的，但当时的结论
+             *   "所以只能当可选快路径、被失效源取代"是错的 —— 失效源当时根本不存在。
+             *   现在两件事**都要**：同 tick 限制挡住跨 tick 陈旧，失效钩子挡住 tick 内改动。
+             *   （旧版还抱怨"复用永远不可能命中"：那不中的原因是另一处接线缺失，
+             *   而"命中"本身不是目标，**正确**才是。）*/
             if (lastRect != null && lastRect.equals(rect) && lastDim.equals(r.dimensionId())
-                    && lastTick != Long.MIN_VALUE
-                    && table.ready() && uploader.available()) {
-                reuseSkips++;
-                return new Pushed(rect.dimX(), rect.dimY(), rect.dimZ(), rect.minX(), rect.minY(), rect.minZ(),
-                        lastCells, 0L);
+                    && lastTick != Long.MIN_VALUE && table.ready() && uploader.available()) {
+                long tick = r.currentTick();
+                boolean sameTick = lastTick == tick;
+                if (sameTick) {
+                    reuseSkips++;
+                    reuseSameTickHits++;
+                    return new Pushed(rect.dimX(), rect.dimY(), rect.dimZ(), rect.minX(), rect.minY(),
+                            rect.minZ(), lastCells, 0L);
+                }
+                if (crossTickReuseEnabled()) {
+                    reuseSkips++;
+                    crossTickReuseHits++;
+                    if (crossTickReuseHits <= 3 || (crossTickReuseHits % 2000) == 0) {
+                        LOG.warn("[cava/mirror] 跨 tick 复用命中 #{}（上次推送 tick={} 当前 tick={}）"
+                                        + "—— 这是 -D{}=true 的行为，正确性依赖失效源完备",
+                                crossTickReuseHits, lastTick, tick, PROP_CROSSTICK_REUSE);
+                    }
+                    return new Pushed(rect.dimX(), rect.dimY(), rect.dimZ(), rect.minX(), rect.minY(),
+                            rect.minZ(), lastCells, 0L);
+                }
+                crossTickReuseBlocked++;
             }
             return push(rect);
         }
+    }
+
+    /** 跨 tick 复用开关（默认 false；打开要带金丝雀证据，见 {@link #pushReusingSameTick}）。 */
+    public static boolean crossTickReuseEnabled() {
+        return "true".equalsIgnoreCase(System.getProperty(PROP_CROSSTICK_REUSE, "false"));
     }
 
     /** 从"起点/终点 + 生物体型"直接推一个窗口（调用方不必自己算边距）。 */
     public Pushed pushForSolve(int sx, int sy, int sz, int tx, int ty, int tz,
                                float width, float height, int safeFallDistance) {
         RegionReader r = requireReader();
-        /* **必须走复用路径**：同一片地形上的连续求解（同一 tick 内多只生物、或地形没变）不应重推。
+        /* **必须走复用路径**：同一片地形上的连续求解（同一 tick 内多只生物、或同 tick 地形没变）不应重推。
          * 2026-09-22 实测：这里原本直接调 push()，于是 6000 次求解 = 6000 次推送、**复用命中 0 次**。
-         * 复用是否成立的判定在 pushReusingSameTick 里（按"自上次上传以来有没有发生失效事件"）。*/
+         * 复用是否成立的判定在 pushReusingSameTick 里：
+         *   **同矩形 + 同维度 + 同 tick + 没有失效事件**（2026-09-24 P1-FIX 的安全默认；
+         *   跨 tick 复用要显式开 -Dcava.mirror.reuse.crosstick=true 并看金丝雀计数）。*/
         return pushReusingSameTick(RegionRect.forSolve(sx, sy, sz, tx, ty, tz, width, height, safeFallDistance,
                 r.minY(), r.maxY()));
     }
@@ -466,6 +517,7 @@ public final class RegionMirror implements RegionSource {
         lastRect = null;
         lastDim = "";
         lastTick = Long.MIN_VALUE;
+        SectionOriginRegistry.clearWindow();
         if (uploader.available()) {
             int rc = uploader.clear(uploader.handle());
             if (rc != CavaLayouts.CAVA_OK) {
@@ -525,9 +577,24 @@ public final class RegionMirror implements RegionSource {
         return failures;
     }
 
-    /** 同 tick 复用命中次数。 */
+    /** 复用命中次数（同 tick + 跨 tick 的总和）。 */
     public long reuseSkips() {
         return reuseSkips;
+    }
+
+    /** **同 tick** 复用命中次数（新的安全默认路径）。 */
+    public long reuseSameTickHits() {
+        return reuseSameTickHits;
+    }
+
+    /** 跨 tick 复用命中次数（**金丝雀**；只有显式打开 {@link #PROP_CROSSTICK_REUSE} 才会增长）。 */
+    public long crossTickReuseHits() {
+        return crossTickReuseHits;
+    }
+
+    /** 因"跨 tick 且开关关着"而被拒绝复用的次数（= 这个开关打开后能多省多少次推送的上界）。 */
+    public long crossTickReuseBlocked() {
+        return crossTickReuseBlocked;
     }
 
     /** 累计推送的方块数。 */
@@ -590,7 +657,10 @@ public final class RegionMirror implements RegionSource {
         RegionReader r = reader;
         synchronized (lock) {
             long n = Math.max(1, pushes);
-            return "区域镜像: 推送 " + pushes + " 次 / 失败 " + failures + " / 同tick复用 " + reuseSkips
+            return "区域镜像: 推送 " + pushes + " 次 / 失败 " + failures + " / 复用 " + reuseSkips
+                    + "（同tick " + reuseSameTickHits + " / 跨tick " + crossTickReuseHits
+                    + "，跨tick被拒 " + crossTickReuseBlocked + "，开关="
+                    + (crossTickReuseEnabled() ? "**开**" : "关") + "）"
                     + " / 方块 " + cellsCopied + '\n'
                     + "  平均每次: 总 " + String.format("%.2f", totalNanos / 1000.0 / n) + " us"
                     + "（填 " + String.format("%.2f", fillNanos / 1000.0 / n) + " us"

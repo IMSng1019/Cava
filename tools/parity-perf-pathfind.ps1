@@ -41,7 +41,18 @@ param(
   [int]$AiZombies = 40,
   [int]$AiTicks = 1200,
   [int]$OldBench = 0,
-  [switch]$SkipBuildCheck
+  [switch]$SkipBuildCheck,
+  # 额外的 JVM 系统属性（**可证伪对照用**）。两种写法等价：
+  #   -JavaProp '-Dcava.pathfind.window.guard=false'                       （单个）
+  #   -JavaProps '-Dcava.mirror.reuse.crosstick=true,-Dcava.mirror.invalidation=false'  （多个，逗号分隔）
+  # 为什么要有逗号版：pwsh -File 传 [string[]] 时，以 '-' 开头的元素会被当成参数名，
+  # 实测报"找不到与参数名称 'Dcava...' 匹配的参数"。
+  [string[]]$JavaProp = @(),
+  [string]$JavaProps = '',
+  # 跑缺陷 1 的反面证据：cava pathfind invalidate <preset>（改窗口内方块 ⇒ 下一次求解必须看到）
+  [switch]$Invalidate,
+  # 只跑 invalidate / diag，不跑 perf 计时循环（对照腿省时间）
+  [switch]$SkipPerf
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -155,23 +166,39 @@ if ($Compare) {
       $a = Field $o.detail $f; $b = Field $n.detail $f
       if ($a -ne $b) { $diff += "$f(off=$a on=$b)" }
     }
+    # **接管不变量（2026-09-24 P1-FIX 改）**：原来要求"每次调用都必须接管"；现在原生结果
+    # 可以被**窗口截断检测**判回退（缺陷 2 的修复），所以不变量改成
+    #   takeovers + fallbacks == expectDelta
+    # —— 每一次调用要么接管、要么被**明确计数**地回退。既没接管也没计数 ⇒ 仍然红。
     $tk = Field $n.detail 'takeovers'; $exp = Field $n.detail 'expectDelta'
-    if ($tk -ne '(缺)' -and $exp -ne '(缺)' -and $tk -ne $exp) { $diff += "on腿未全部接管(takeovers=$tk expect=$exp)" }
+    $fbn = Field $n.detail 'fallbacks'
+    if ($fbn -eq '(缺)') { $fbn = '0' }   # 旧 jar 里没有这个字段：按 0 处理，保持向后兼容
+    if ($tk -ne '(缺)' -and $exp -ne '(缺)' -and ([int]$tk + [int]$fbn) -ne [int]$exp) {
+      $diff += "on腿调用未被完整记账(takeovers=$tk fallbacks=$fbn expect=$exp)"
+    }
     $rows += [pscustomobject]@{
       key = $k; ns_off = (Field $o.perf 'ns_avg'); ns_on = (Field $n.perf 'ns_avg')
-      nodes = (Field $o.perf 'nodes_avg'); diff = ($diff -join '; ')
+      nodes = (Field $o.perf 'nodes_avg'); fb = $fbn
+      fbearly = (Field $n.detail 'fb_earlyStop'); fbstruct = (Field $n.detail 'fb_structural')
+      diff = ($diff -join '; ')
     }
     if ($diff.Count) { $red += "$k : $($diff -join ' | ')" }
   }
   Write-Host ''
   Write-Host "--- 每次调用耗时（ns/次）与节点数 ---"
-  Write-Host ("  {0,-20} {1,14} {2,14} {3,10} {4}" -f 'preset/mode', 'off ns', 'on ns', 'off nodes', 'off/on')
+  Write-Host ("  {0,-20} {1,14} {2,14} {3,10} {4,10} {5}" -f 'preset/mode', 'off ns', 'on ns', 'off nodes', 'off/on', '回退(早停/结构)')
   foreach ($r in $rows) {
     $ratio = ''
     if ($r.ns_off -match '^[\d.]+$' -and $r.ns_on -match '^[\d.]+$' -and [double]$r.ns_on -gt 0) {
       $ratio = ('{0:n3}x' -f ([double]$r.ns_off / [double]$r.ns_on))
     }
-    Write-Host ("  {0,-20} {1,14} {2,14} {3,10} {4}" -f $r.key, $r.ns_off, $r.ns_on, $r.nodes, $ratio)
+    Write-Host ("  {0,-20} {1,14} {2,14} {3,10} {4,10} {5}" -f $r.key, $r.ns_off, $r.ns_on, $r.nodes, $ratio, "$($r.fb)/$($r.fbearly)/$($r.fbstruct)")
+  }
+  Write-Host ''
+  Write-Host "--- 缺陷 1 失效钩子实测（-Invalidate 才有）---"
+  foreach ($f in @($offFile, $onFile)) {
+    $inv = Select-String -LiteralPath $f -Pattern 'INVALIDATE preset=' -ErrorAction SilentlyContinue | ForEach-Object { $_.Line }
+    foreach ($l in $inv) { Write-Host ("  {0}: {1}" -f (Split-Path $f -Leaf), $l) }
   }
   Write-Host ''
   if ($red.Count) {
@@ -232,6 +259,9 @@ $javaArgs = @('-Xms2G', '-Xmx4G', '-Dstdout.encoding=UTF-8', '-Dstderr.encoding=
 if ($Native -eq 'on') { $javaArgs += '-Dcava.pathfind.native=true' }
 if ($TargetOffset -ne 0) { $javaArgs += "-Dcava.pathfind.perf.targetOffset=$TargetOffset" }
 $javaArgs += '-Dcava.pathfind.probe=false'
+$extraProps = @($JavaProp) + @($JavaProps -split '[,\s]+' | Where-Object { $_ })
+$javaArgs += $extraProps
+Write-Host "[perf] javaProp: $($extraProps -join ' ')"
 
 $srv = Start-CavaServer -Root $Root -Name $Leg -JavaArgs $javaArgs
 Write-Host "[perf] pid=$($srv.Process.Id) log=$($srv.Log)"
@@ -378,6 +408,15 @@ foreach ($preset in $want) {
     Select-String -LiteralPath $srv.Log -Pattern $diagPat | Select-Object -Last 1 | ForEach-Object { Write-Host "  $($_.Line.Trim())" }
     continue
   }
+  if ($Invalidate) {
+    $invPat = "INVALIDATE preset=$preset "
+    $bi = (Select-String -LiteralPath $srv.Log -Pattern $invPat -ErrorAction SilentlyContinue | Measure-Object).Count
+    Rcon "cava pathfind invalidate $preset" | Out-Null
+    [void](Wait-LogCount $invPat $bi 600)
+    Select-String -LiteralPath $srv.Log -Pattern $invPat | Select-Object -Last 1 |
+      ForEach-Object { Write-Host "  $($_.Line.Trim())" }
+  }
+  if ($SkipPerf) { continue }
   foreach ($mode in $modeList) {
     $n = if ($mode -eq 'repush') { $RepushN[$preset] } else { $PresetN[$preset] }
     if ($ForceN -gt 0) { $n = $ForceN }
@@ -392,7 +431,7 @@ foreach ($preset in $want) {
 }
 
 Start-Sleep -Seconds 1
-$lines = Select-String -LiteralPath $srv.Log -Pattern 'PERF id=|PERFDETAIL id=|SITE |DIAG |EXPLORE |BENCH id=|接管条件|pathfind\] 原生接管|PROBE_|ai-load' -ErrorAction SilentlyContinue |
+$lines = Select-String -LiteralPath $srv.Log -Pattern 'PERF id=|PERFDETAIL id=|SITE |DIAG |EXPLORE |INVALIDATE |BENCH id=|接管条件|pathfind\] 原生接管|PROBE_|ai-load' -ErrorAction SilentlyContinue |
   ForEach-Object { $_.Line.Trim() }
 Stop-LegServer $srv
 
@@ -412,6 +451,7 @@ $head += "#deployed=$($art0.deployed)"
 $head += "#dllAfter=$($art1.dll)"
 $head += "#jarAfter=$($art1.jar)"
 $head += "#dllStable=$($art0.dll -eq $art1.dll)"
+$head += "#javaProp=$($extraProps -join ' ')"
 $head += "#javaArgs=$($srv.CommandLine)"
 $outFile = Join-Path $resultsDir "$Leg.txt"
 ($head + $lines) | Set-Content -Encoding UTF8 $outFile

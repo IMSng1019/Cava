@@ -22,6 +22,21 @@ class RegionRectTest {
         assertTrue(r.describe().contains("3x3x5"));
     }
 
+    /** {@code contains} 是方块变更钩子的热路径判据（O(1)、含边界）。 */
+    @Test
+    void containsIsInclusive() {
+        RegionRect r = new RegionRect(28, 67, -4, 137, 9, 9);
+        assertTrue(r.contains(28, 67, -4), "最小角点必须算在内");
+        assertTrue(r.contains(164, 75, 4), "最大角点必须算在内");
+        assertTrue(r.contains(96, 71, 0));
+        assertEquals(false, r.contains(27, 71, 0));
+        assertEquals(false, r.contains(165, 71, 0));
+        assertEquals(false, r.contains(96, 66, 0));
+        assertEquals(false, r.contains(96, 76, 0));
+        assertEquals(false, r.contains(96, 71, 5));
+        assertEquals(false, r.contains(96, 71, -5));
+    }
+
     @Test
     void rejectsEmptyDims() {
         assertThrows(IllegalArgumentException.class, () -> new RegionRect(0, 0, 0, 0, 1, 1));

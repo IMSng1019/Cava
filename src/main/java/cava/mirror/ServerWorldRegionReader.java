@@ -82,6 +82,10 @@ public final class ServerWorldRegionReader implements RegionReader {
                         continue;
                     }
                     ChunkSection sec = sections[i];
+                    // **失效源登记**：本次推送覆盖到的区段（含空区段）都要登记原点，
+                    // 否则 ChunkSection.setBlockState 的钩子无法把区段局部坐标还原成世界坐标
+                    // ⇒ 漏失效 ⇒ 原生拿着陈旧地形算路径（实测会让 mob 穿墙）。
+                    SectionOriginRegistry.register(sec, cx << 4, secBottom, cz << 4);
                     boolean empty = sec == null || sec.isEmpty();
                     if (empty) {
                         continue; // 已经是 airStateId

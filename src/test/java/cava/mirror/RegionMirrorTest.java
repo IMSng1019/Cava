@@ -248,44 +248,90 @@ class RegionMirrorTest {
     }
 
     /**
-     * 复用语义（2026-09-22 captain 定稿）：**按"自上次上传以来有没有发生失效事件"判定，不按 tick 判定**。
+     * 复用语义（**2026-09-24 P1-FIX 定稿**）：**同矩形 + 同维度 + 同 tick + 没有失效事件**。
      *
-     * <p>旧语义是"同 tick 才复用"，那会漏掉同一 tick 内的方块变化，所以只能当可选快路径；
-     * 而且旧版本同时要求 {@code lastTick == currentTick} 与 {@code lastTick != MIN_VALUE}，
-     * 导致**复用永远不可能命中**（实测 6000 次求解 0 命中）。
-     *
-     * <p>新语义下：换 tick 但地形没变 → **仍然复用**；只要 {@code onBlockChanged} /
-     * {@code onSectionUnloaded} / {@code onWorldChanged} 任一生效 → **必须重推**。
-     * 这正是"有变更就不复用"从赌变成结构性保证的地方，所以下面两条断言都很重要：
-     * 前者保证性能（否则 320µs/次的推送会淹没求解），后者保证正确性。
+     * <p>为什么把"跨 tick 复用"从默认里去掉（这条是实测逼出来的）：
+     * 2026-09-22 那版按"自上次上传以来没有失效事件"复用，声称是结构性保证；但
+     * {@code onBlockChanged/onSectionUnloaded/onWorldChanged} **在生产路径里一次都没被调用过**
+     * ⇒ detour128/reuse 腿原生路径穿过 8 格实心石头（{@code docs/CAVA-pathfind-perf.md} §6.3）。
+     * 现在两件事都要：
+     * <ul>
+     *   <li><b>同 tick</b>：1.20.4 的世界变更只在服务端主线程、发生在 tick 内 ⇒
+     *       同 tick 复用原理上拿不到跨 tick 的陈旧地形（构造性，不需要失效源）；</li>
+     *   <li><b>失效事件</b>：同 tick 内的改动（玩家/mod 放方块、本站点重建）必须让它失效 ——
+     *       这条由 {@code SectionOriginRegistry}（{@code ChunkSection.setBlockState} 主钩子）提供。</li>
+     * </ul>
      */
     @Test
-    void reuseIsKeyedOnInvalidationNotOnTick() {
+    void reuseRequiresSameTickAndNoInvalidation() {
         RegionRect rect = new RegionRect(0, 60, 0, 8, 8, 8);
         mirror.pushReusingSameTick(rect);
         assertEquals(1, uploader.uploads.size());
         mirror.pushReusingSameTick(rect);
-        assertEquals(1, uploader.uploads.size(), "同矩形且无失效事件应当复用");
+        assertEquals(1, uploader.uploads.size(), "同 tick + 同矩形 + 无失效事件应当复用");
         assertEquals(1, mirror.reuseSkips());
+        assertEquals(1, mirror.reuseSameTickHits());
+        assertEquals(0, mirror.crossTickReuseHits());
 
-        // 换了 tick，但地形没变 -> **仍然复用**（旧语义在这里会重推，正是 0 命中率的原因）
+        // 换了 tick、地形没变 -> **必须重推**（安全默认：跨 tick 复用要显式打开且要有金丝雀证据）
         reader.tick++;
         mirror.pushReusingSameTick(rect);
-        assertEquals(1, uploader.uploads.size(), "换 tick 但无失效事件必须复用");
-        assertEquals(2, mirror.reuseSkips());
+        assertEquals(2, uploader.uploads.size(), "跨 tick 默认必须重推");
+        assertEquals(0, mirror.crossTickReuseHits());
+        assertEquals(1, mirror.crossTickReuseBlocked());
 
-        // 方块变化 -> 立即失效，必须重推（正确性保证）
+        // 同 tick 内的方块变化 -> 立即失效，必须重推（正确性保证）
+        mirror.pushReusingSameTick(rect);
+        assertEquals(2, uploader.uploads.size(), "回到同 tick 应当复用");
         mirror.onBlockChanged(1, 2, 3);
         mirror.pushReusingSameTick(rect);
-        assertEquals(2, uploader.uploads.size(), "方块变化后必须重推");
+        assertEquals(3, uploader.uploads.size(), "方块变化后必须重推");
         assertEquals(1, mirror.invalidationCount());
         assertTrue(mirror.lastInvalidation().contains("方块变化"));
 
         // 区段卸载 -> 同样必须重推
         mirror.onSectionUnloaded(0, 0);
         mirror.pushReusingSameTick(rect);
-        assertEquals(3, uploader.uploads.size(), "区段卸载后必须重推");
+        assertEquals(4, uploader.uploads.size(), "区段卸载后必须重推");
         assertEquals(2, mirror.invalidationCount());
+    }
+
+    /**
+     * **跨 tick 复用是显式可选项**（{@code -Dcava.mirror.reuse.crosstick=true}）：打开后才命中，
+     * 并且**有金丝雀计数**。默认关（没有金丝雀证据不许默认打开）。
+     */
+    @Test
+    void crossTickReuseIsOptInWithCanary() {
+        System.setProperty(RegionMirror.PROP_CROSSTICK_REUSE, "true");
+        try {
+            RegionRect rect = new RegionRect(0, 60, 0, 8, 8, 8);
+            mirror.pushReusingSameTick(rect);
+            reader.tick += 5;
+            mirror.pushReusingSameTick(rect);
+            assertEquals(1, uploader.uploads.size(), "打开开关后跨 tick 复用应当命中");
+            assertEquals(1, mirror.crossTickReuseHits(), "金丝雀计数必须增长");
+            assertEquals(0, mirror.reuseSameTickHits());
+            assertEquals(0, mirror.crossTickReuseBlocked());
+
+            // 失效事件照样优先：有变更必须重推
+            mirror.onBlockChanged(0, 60, 0);
+            mirror.pushReusingSameTick(rect);
+            assertEquals(2, uploader.uploads.size(), "失效事件优先于跨 tick 复用");
+        } finally {
+            System.clearProperty(RegionMirror.PROP_CROSSTICK_REUSE);
+        }
+    }
+
+    /** 推送成功后镜像必须发布"区段 → 原点"登记表（方块变更钩子的世界坐标靠它还原）。 */
+    @Test
+    void pushPublishesSectionOriginsForTheBlockHook() {
+        SectionOriginRegistry.resetForTest();
+        RegionRect rect = new RegionRect(0, 60, 0, 8, 8, 8);
+        assertNull(SectionOriginRegistry.cachedRect());
+        mirror.push(rect);
+        assertEquals(rect, SectionOriginRegistry.cachedRect(), "推送成功后必须发布缓存矩形");
+        mirror.clear();
+        assertNull(SectionOriginRegistry.cachedRect(), "clear 之后没有缓存内容可失效");
     }
 
     @Test

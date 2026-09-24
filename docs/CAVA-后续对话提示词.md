@@ -356,3 +356,49 @@ J:/mc/Cava　（Fabric mod 项目；原生代码放 native/；文档在 docs/）
 - **兼容矩阵与语义基准**：docs/CAVA-platform-and-compat.md
 - **调研原始产物**：.cava-research/（四份分片报告 + javap 注解解析 + refmap 提取）、.probe/（552 个 mixin 源文件）、.research/（Lithium/C2ME 源码树）
 - **关键数字**：FFM 边界 14–16 ns/次、upcall 26–29 ns/次、Arena 分配 140 ns；实测只有 + - * / 与 sqrt 能与 Java 逐位一致
+
+---
+
+## 附二·C：**P1–P4 的状态与"交付物"（2026-09-24 会话结束时）**
+
+> 详细证据：`docs/CAVA-gates.md` 门禁 #8（captain 亲自复跑）、`docs/CAVA-hardening-notes.md`（P4-A 加固）、
+> `docs/CAVA-platform-notes.md`（P4-B 平台/CI + MSVC 轮）、`docs/CAVA-p2-*-notes.md`。
+
+### 各阶段结论（一句话版）
+
+| 阶段 | 结论 | 关键数字 |
+| --- | --- | --- |
+| P1 寻路 | **上线**（HEAD 取消 + 原生求解，含 live 接管与自证） | 接管 144158 次、liveVerified 96220、mismatch **0**；单目标场景 avgNodes 与 native off 一致 |
+| P2 实体 | **live 接管已达成**，但两个核的**性能是净亏**，明确决定不上线 | core1 净 **+1.86 µs/次**；core2 broadphase 净 **+6.8 µs/次**；`pushCalls=0`（本整合包 MobEntity 会被静默移除） |
+| P3 红石 | **让位（defer）**，零红石加速 | Carpet `fastRedstoneDust` 开启时 `RedstoneWireBlock.update` 是死方法（3 个调用点全被 redirect）；且现夹具对红石算法**不敏感** ⇒ "w 一致"**不能**当红石等价证据 |
+| P4 平台 | 5 平台构建矩阵 + 数值一致性套件**写全**，**非 Windows 一条都没跑过** | 平台套件 windows-x64 **31 项全过**、标签推导 17/17、flagcheck 36 过/1 跳过；CI job 名都带 `[unverified-local]` |
+| P4 加固 | 熔断/看门狗/fuzz/SAFE/一键回滚**全部有实跑证据** | fuzz 三产物 × 200467 例 0 崩溃；熔断阈值 5；回滚 = 一个 JVM 参数 |
+
+### ★ 交付物（Windows x64）
+
+    natives/windows-x64/cava.dll   257536 B
+    sha256  0EBE3B04A869819D7A59C8ADC11B0D1277B120B80F956A7C05D2EB62D007904D
+    build_id = cava 0.1.0 windows-x64 MSVC 19.44.35228.0 (MSVC toolset v143) /O2 /fp:strict safe=0
+    导入表 = 只有 KERNEL32.dll（/MT 静态 CRT）
+
+**为什么是 MSVC 而不是 MinGW**：契约 `docs/CAVA-platform-and-compat.md` §1.1/§1.5 规定 windows-x64 的生产工具链
+是 **MSVC + /MT**，MinGW「仅作辅助」。此前一直是 MinGW 产物 ⇒ 交付物与自己的契约不符，本轮换掉。
+重建命令：`cmd /c build\msvc-captain.bat`（configure）+ `cmd /c build\msvc-captain-build.bat`（build）。
+
+### 三条必须继承的纪律
+
+1. **产物指纹纪律**：`natives/<tag>/` 是共享输出目录且**有两个生产者**（根 CMakeLists 与 `native/tests/build-mingw.ps1`）。
+   任何依赖产物的结论**必须记 Size+SHA256**，哈希一变结论即作废。本轮真出过两次"验证被静默作废"。
+2. **交付物 = 根 CMakeLists 的产物**（`gradlew buildNative`）；`build-mingw.ps1` 只是辅助路径。
+3. **`--parallel` 的多节点 MSBuild 在本沙箱里静默失败**（exit=1，零 error 行）⇒ 用
+   `--parallel 1` + `set MSBUILDDISABLENODEREUSE=1`。同理 Ninja 生成器卡死过一次（CPU 0%，未定位），
+   本机稳妥的生成器是 **MinGW Makefiles** 与 **Visual Studio 17 2022**。
+
+### 仍未闭合（新会话别当成已完成）
+
+- **性能对比（prompts/04 验收）**：小场景（6 格）无代表性，需要**大搜索空间**场景（长路径/迷宫）下 native on/off
+  的每次调用与每 tick 数字 —— 本轮末由 P1-PERF 流在做。
+- **7 天连续运行 + native 回退计数为 0**（prompts/07 验收第 2 条）：没有 7×24 环境。
+- **非 Windows 平台 / ASan / UBSan**：本机无工具链、Docker 守护进程未运行、WSL 被拒。
+- **区段并发卸载 fuzz / hs_err 崩溃取证**：本轮末由 P4-C 流在做。
+- **MSVC 产物的真实服务端冒烟**：MinGW 产物跑过（门禁 #6），MSVC 产物由 P4 MSVC 流补。

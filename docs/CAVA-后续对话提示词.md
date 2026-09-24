@@ -371,7 +371,7 @@ J:/mc/Cava　（Fabric mod 项目；原生代码放 native/；文档在 docs/）
 | P1 寻路 | **上线**（HEAD 取消 + 原生求解，含 live 接管与自证） | 接管 144158 次、liveVerified 96220、mismatch **0**；单目标场景 avgNodes 与 native off 一致 |
 | P2 实体 | **live 接管已达成**，但两个核的**性能是净亏**，明确决定不上线 | core1 净 **+1.86 µs/次**；core2 broadphase 净 **+6.8 µs/次**；`pushCalls=0`（本整合包 MobEntity 会被静默移除） |
 | P3 红石 | **让位（defer）**，零红石加速 | Carpet `fastRedstoneDust` 开启时 `RedstoneWireBlock.update` 是死方法（3 个调用点全被 redirect）；且现夹具对红石算法**不敏感** ⇒ "w 一致"**不能**当红石等价证据 |
-| P4 平台 | 5 平台构建矩阵 + 数值一致性套件**写全**，**非 Windows 一条都没跑过** | 平台套件 windows-x64 **31 项全过**、标签推导 17/17、flagcheck 36 过/1 跳过；CI job 名都带 `[unverified-local]` |
+| P4 平台 | 5 平台构建矩阵 + 数值一致性套件**写全**，**非 Windows 一条都没跑过** | 平台套件 windows-x64 **32 项全过（CI 口径：带 `--expect-rows 15456`；不带是 31 项）**、标签推导 17/17、flagcheck 36 过/1 跳过；CI job 名都带 `[unverified-local]` |
 | P4 加固 | 熔断/看门狗/fuzz/SAFE/一键回滚**全部有实跑证据** | fuzz 三产物 × 200467 例 0 崩溃；熔断阈值 5；回滚 = 一个 JVM 参数 |
 
 ### ★ 交付物（Windows x64）

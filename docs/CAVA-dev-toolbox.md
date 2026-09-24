@@ -94,7 +94,7 @@ javadoc 行也以 `c` 开头，判别式必须是 `p.length === 4 && p[2].indexO
 | `tools/harden-fuzz.ps1` / `native/tests/fuzz/build-fuzz.ps1` | **已冻结 ABI 的坏输入 fuzz**（越界/NaN/颠倒 AABB/cap 不足/伪造句柄；输出缓冲区顶到 guard page + 0xA5 哨兵） | `pwsh -File native/tests/fuzz/build-fuzz.ps1 -Cases 20000`（`-Dll <路径>` 可换任意产物） |
 | `tools/platform-flagcheck.ps1` | **从产物反查编译开关**（flags.make / compile_commands.json / 导入表 / 反汇编里有没有 AVX） | `pwsh -File tools/platform-flagcheck.ps1 -BuildDir build/native-captain -Lib natives/windows-x64/cava.dll` |
 | `tools/platform-tagmatrix.ps1` | 5 平台标签推导矩阵（`-RealCrossConfigure` 会真的交叉 configure 成 Linux） | `pwsh -File tools/platform-tagmatrix.ps1` |
-| `native/tests/platform/` | **平台数值一致性套件**（逐位 + 编译开关 + ABI 布局；31 项） | `cava_platform_suite.exe --golden native/tests/vectors/fp_probe.txt`（`CAVA_SUITE_LIB` 指定被测库） |
+| `native/tests/platform/` | **平台数值一致性套件**（逐位 + 编译开关 + ABI 布局；**不带 `--expect-rows` 是 31 项、带 `--expect-rows 15456` 是 32 项，CI 用后者**） | `cava_platform_suite.exe --golden native/tests/vectors/fp_probe.txt --expect-rows 15456`（`CAVA_SUITE_LIB` 指定被测库） |
 | `tools/hs-err-report.ps1` + `tools/crash-probe.ps1` | **崩溃取证**：真崩出 hs_err → 判定"问题帧在哪个模块"（模块级判定，不是 grep 文本） | `pwsh -File tools/crash-probe.ps1`；单跑 `pwsh -File tools/hs-err-report.ps1 -Log <hs_err>` |
 | `tools/CavaArtifactProbe.java` | 交付物指纹（Size/SHA256/build_id/entries/layout_sum） | 见脚本头 |
 

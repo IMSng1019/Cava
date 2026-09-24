@@ -438,3 +438,25 @@ CMakeLists 第 41 行的注释就是要求这个）之后：
    "超阈值 ⇒ 告警"这条只在假时钟与阈值 1 ns 下验证过（`slow=0` 是真实运行的读数）。
 7. **熔断的"真故障"注入**：用"关闭的 Arena"制造 FFM downcall 异常（真实、可复现）；
    **没有**制造过一次真实的原生 `CAVA_ERR_INTERNAL`（那需要往库里注入故障）。
+---
+
+## 8. captain 追加（2026-09-24，P4-C 轮之后）：§7 里有两条**已闭合**
+
+- **§7 第 2 条（崩溃取证）→ 已闭合**：P4-C 交付了 `tools/crash-probe.ps1` + `tools/hs-err-report.ps1`
+  + 一个**故意写坏**的探针 DLL。真跑三次真实 JVM 硬崩（`EXCEPTION_ACCESS_VIOLATION`，各产出 hs_err，
+  无 WER 弹窗、无挂起，214/202/200 ms），四种输入判定互不相同：
+  `NOT_CAVA_PROBE` / `NOT_CAVA` / `CAVA_NATIVE_FAULT` / `PARSE_FAILED`（损坏输入 **exit=2**，拒绝给结论）。
+  我**独立复跑**过：`CRASH-PROBE: PASS`，13/13 断言。
+- **§7 第 4 条（区段并发卸载）→ 已闭合**：fuzz 驱动加了 **8 线程 × 4000 轮**阶段（卸载/读/求解/换表），
+  三份产物 × 200467 例：`crashes=0 undefined_returns=0 torn=0 contract_violations=0 overruns=0`。
+  我**独立复跑**过（`-Cases 20000`）：MT SUMMARY `threads=8 calls=36112 … torn=0 contract_violations=0`，PASS。
+
+**并且它**挖出了一个真问题**（值得比"跑绿了"更被记住）**：并发替换形状表期间 `cava_resolve_move`
+有 **0.381%** 返回 `CAVA_ERR_ARG`（角色掩码归因：只求解 0/11736、求解+换表 0/35736、四角色全开 367/96439）。
+不是内存损坏，是**调用序列层面没有原子性**。处置：**写契约条款**（§2.1 第 10 条，线程模型 +
+上线判据 `unavailableCalls==0 && offThreadCalls==0 && tripped==false`），**不给热路径加锁**。
+⇒ 也就是说：**这一条从"未验证"变成了"已验证 + 有明确条款"**，而不是"验证通过"。
+
+**§7 其余各条仍然成立**：7 天连续运行（1）、非 windows-x64（3）、ASan/UBSan（5）、
+看门狗自然超阈值（6）、真实 `CAVA_ERR_INTERNAL` 注入（7）——本机都做不到，原因见原文。
+

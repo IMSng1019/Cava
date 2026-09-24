@@ -36,16 +36,21 @@
 | 原生测试（MSVC 编） | `ctest --test-dir build/native-captain-msvc -C Release` | **4/4 Passed** |
 | 自测计数 | `cava_test_cava_selftest.exe` | **180 passed, 0 failed** |
 | 寻路向量 | `cava_test_cava_pathfind_vectors.exe` | cases=10000 + 60，**mismatches=0** |
-| 平台数值套件（MSVC 编） | `build/native-msvc/suite-msvc/Release/cava_platform_suite.exe` | **pass=30 fail=0 skip=1** verdict=PASS |
-| 平台数值套件（GCC 编，跨编译器） | `build/platform-captain/cava_platform_suite.exe` | **pass=31 fail=0 skip=0** verdict=PASS（15456 行逐位 0 差异） |
+| 平台数值套件（MSVC 编） | `build/native-msvc/suite-msvc/Release/cava_platform_suite.exe --golden … --expect-rows 15456` | **pass=31 fail=0 skip=1** verdict=PASS |
+| 平台数值套件（GCC 编，跨编译器） | `build/platform-captain/cava_platform_suite.exe --golden … --expect-rows 15456` | **pass=32 fail=0 skip=0** verdict=PASS（15456 行逐位 0 差异） |
 | ABI 布局 | 上述两条 | `cava_layout_report`=14 条、`layout_hash_sum=0x1C12265E`、`cava_open` rc=0 |
 | 导出面 | `objdump -p` | `cava_abi.h` 的 **19 个符号全在**，另有 3 个未在头文件声明的 `cava_push_*` |
 | ABI fuzz | `build-fuzz.ps1 -Cases 20000 -SkipBuild` | cases=40467，**crashes=0 undefined_returns=0 state_mutations=0 overruns=0** |
 | Java 全量 | `gradlew test --rerun-tasks` | **tests=235 failures=0 errors=0 skipped=9**（FFM 绑定的就是这份 MSVC DLL） |
 
-> **MSVC 少一条、多一个 skip 是正常的**：那条检查依赖 GCC 才有的编译期宏，MSVC 上走 `skip()` **明确记账**，
-> 不是假装通过。**检查条数是 31**（环境画像 4 + 编译开关 5 + 逐位一致性 6 + ABI 布局 16）——
-> 文档里原先写的 32 是错的，已在 `docs/CAVA-platform-notes.md` 就地更正（见 8.3）。
+> **MSVC 多一个 skip 是正常的**：那条依赖 `__BYTE_ORDER__`（GCC 才有），MSVC 上走 `skip()` **明确记账**，
+> 不是假装通过。
+>
+> **★ 关于条数（我在这里先判错了别人，见 8.3 第 3 条）**：同一个二进制、同一个库，
+> **条数取决于命令行** —— 不带 `--expect-rows` 是 31 项，带 `--expect-rows 15456` 是 32 项
+> （多的一条是 `黄金向量行数 = 15456`，源码 `cava_platform_suite.cpp:645`）；
+> **CI 用的就是带 `--expect-rows` 的那种**。所以 P4-B 与 MSVC 轮报的 32 都是对的。
+> ⇒ 今后这类"计数"结论一律写成 **"命令 + 条数"**，不要只写一个数。
 
 > **本机环境坑（已固化）**：`cmake --build ... --parallel`（多节点 MSBuild）在本沙箱里**静默失败** ——
 > exit=1，却只打两行 `Checking File Globs / 1>Checking Build System`，**一条 error 都没有**。
@@ -70,9 +75,13 @@
 2. **`abort()` 把"原生调用抛异常"记进了 `instrumentationFailures`** —— 那会让运维在**真故障**时
    误判成"看门狗坏了"，把注意力引到错误组件上。已拆成独立计数 `abortedCalls`，
    并加单测 `CallWatchdogTest#anAbortedCallIsNotAnInstrumentationFailure` 钉住（提交 `66145db`）。
-3. **平台套件条数 32 是错的，实测 31**：三种跑法（三份 GCC 编的二进制 × 两种 DLL）都是
-   `pass=31 fail=0 skip=0`，逐行数 `[ ok ]` 也是 31；MSVC 编的套件是 `30 + 1 skip`。
-   P4-B 文档那两处已就地更正（提交 `4731a79`）。
+3. **★ 平台套件条数：我判错了别人，最后是"两个数都对"**。P4-B 与 MSVC 轮都报 32，我先测到 31，
+   就把文档里的 32 改成了 31（提交 `4731a79`）。MSVC 流不服、给了可复核证据（S3 有 7 条），我再查源码：
+   `cava_platform_suite.cpp:645` 那条 `黄金向量行数 = 15456` 的断言**只在传了 `--expect-rows` 时才执行**，
+   而 **CI 恰好传了**。实测四种组合后确认：**不带 = 31，带 = 32；MSVC 编的套件在带 `--expect-rows` 时是 31+1skip**。
+   ⇒ 已在 `docs/CAVA-platform-notes.md` **二次更正（更正我自己的更正）**，并把教训写死：
+   **"计数"类结论必须写成"命令 + 条数"**，否则一个依赖参数的数字会被当成绝对值，还会把对的判成错的。
+   > 这条本身也验证了本项目的分工价值：**子代理有实测证据时可以据理力争，captain 也要能被证据推翻。**
 4. **导出面比头文件多 3 个符号**：`cava_push_away_from` / `cava_push_box_filter` / `cava_push_section_plan`
    两份产物都导出，但 `cava_abi.h` 里没有它们。**我第一版结论写错了**（写成"只给 native 测试用、
    Java 侧从不解析"），随后查 `cava/push/NativePush.java` 发现**Java 真的会解析这三个符号**

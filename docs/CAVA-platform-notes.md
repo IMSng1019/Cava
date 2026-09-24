@@ -155,12 +155,24 @@ Java 在 Apple Silicon 上找不到库 ⇒ **静默整体回退纯 Java（"能�
 ### 3.1 实测结果（windows-x64 / MinGW g++ 15.2，CMake 构建的库）
 
     PLATFORM-SUITE|platform=windows-x64|compiler=gcc|golden=native/tests/vectors/fp_probe.txt
-      |lib=build/p4b-srcview/natives/windows-x64/cava.dll|pass=31|fail=0|skip=0|verdict=PASS
+      |lib=build/p4b-srcview/natives/windows-x64/cava.dll|pass=32|fail=0|skip=0|verdict=PASS
 
-> **captain 更正（2026-09-24）**：本节原先写的是 `pass=32`，**实测是 31**。用手上的三份
-> MinGW 构建的套件二进制（`build/p4b-platform`、`build/platform-suite`、`build/platform-captain`）
-> 分别对交付物 DLL 跑，三次都是 `pass=31|fail=0|skip=0`；把日志里 `[ ok ]` 逐行数出来也是 31
-> （环境画像 4 + 编译开关 5 + 逐位一致性 6 + ABI 布局 16）。**"检查条数"这种数字必须数出来，不能凭印象写。**
+> **captain 二次更正（2026-09-24，这次更正的是我自己的更正）**：本节原本写 `pass=32`，
+> 我先测得 31、就把它改成了 31 —— **两个数都对，差别在命令行**：
+>
+> | 调用 | 条数 |
+> | --- | --- |
+> | `--golden <文件>` | **31**（环境画像 4 + 编译开关 5 + 逐位一致性 6 + ABI 布局 16） |
+> | `--golden <文件> --expect-rows 15456` | **32**（多的一条 = `黄金向量行数 = 15456（期望 15456）`，由 `--expect-rows` 打开，源码 `cava_platform_suite.cpp:645`） |
+>
+> **CI 用的是带 `--expect-rows 15456` 的那种**（`.github/workflows/build.yml` 里那行注释写着
+> "钉住黄金向量没被截断"），所以 CI/文档里的 **32 是对的**；P4-A、P4-B 与 MSVC 轮报的 32 也都是对的。
+> 实测四种组合：gcc 套件+交付 DLL = 31 / 32；msvc 套件+交付 DLL = 30+1skip / 31+1skip
+> （MSVC 那条 skip 是 `本编译器没有 __BYTE_ORDER__`，按 skip 记账，不假装通过）。
+>
+> **教训（比数字本身重要）**：**"检查条数"必须连同命令行一起记**。同一个二进制、同一个库，
+> 参数不同条数就不同；我上一版只写"实测是 31"，等于把一个依赖参数的数字说成了绝对值，
+> 还顺手把别人对的数字判成了错的。⇒ 今后这类"计数"结论一律写成 **"命令 + 条数"**。
 
 逐位一致性（对签入黄金 15456 行）：
 
@@ -336,10 +348,12 @@ GCC/Clang 当扩展接受，MSVC 直接报 `error C4576: 后跟初始值设定�
     [ ok ] 逐位一致性总计：15456 行，数值位不一致 0 行（NaN 载荷豁免 40 行）
     [ ok ] layout_hash_sum = 0x1C12265E（期望 0x1C12265E）
 
-> **captain 更正（2026-09-24，首次拿真 MSVC 产物复跑）**：上面这一行有两个错：条数是 31 不是 32，
-> 而且既然跑的是 MSVC 产物，`compiler=` 就该是 `msvc`。实测（`build/native-msvc/suite-msvc/Release/cava_platform_suite.exe`）：
+> **captain 更正（2026-09-24，首次拿真 MSVC 产物复跑）**：上面那一行有一处要改：
+> 既然跑的是 MSVC 产物，`compiler=` 就该是 `msvc`；条数以你自己的命令行参数为准（见 §3.1 的二次更正）。
+> 实测（`build/native-msvc/suite-msvc/Release/cava_platform_suite.exe`，**带 `--expect-rows 15456`**）：
 >
->     PLATFORM-SUITE|platform=windows-x64|compiler=msvc|...|pass=30|fail=0|skip=1|verdict=PASS
+>     PLATFORM-SUITE|platform=windows-x64|compiler=msvc|...|pass=31|fail=0|skip=1|verdict=PASS
+>     （不带 --expect-rows 时是 pass=30|fail=0|skip=1）
 >     [info] build_id = cava 0.1.0 windows-x64 MSVC 19.44.35228.0 (MSVC toolset v143) /O2 /fp:strict safe=0 asan=0 ubsan=0
 >     [ ok ] layout_hash_sum = 0x1C12265E（期望 0x1C12265E）
 >     [ ok ] cava_open(正确和值) → rc=0 handle=4294967297 status=0 native_layout_sum=0x1C12265E

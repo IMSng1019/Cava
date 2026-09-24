@@ -155,7 +155,12 @@ Java 在 Apple Silicon 上找不到库 ⇒ **静默整体回退纯 Java（"能�
 ### 3.1 实测结果（windows-x64 / MinGW g++ 15.2，CMake 构建的库）
 
     PLATFORM-SUITE|platform=windows-x64|compiler=gcc|golden=native/tests/vectors/fp_probe.txt
-      |lib=build/p4b-srcview/natives/windows-x64/cava.dll|pass=32|fail=0|skip=0|verdict=PASS
+      |lib=build/p4b-srcview/natives/windows-x64/cava.dll|pass=31|fail=0|skip=0|verdict=PASS
+
+> **captain 更正（2026-09-24）**：本节原先写的是 `pass=32`，**实测是 31**。用手上的三份
+> MinGW 构建的套件二进制（`build/p4b-platform`、`build/platform-suite`、`build/platform-captain`）
+> 分别对交付物 DLL 跑，三次都是 `pass=31|fail=0|skip=0`；把日志里 `[ ok ]` 逐行数出来也是 31
+> （环境画像 4 + 编译开关 5 + 逐位一致性 6 + ABI 布局 16）。**"检查条数"这种数字必须数出来，不能凭印象写。**
 
 逐位一致性（对签入黄金 15456 行）：
 
@@ -327,9 +332,20 @@ GCC/Clang 当扩展接受，MSVC 直接报 `error C4576: 后跟初始值设定�
     cl exit=0
     MSVC dll built: 150528 bytes
     DLL Name: KERNEL32.dll                     # 连 msvcrt 都不依赖，比 MinGW 版更自包含
-    PLATFORM-SUITE|platform=windows-x64|compiler=gcc|...|pass=32|fail=0|skip=0|verdict=PASS
+    PLATFORM-SUITE|platform=windows-x64|compiler=gcc|...|pass=32|fail=0|skip=0|verdict=PASS   ← 见下方更正
     [ ok ] 逐位一致性总计：15456 行，数值位不一致 0 行（NaN 载荷豁免 40 行）
     [ ok ] layout_hash_sum = 0x1C12265E（期望 0x1C12265E）
+
+> **captain 更正（2026-09-24，首次拿真 MSVC 产物复跑）**：上面这一行有两个错：条数是 31 不是 32，
+> 而且既然跑的是 MSVC 产物，`compiler=` 就该是 `msvc`。实测（`build/native-msvc/suite-msvc/Release/cava_platform_suite.exe`）：
+>
+>     PLATFORM-SUITE|platform=windows-x64|compiler=msvc|...|pass=30|fail=0|skip=1|verdict=PASS
+>     [info] build_id = cava 0.1.0 windows-x64 MSVC 19.44.35228.0 (MSVC toolset v143) /O2 /fp:strict safe=0 asan=0 ubsan=0
+>     [ ok ] layout_hash_sum = 0x1C12265E（期望 0x1C12265E）
+>     [ ok ] cava_open(正确和值) → rc=0 handle=4294967297 status=0 native_layout_sum=0x1C12265E
+>
+> MSVC 少 1 条、多 1 skip 是**正常的**：那条检查依赖 GCC 才有的编译期宏（`__FAST_MATH__` 等），
+> MSVC 上按 `skip()` 明确记账而**不是**假装通过。两边的**逐位一致性 15456 行与 ABI 布局结论完全一致**。
 
 **这是本项目第一条跨编译器逐位一致证据**：MSVC `/O2 /fp:strict` 与 MinGW-GCC（黄金向量就是它
 生成的）在 15456 行 + - * / sqrt 上**数值位零差异**，NaN 载荷豁免行数也一样（40）。

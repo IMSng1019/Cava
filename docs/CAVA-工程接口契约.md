@@ -77,6 +77,14 @@
 6. Java 的 `(double)->int` 越界**饱和**，C++ 是 UB → 一律走 `cava_d2i_sat` / `cava_d2l_sat`。
 7. 整数除法前必须保证除数非零。
 8. 所有入口对「未初始化 / 句柄已释放 / 空指针」必须安全返回错误码，**绝不段错误**。
+9. **导出面以头文件为准**：Java 侧只解析 `cava_abi.h` 里声明的那 19 个函数，句柄校验、布局自检
+   也只覆盖它们。`cava_open` **不校验**"库里是否多导出了别的符号"。
+   > **实测事实（2026-09-24，captain 用 objdump 逐符号核对两份产物）**：交付 DLL **多导出 3 个
+   > 不在头文件里的符号** —— `cava_push_away_from` / `cava_push_box_filter` / `cava_push_section_plan`
+   > （MinGW 与 MSVC 两份产物都一样）。它们只给 `native/tests/push/` 的向量测试用，Java 侧从不解析；
+   > 之所以会导出，是因为 `__declspec(dllexport)` / CMake 的 `WINDOWS_EXPORT_ALL_SYMBOLS` 会导出**所有**外部符号。
+   > **这不是 ABI 漂移**（多导出的符号不会被任何 Java 代码碰到），但**新加的符号一律要走"改头文件 +
+   > 两侧同时更新 + 重算 layout_hash_sum"的正规通道**，不许靠"反正它会自动导出"溜进来。
 
 ### 2.2 句柄生命周期
 

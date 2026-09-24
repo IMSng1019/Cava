@@ -27,7 +27,16 @@ public enum NativeStatus {
     /** 结构体布局自检不一致（字段偏移/大小/字段数/布局哈希）——防 JVM 段错误的核心闸门。 */
     LAYOUT_MISMATCH,
     /** cava_open 返回非 CAVA_OK 或 handle == 0。 */
-    OPEN_FAILED;
+    OPEN_FAILED,
+    /**
+     * 运行时熔断：同一个原生入口连续失败 N 次（默认 5，见
+     * {@link cava.harden.CircuitBreaker}）⇒ 自动全局关闭 native。
+     *
+     * <p>它是 <b>OPEN 之后</b>才可能出现的状态，语义与其它非 OPEN 状态完全一致：
+     * 所有钩子完全不介入、整体回退纯 Java。区别只在"怎么坏的"——
+     * 加载期失败是 fail-closed（布局/ABI 自检），本状态是运行期 fail-fast。
+     */
+    DISABLED_BY_BREAKER;
 
     /** 是否处于「原生可用」状态。 */
     public boolean isOpen() {

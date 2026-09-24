@@ -5,10 +5,10 @@ import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Path;
-import java.util.Collections;
+import cava.harden.CircuitBreaker;
+import cava.harden.CallWatchdog;
+import cava.harden.NativeCallGuard;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,21 +37,25 @@ public final class CavaNative {
      *
      * <p>取值在 ABI 的错误码区间（-1..-7）之外，Java 侧自有码从 -100 起，
      * 调用方只需判断 {@code rc < 0} 即回退原逻辑；想区分"原生没开"与"原生报错"时比这个常量。
+     *
+     * <p>取值定义搬到 {@link NativeCallGuard}（唯一事实来源），这里只是别名，
+     * **数值一个都没变**（-100 / -101），已有调用方零改动。
      */
-    public static final int ERR_NATIVE_UNAVAILABLE = -100;
+    public static final int ERR_NATIVE_UNAVAILABLE = NativeCallGuard.ERR_NATIVE_UNAVAILABLE;
 
     /** 原生调用抛异常（已记录一次日志）时的回退信号。 */
-    public static final int ERR_CALL_FAILED = -101;
+    public static final int ERR_CALL_FAILED = NativeCallGuard.ERR_CALL_FAILED;
 
     private static final Logger LOG = LoggerFactory.getLogger("cava/native");
-    private static final CavaNative INSTANCE = new CavaNative();
+    private static final CavaNative INSTANCE = new CavaNative(new NativeCallGuard());
 
     public static CavaNative get() {
         return INSTANCE;
     }
 
     private final Object lock = new Object();
-    private final Set<String> reportedCallFailures = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    /** 加固层（熔断 + 看门狗）：包在原生调用之外，**不替代**本类自己的状态机。 */
+    private final NativeCallGuard guard;
 
     private volatile NativeStatus status = NativeStatus.NOT_TRIED;
     private volatile String detail = "tryOpen() 尚未调用";
@@ -80,7 +84,59 @@ public final class CavaNative {
     private volatile Path gameDir = Path.of(System.getProperty("user.dir", ".")).toAbsolutePath().normalize();
     private volatile String modVersion = "0.0.0";
 
-    private CavaNative() {
+    private CavaNative(NativeCallGuard guard) {
+        this.guard = guard;
+        this.guard.setErrorSink(LOG::error);
+        // 熔断 = 把既有状态机翻到 DISABLED_BY_BREAKER：available() 立刻为 false，
+        // bindingsIfOpen() 返回 null ⇒ 所有包装方法直接返回 -100，一次原生都不再尝试。
+        // 那唯一一条 ERROR 由 CircuitBreaker 自己打（它才是"熔断是既定策略"的记录者）。
+        this.guard.breaker().setTripListener(this::onBreakerTrip);
+    }
+
+    /**
+     * 单测专用：新建一个**不与生产单例共享任何状态**的实例。
+     *
+     * <p>为什么必须能隔离：熔断是<b>进程内单向</b>的（这是它的设计目的），
+     * 如果单测直接把生产单例熔断了，同一 JVM 里后面跑的所有原生测试都会静默走回退路径
+     * —— 那正是本项目反复强调的"绿 ≠ 测过"。
+     */
+    static CavaNative newIsolatedForTest() {
+        return new CavaNative(new NativeCallGuard());
+    }
+
+    /** 单测专用：指定加固层（用来做"阈值不同、结果必须相同"的对照实验）。 */
+    static CavaNative newIsolatedForTest(NativeCallGuard guard) {
+        return new CavaNative(guard);
+    }
+
+    private void onBreakerTrip(String symbol, int consecutiveFailures, int lastCode) {
+        synchronized (lock) {
+            if (status == NativeStatus.OPEN) {
+                status = NativeStatus.DISABLED_BY_BREAKER;
+                detail = "熔断：" + symbol + " 连续 " + consecutiveFailures + " 次失败（最后一次 rc="
+                        + CavaLayouts.errorName(lastCode) + "）⇒ 自动全局关闭 native，整体回退纯 Java";
+            }
+        }
+    }
+
+    /** 加固层（熔断 + 看门狗）—— 可查询计数从这里取。 */
+    public NativeCallGuard hardening() {
+        return guard;
+    }
+
+    /** 加固层计数的一行快照（banner / 运维命令）。 */
+    public String hardeningReport() {
+        return "[cava/native] " + guard.report() + " " + guard.consecutiveReport();
+    }
+
+    /** 熔断阈值（{@code -Dcava.native.breaker.threshold}，<=0 = 关闭熔断）。 */
+    public int breakerThreshold() {
+        return guard.breaker().threshold();
+    }
+
+    /** 看门狗阈值（ns；{@code -Dcava.native.watchdog.micros}）。 */
+    public long watchdogThresholdNanos() {
+        return guard.watchdog().thresholdNanos();
     }
 
     // ------------------------------------------------------------------
@@ -372,11 +428,19 @@ public final class CavaNative {
         }
     }
 
-    /** 原生调用失败时的统一记录（Numeric 的热路径回退用）。 */
+    /**
+     * 原生调用失败时的统一记录（Numeric / NativePush 的热路径回退用）。
+     *
+     * <p>这些入口（数值工具、push）不在 {@link #guard} 的包装内，所以这里<b>只</b>做两件事：
+     * 记一次失败（连续计数）与"每个入口最多一条 ERROR"的既有行为。
+     *
+     * <p>处置口径（已写进 docs/CAVA-hardening-notes.md）：
+     * <b>抛异常算失败</b>（一个 downcall 抛 Throwable 不是"合法回退"，是原生调用真的坏了）；
+     * 而<b>错误码只在被包装的入口上计</b>——push 是 opt-in 且默认关的子系统，
+     * 它返回的 {@code CAVA_ERR_ARG} 不该把正在跑的两个核一起关掉。
+     */
     public void onNativeCallFailure(String symbol, Throwable t) {
-        if (reportedCallFailures.add(symbol)) {
-            LOG.error("[cava/native] {} 调用失败，该调用起回退纯 Java（同类错误只报一次）", symbol, t);
-        }
+        guard.noteThrowable(symbol, t);
     }
 
     // ------------------------------------------------------------------
@@ -402,42 +466,27 @@ public final class CavaNative {
     public int pathfind(long handle, MemorySegment req, MemorySegment out, int cap) {
         CavaBindings b = bindingsIfOpen();
         if (b == null) {
-            return ERR_NATIVE_UNAVAILABLE;
+            return guard.unavailable();   // 原生回退计数（P4 验收要看的那个数）
         }
-        try {
-            return b.pathfind(handle, req, out, cap);
-        } catch (Throwable t) {
-            onNativeCallFailure(CavaBindings.SYM_PATHFIND, t);
-            return ERR_CALL_FAILED;
-        }
+        return guard.call(CavaBindings.SYM_PATHFIND, () -> b.pathfind(handle, req, out, cap));
     }
 
     /** {@code cava_mob_profile_upload}：非法字段（width&lt;=0 / NaN 等）→ {@code CAVA_ERR_ARG}，且不改动已有档案。 */
     public int mobProfileUpload(long handle, MemorySegment profile) {
         CavaBindings b = bindingsIfOpen();
         if (b == null) {
-            return ERR_NATIVE_UNAVAILABLE;
+            return guard.unavailable();   // 原生回退计数（P4 验收要看的那个数）
         }
-        try {
-            return b.mobProfileUpload(handle, profile);
-        } catch (Throwable t) {
-            onNativeCallFailure(CavaBindings.SYM_MOB_PROFILE_UPLOAD, t);
-            return ERR_CALL_FAILED;
-        }
+        return guard.call(CavaBindings.SYM_MOB_PROFILE_UPLOAD, () -> b.mobProfileUpload(handle, profile));
     }
 
     /** {@code cava_mob_profile_clear}：幂等；未上传过也算成功。 */
     public int mobProfileClear(long handle) {
         CavaBindings b = bindingsIfOpen();
         if (b == null) {
-            return ERR_NATIVE_UNAVAILABLE;
+            return guard.unavailable();   // 原生回退计数（P4 验收要看的那个数）
         }
-        try {
-            return b.mobProfileClear(handle);
-        } catch (Throwable t) {
-            onNativeCallFailure(CavaBindings.SYM_MOB_PROFILE_CLEAR, t);
-            return ERR_CALL_FAILED;
-        }
+        return guard.call(CavaBindings.SYM_MOB_PROFILE_CLEAR, () -> b.mobProfileClear(handle));
     }
 
     /**
@@ -450,14 +499,10 @@ public final class CavaNative {
                                 MemorySegment boxes, int boxCount) {
         CavaBindings b = bindingsIfOpen();
         if (b == null) {
-            return ERR_NATIVE_UNAVAILABLE;
+            return guard.unavailable();   // 原生回退计数（P4 验收要看的那个数）
         }
-        try {
-            return b.stateTableUpload(handle, records, recordCount, boxes, boxCount);
-        } catch (Throwable t) {
-            onNativeCallFailure(CavaBindings.SYM_STATE_TABLE_UPLOAD, t);
-            return ERR_CALL_FAILED;
-        }
+        return guard.call(CavaBindings.SYM_STATE_TABLE_UPLOAD,
+                () -> b.stateTableUpload(handle, records, recordCount, boxes, boxCount));
     }
 
     /**
@@ -470,42 +515,29 @@ public final class CavaNative {
                             int originX, int originY, int originZ, MemorySegment ids, int idCount) {
         CavaBindings b = bindingsIfOpen();
         if (b == null) {
-            return ERR_NATIVE_UNAVAILABLE;
+            return guard.unavailable();   // 原生回退计数（P4 验收要看的那个数）
         }
-        try {
-            return b.regionUpload(handle, dimX, dimY, dimZ, originX, originY, originZ, ids, idCount);
-        } catch (Throwable t) {
-            onNativeCallFailure(CavaBindings.SYM_REGION_UPLOAD, t);
-            return ERR_CALL_FAILED;
-        }
+        return guard.call(CavaBindings.SYM_REGION_UPLOAD,
+                () -> b.regionUpload(handle, dimX, dimY, dimZ, originX, originY, originZ, ids, idCount));
     }
 
     /** {@code cava_region_clear}：幂等。 */
     public int regionClear(long handle) {
         CavaBindings b = bindingsIfOpen();
         if (b == null) {
-            return ERR_NATIVE_UNAVAILABLE;
+            return guard.unavailable();   // 原生回退计数（P4 验收要看的那个数）
         }
-        try {
-            return b.regionClear(handle);
-        } catch (Throwable t) {
-            onNativeCallFailure(CavaBindings.SYM_REGION_CLEAR, t);
-            return ERR_CALL_FAILED;
-        }
+        return guard.call(CavaBindings.SYM_REGION_CLEAR, () -> b.regionClear(handle));
     }
 
     /** {@code cava_region_state_id_at}：{@code outStateId} = {@code arena.allocate(ValueLayout.JAVA_INT)}（一个 int）。 */
     public int regionStateIdAt(long handle, int x, int y, int z, MemorySegment outStateId) {
         CavaBindings b = bindingsIfOpen();
         if (b == null) {
-            return ERR_NATIVE_UNAVAILABLE;
+            return guard.unavailable();   // 原生回退计数（P4 验收要看的那个数）
         }
-        try {
-            return b.regionStateIdAt(handle, x, y, z, outStateId);
-        } catch (Throwable t) {
-            onNativeCallFailure(CavaBindings.SYM_REGION_STATE_ID_AT, t);
-            return ERR_CALL_FAILED;
-        }
+        return guard.call(CavaBindings.SYM_REGION_STATE_ID_AT,
+                () -> b.regionStateIdAt(handle, x, y, z, outStateId));
     }
 
     // ------------------------------------------------------------------
@@ -527,14 +559,10 @@ public final class CavaNative {
                                 MemorySegment bits, int bitWordCount) {
         CavaBindings b = bindingsIfOpen();
         if (b == null) {
-            return ERR_NATIVE_UNAVAILABLE;
+            return guard.unavailable();   // 原生回退计数（P4 验收要看的那个数）
         }
-        try {
-            return b.shapeTableUpload(handle, records, recordCount, points, pointCount, bits, bitWordCount);
-        } catch (Throwable t) {
-            onNativeCallFailure(CavaBindings.SYM_SHAPE_TABLE_UPLOAD, t);
-            return ERR_CALL_FAILED;
-        }
+        return guard.call(CavaBindings.SYM_SHAPE_TABLE_UPLOAD,
+                () -> b.shapeTableUpload(handle, records, recordCount, points, pointCount, bits, bitWordCount));
     }
 
     /**
@@ -552,14 +580,29 @@ public final class CavaNative {
                            MemorySegment out) {
         CavaBindings b = bindingsIfOpen();
         if (b == null) {
-            return ERR_NATIVE_UNAVAILABLE;
+            return guard.unavailable();   // 原生回退计数（P4 验收要看的那个数）
         }
-        try {
-            return b.resolveMove(handle, req, refs, refCount, inlineShapes, inlineShapeCount,
-                    inlinePoints, inlinePointCount, inlineBits, inlineBitWordCount, events, eventCap, out);
-        } catch (Throwable t) {
-            onNativeCallFailure(CavaBindings.SYM_RESOLVE_MOVE, t);
-            return ERR_CALL_FAILED;
+        return guard.call(CavaBindings.SYM_RESOLVE_MOVE,
+                () -> b.resolveMove(handle, req, refs, refCount, inlineShapes, inlineShapeCount,
+                        inlinePoints, inlinePointCount, inlineBits, inlineBitWordCount, events, eventCap, out));
+    }
+
+    // ------------------------------------------------------------------
+    // 诊断入口（给不引用 FFM 的探针/脚本用；生产热路径不要调）
+    // ------------------------------------------------------------------
+
+    /**
+     * 用<b>调用方指定的句柄</b>发一次 {@code cava_pathfind}（全 0 请求 + {@code cap} 张节点）。
+     *
+     * <p>存在的唯一理由：让 {@code cava.harden}（按契约不许出现 {@code java.lang.foreign}）里的
+     * 命令行探针与单测也能观测到"原生入口的真实返回码"，而不必在探针里复制一份 ABI 布局。
+     * 句柄可以被伪造成任意值 —— 这正是它作为"必然失败"输入源的用法。
+     */
+    public int probePathfind(long handleOverride, int cap) {
+        try (Arena arena = Arena.ofShared()) {
+            MemorySegment req = arena.allocate(CavaLayouts.PATH_REQUEST);
+            MemorySegment out = allocateArray(arena, CavaLayouts.PATH_NODE, cap);
+            return pathfind(handleOverride, req, out, cap);
         }
     }
 
@@ -599,6 +642,8 @@ public final class CavaNative {
                 .append(" entries=").append(nativeEntryCount).append(System.lineSeparator());
         sb.append("  cava_abi_touch  : ").append(touchCount).append("（=1 表示原生代码确实执行过）").append(System.lineSeparator());
         sb.append("  句柄            : ").append(handle).append(System.lineSeparator());
+        sb.append("  熔断            : ").append(guard.breaker().report()).append(System.lineSeparator());
+        sb.append("  看门狗          : ").append(guard.watchdog().report()).append(System.lineSeparator());
         sb.append("  回退语义        : ").append(available() ? "不适用（原生可用）" : "整体回退纯 Java（所有钩子不介入）").append(System.lineSeparator());
         sb.append("  ==============================================================================");
         return sb.toString();

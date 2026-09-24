@@ -106,14 +106,52 @@
 3. 落交付物之前先确认没有别人正在构建；MSVC 产物**故意**只写 `natives/<tag>/`（这是设计），
    所以任何人在它之后再跑一次别的构建，都必须**重新确认交付物哈希**。
 
-### 8.5 仍未闭合（诚实清单）
+**已落地（不再靠人记）**：构建侧现在**每次链接完都打一行指纹** ——
+`cava: ARTIFACT <路径> size=<n> sha256=<hex>`（根 CMakeLists 的 `POST_BUILD` 挂 `native/cmake/CavaHash.cmake`），
+`native/tests/build-mingw.ps1` 在写完共享目录之后也打同样一行。实测输出：
 
-- **真实服务端里的 MSVC 产物冒烟**：MinGW 产物跑过（门禁 #6），MSVC 产物的真服冒烟由 P4 MSVC 流补齐中。
+    -- cava: ARTIFACT J:/mc/Cava/natives/windows-x64/cava.dll size=257536 sha256=0ebe3b04a869819d7a59c8adc11b0d1277b120b80f956a7c05d2eb62d007904d
+
+（提议人是 P4-C 流：它的取证脚本在 13:41→14:0x 之间看到**三个不同哈希**轮番出现，说明"交付物是 X"
+这种说法在当时一小时后就不成立了。构建日志里留痕是最便宜的修法。）
+
+### 8.5 崩溃取证 + 并发（P4-C）：我逐项复跑
+
+| 项 | 我复跑的命令 | 我的结果 |
+| --- | --- | --- |
+| 崩溃取证链 | `pwsh -File tools/crash-probe.ps1` | **CRASH-PROBE: PASS**，13/13 断言；四种输入判定互不相同：`NOT_CAVA_PROBE` / `NOT_CAVA` / `CAVA_NATIVE_FAULT` / `PARSE_FAILED`（后者 **exit=2**，拒绝给结论） |
+| "真崩"是不是真的 | 同上（三次真实 JVM 硬崩） | 三次 `EXCEPTION_ACCESS_VIOLATION`、退出码 1、各自产出 hs_err；**没有 WER 弹窗、没有挂起**（214/202/200 ms） |
+| 并发 fuzz | `build-fuzz.ps1 -Cases 20000 -SkipBuild` | 三份产物各 40467 例 + **8 线程 × 4000 轮（36112 次调用）**：`crashes=0 undefined_returns=0 torn=0 contract_violations=0 overruns=0` |
+
+**这一项真正的价值是"判定方法本身可证伪"**：探针 DLL 导出的符号就叫 `cava_crash_probe_null_deref`，
+所以**任何按文本 grep 的解析器都会把探针崩溃误判成"Cava 的 bug"**；而这个解析器**先从 hs_err 的
+Dynamic libraries 段解析出问题帧属于哪个模块**、再下判定 —— 探针腿因此正确地得到 `NOT_CAVA_PROBE`。
+手工造的 fixture 是**截断过的真实日志**（`.gitignore` 挡住 `hs_err_*.log`，故用 `git add -f`，理由写在
+`native/tests/vectors/README.md`）。
+
+**并发实测发现（如实记录，不是"能过"）**：并发替换形状表期间 `cava_resolve_move` 有 **0.381%** 返回
+`CAVA_ERR_ARG`（角色掩码归因：只求解 0/11736、求解+换表 0/35736、四角色全开 367/96439）。
+**不是内存损坏**（无撕裂读、无越界写、无未定义返回码），是"**调用序列层面没有原子性**"。
+⇒ 我把它**写成契约条款**（§2.1 第 10 条）而不是给原生加锁：今天所有入口都在 Server thread
+（注入点逐条读过），加锁的代价全落在热路径上、收益为零。上线判据同时扩成三项：
+`unavailableCalls == 0` **且** `offThreadCalls == 0` **且** `tripped == false`。
+`offThreadCalls` 这个守卫**只计数、不加锁、不改行为**，并且有一条"故意改坏就变红"的单测钉着。
+
+### 8.6 仍未闭合（诚实清单）
+
 - **7 天连续运行 / native 回退计数为 0**（prompts/07 验收第 2 条）：本机做不到，没有 7×24 环境。
 - **非 Windows 平台**：本机无 Linux/macOS/ARM 工具链、Docker 守护进程未运行、WSL 枚举被拒；
    5 平台 CI 矩阵**写全了但一次都没跑过**（job 名里带 `[unverified-local]`）。
-- **ASan / UBSan**：同上，本机跑不起来（只在 CI 里排了）。
-- **区段并发卸载 fuzz / hs_err 崩溃取证**：P4-C 流进行中。
+- **ASan / UBSan / TSan**：同上，本机跑不起来（只在 CI 里排了 ASan/UBSan；TSan 连排都没排）。
+- **没有在真实服务端上让 Cava 自己崩过**：正向取证靠"同名模块替换"构造，不是真实缺陷。
+- **`cava_open`/`cava_close` 的并发未覆盖**（生产里只在启动/关闭各一次）。
+- **`offThreadCalls` 的真实越线一次都没观测到**（单测里是故意造的第二条线程）。
+- **MSVC 产物的 fuzz**：MSVC 流自己声明"没跑过"，**我补跑了** —— `build-fuzz.ps1 -Cases 20000` 直连
+   交付物（`sha256 0ebe3b04…`，build_id 里是 `MSVC 19.44`）：`cases=40467 crashes=0 undefined_returns=0
+   state_mutations=0 overruns=0`，**PASS**；并发阶段（8 线程）同样 `torn=0 contract_violations=0`。
+   ⇒ **MSVC 产物现在与 MinGW 产物享受同一套 fuzz 证据**。
+- **MSVC 产物的 `sqrt` 反汇编 / 反查编译开关**：`platform-flagcheck.ps1` 只对 MinGW 构建目录跑过，
+   MSVC 构建目录没跑（`sqrt` 行为已由套件的 5 个定点断言覆盖，但"从产物反查"这一层缺）。
 - **性能对比（prompts/04 验收）**：P1-PERF 流进行中（大搜索空间 native on/off）。
 
 ---

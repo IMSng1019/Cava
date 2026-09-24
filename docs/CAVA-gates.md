@@ -137,7 +137,50 @@ Dynamic libraries 段解析出问题帧属于哪个模块**、再下判定 —�
 `unavailableCalls == 0` **且** `offThreadCalls == 0` **且** `tripped == false`。
 `offThreadCalls` 这个守卫**只计数、不加锁、不改行为**，并且有一条"故意改坏就变红"的单测钉着。
 
-### 8.6 仍未闭合（诚实清单）
+### 8.6 ★★ 性能对比（prompts/04 推迟项）—— 以及它**反手抓到的两个正确性缺陷**
+
+命令（两条腿，产物哈希每条腿开始/结束各算一次，四条腿 `#dllStable` 全 True）：
+
+    pwsh -File tools/parity-perf-pathfind.ps1 -Leg off -Native off -AiLoad -OldBench 2000
+    pwsh -File tools/parity-perf-pathfind.ps1 -Leg on  -Native on
+
+**性能（µs/次；off = 同一套整合包、native 关闭）**：
+
+| 场景（平均节点数） | off | on | 倍数 | 每 tick（×0.22 次/tick） |
+| --- | --- | --- | --- | --- |
+| long128（128） | 592.6 | **266.8** | 2.53x | −72 µs |
+| slalom（138） | 10606.9 | **5507.9** | 1.95x | −1122 µs |
+| maze41（200） | 658.2 | **273.5** | 2.62x | −85 µs |
+| maze63（503） | 1861.5 | **636.7** | 3.04x | −269 µs |
+| 强制每次真推窗口（repush） | — | — | 1.28–1.60x | — |
+| 单节点级搜索（旧 6 格场景） | 2.0 | 23.3 | **0.09x（慢 11 倍）** | — |
+
+"每 tick 0.22 次"是**实测**（40 僵尸 + 1 村民、1200 tick、两腿各一次：0.2158 / 0.2317），不是估的；
+但"每次调用的路径分布"来自合成场景 ⇒ **每 tick 那一列是投影，不是直测**（这条已在 P1 台账里标明）。
+
+**★★ 一致性判定：`DIVERGENT(2)`，exit=2 —— 两个缺陷都会改变游戏行为**：
+
+| 缺陷 | 现象（原文） | 机制（已定位到源码级） |
+| --- | --- | --- |
+| **1. 窗口截断** | `detour128/repush`：`nodes_avg` off=128.00 / on=64.00，`end` off=(159,71,0) / on=(95,71,0)，`manh` off=1.000 / on=65.000（最优路径绕出包围盒，窗口外那段走廊不存在） | `RegionRect.forSolve` 只按"节点扫描边距"开窗（包围盒 +4），**没有覆盖"最优路径可能离开包围盒"** |
+| **2. 镜像无失效源（会穿墙）** | `detour128/reuse`：`collisionNodes` off=0 / **on=8**，`firstBadNode`=(96,71,0)，`mirror=pushes:0,reuse:8308` | 复用判据是"同矩形 + `lastTick != Long.MIN_VALUE`（无失效事件哨兵）"，而 `RegionMirror.onBlockChanged/onSectionUnloaded/onWorldChanged` **在 `src/main/java` 的生产路径里一次都没被调用**（**我独立 grep 复核过**：唯二的调用点是性能 bench 自己故意调的）；契约说的主钩子 `ChunkSection.setBlockState` 在 18 个 mixin 文件里**不存在** |
+
+其余 4 个场景（long128/slalom/maze41/maze63）在两种 mode 下**逐字段一致**（节点数/末节点/曼哈顿/
+整条节点序列 FNV/穿墙计数）。**可证伪对照**：只把一条腿的终点挪一格（`-Dcava.pathfind.perf.targetOffset=1`）
+⇒ `CTL COMPARE EXIT=2`，且 long128 连"路径长度完全相同"也照样报红 ⇒ 证明"一致"不是比对太粗才通过的。
+
+> **★ 为什么这件事没有炸到真实服务器**：`cava.pathfind.native` **默认是 false**（P1 的门禁，
+> 见 `PathfindSwitches`）。所以这两个缺陷在**默认配置下根本不会被触发** —— 它们是"**打开开关之前必须先修**"，
+> 不是线上事故。这恰好说明那条门禁是有价值的，也说明**"性能轮"实际上起到了 P1 的验收测试作用**：
+> 它把"求解器自证一致（live 96220/0）"与"端到端行为一致（本轮的逐字段比对）"这两件事区分开了 ——
+> 前者只保证"同一份推上去的数据算得对"，**不保证"推上去的数据是对的/够用的"**。
+
+**修复轮已启动**（P1-FIX 流）：①把复用限制在"同一次推送所在的 tick 内"（同 tick 复用原理上拿不到陈旧地形）
++ 接上 `ChunkSection.setBlockState` 失效钩子（O(1)，默认仍走安全路径，跨 tick 复用要金丝雀证据才允许开）；
+②对"结果可能被窗口截断"做保守检测并**回退 Java**（触边界 / 预算耗尽 / 末节点距目标 > reachRange），
+按原因分别计数（上线要看回退率）。**窗口策略本身（开多大/要不要可增长）是 captain 的裁决项，不在修复轮里自行决定。**
+
+### 8.7 仍未闭合（诚实清单）
 
 - **7 天连续运行 / native 回退计数为 0**（prompts/07 验收第 2 条）：本机做不到，没有 7×24 环境。
 - **非 Windows 平台**：本机无 Linux/macOS/ARM 工具链、Docker 守护进程未运行、WSL 枚举被拒；
@@ -152,7 +195,10 @@ Dynamic libraries 段解析出问题帧属于哪个模块**、再下判定 —�
    ⇒ **MSVC 产物现在与 MinGW 产物享受同一套 fuzz 证据**。
 - **MSVC 产物的 `sqrt` 反汇编 / 反查编译开关**：`platform-flagcheck.ps1` 只对 MinGW 构建目录跑过，
    MSVC 构建目录没跑（`sqrt` 行为已由套件的 5 个定点断言覆盖，但"从产物反查"这一层缺）。
-- **性能对比（prompts/04 验收）**：P1-PERF 流进行中（大搜索空间 native on/off）。
+- ~~性能对比（prompts/04 验收）~~：**已完成**（见 §8.6），但它抓出的两个缺陷**修完之前 P1 不能上线**。
+- **prompts/04 的整服层验收**（2000 实体 × 6000 tick 逐 tick 差分）：**未做**。
+- **自然地形上的"窗口不足"发生率**：未测（6.2 是人造几何）。
+- **多生物同 tick 并发寻路**的并行度影响：未测（注入侧有锁 ⇒ 并行度 = 1）。
 
 ---
 

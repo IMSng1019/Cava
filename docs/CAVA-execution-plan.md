@@ -152,7 +152,8 @@ P1 的每次寻路本来就有天然边界（起点→终点 + maxVisitedNodes�
 | **P2-Java** | `prompts/05` 设计要求 | ✅ 完成（含 live 接管） | 实体 SoA 镜像 + 事件回放 + VMP 黏滞语义复刻；live 接管 144158 次、自证 96220、mismatch **0** |
 | **P03-差分** | `prompts/03` | ✅ 完成 | 单元层 harness + 场景层黄金轨迹（自采）+ 整服层不变量 + mod 组合矩阵 + 一条命令出报告；三层结果见 `docs/CAVA-gates.md` |
 | P1-性能对比 | `prompts/04` 验收 | ✅ 完成（**结果见门禁 #8 §8.6**） | 大搜索空间下 native 快 **1.95–3.04x**（每 tick −72…−1122 µs）；**但一致性判定 DIVERGENT(2)**：窗口截断 + 镜像无失效源（穿墙）。`cava.pathfind.native` 默认 **false** ⇒ 默认配置不受影响 |
-| **P1-FIX** | 本轮实测抓出的两个缺陷 | 🔄 进行中 | ①复用限制在同 tick + 接 `ChunkSection.setBlockState` 失效钩子；②窗口截断的保守检测 + 回退 Java（按原因计数）。验收：`detour128` 两种 mode 逐字段一致、不穿墙、其余场景不退化、两条可证伪对照 |
+| **P1-FIX** | 本轮实测抓出的两个缺陷 | ✅ 完成（`2790772`/`6365a0c`/`ddb919c`） | 同 tick 复用 + `ChunkSection.setBlockState` 失效钩子（`SectionOriginRegistry` 还原世界坐标）+ 窗口截断三判据保守回退；`-Compare` **CONSISTENT**、两条可证伪对照都变红、4 场景 2.16–2.76x 不退化。**顺带抓到第三个缺陷**：`reachesTarget` 填反 + 比对脚本键名笔误 ⇒ 该字段从来没被比过 |
+| **P1-NET** | captain 裁决 R2 的判据数字 | 🔄 进行中 | 真实 AI 负载下 native on/off 的**净收益**（每 tick 中位/p95/p99 + 寻路段净耗时 + 真实搜索规模分布）+ 按规模分流（阈值必须有数据出处）+ 比对字段机械对拍（R6） |
 | P3 红石 | `prompts/06` | ✅ 完成（**决策=让位**） | Carpet/TIS 源码比对已完成：`RedstoneWireBlock.update` 在 `fastRedstoneDust` 开启时是**死方法**（3 个调用点全被 redirect）+ 算法用 `ThreadLocalRandom` + 需镜像 23 个 MC 成员 ⇒ **零红石加速**；并记录了"现夹具对红石算法不敏感"这个盲点 |
 | P4 跨平台加固 | `prompts/07` | ✅ 完成（有明确未闭合项） | 熔断/看门狗/ABI fuzz/SAFE 断言/一键回滚**全部有实跑证据**；5 平台构建矩阵 + 数值一致性套件 + CI 矩阵**写全但非 Windows 未跑过**；**交付物换成契约要求的 MSVC `/MT` 产物**。详见 `docs/CAVA-gates.md` 门禁 #8 |
 

@@ -368,7 +368,7 @@ J:/mc/Cava　（Fabric mod 项目；原生代码放 native/；文档在 docs/）
 
 | 阶段 | 结论 | 关键数字 |
 | --- | --- | --- |
-| P1 寻路 | **上线**（HEAD 取消 + 原生求解，含 live 接管与自证） | 接管 144158 次、liveVerified 96220、mismatch **0**；单目标场景 avgNodes 与 native off 一致 |
+| P1 寻路 | **已实现，但还没上线** —— `cava.pathfind.native` **默认 false**；且性能轮抓到两个**必修**缺陷 | 接管 144158 次、liveVerified 96220/mismatch 0（**那只证明"同一份推送数据上算得对"**）；大场景 native 快 1.95–3.04x，但 `detour128` 上逐字段比对 **DIVERGENT(2)**：窗口截断 + 镜像无失效源（路径穿过 8 格实心石头） |
 | P2 实体 | **live 接管已达成**，但两个核的**性能是净亏**，明确决定不上线 | core1 净 **+1.86 µs/次**；core2 broadphase 净 **+6.8 µs/次**；`pushCalls=0`（本整合包 MobEntity 会被静默移除） |
 | P3 红石 | **让位（defer）**，零红石加速 | Carpet `fastRedstoneDust` 开启时 `RedstoneWireBlock.update` 是死方法（3 个调用点全被 redirect）；且现夹具对红石算法**不敏感** ⇒ "w 一致"**不能**当红石等价证据 |
 | P4 平台 | 5 平台构建矩阵 + 数值一致性套件**写全**，**非 Windows 一条都没跑过** | 平台套件 windows-x64 **32 项全过（CI 口径：带 `--expect-rows 15456`；不带是 31 项）**、标签推导 17/17、flagcheck 36 过/1 跳过；CI job 名都带 `[unverified-local]` |
@@ -397,8 +397,16 @@ J:/mc/Cava　（Fabric mod 项目；原生代码放 native/；文档在 docs/）
 
 ### 仍未闭合（新会话别当成已完成）
 
-- **性能对比（prompts/04 验收）**：小场景（6 格）无代表性，需要**大搜索空间**场景（长路径/迷宫）下 native on/off
-  的每次调用与每 tick 数字 —— 本轮末由 P1-PERF 流在做。
+- ~~性能对比（prompts/04 验收）~~：**已做**（门禁 #8 §8.6）。结论：大搜索空间下 native 快 **1.95–3.04x**
+  （每 tick −72…−1122 µs，按实测 0.22 次寻路/tick 换算）；小场景（6 格/单节点级）**反而慢 11 倍** ⇒ 需要"按规模分流"的策略裁决。
+- ★★ **P1 的两个必修缺陷（P1-FIX 流在做）**：
+  1. **窗口截断**：`RegionRect.forSolve` 开窗 = 起点终点包围盒 + 4，**最优路径绕出包围盒时**窗口里那段走廊不存在
+     ⇒ native 返回截断路径（`detour128/repush`：nodes 64 vs 128、end 差 64 格、manh 65 vs 1）。
+     修法方向：**保守检测（触边界/预算耗尽/末节点距目标 > reachRange）⇒ 回退 Java**；窗口策略由 captain 裁决。
+  2. **镜像复用没有失效源（会穿墙）**：`RegionMirror.onBlockChanged/onSectionUnloaded/onWorldChanged`
+     **在生产路径里零调用**（契约主钩子 `ChunkSection.setBlockState` 从没接上），而复用判据是"没有失效事件"
+     ⇒ 跨 tick 永远复用陈旧地形（实测路径穿过 8 格实心石头）。修法：**复用默认限制在同 tick 内** + 接上主钩子 + 金丝雀计数。
+- **prompts/04 的整服层验收**（2000 实体 × 6000 tick 逐 tick 差分）：**未做**。
 - **7 天连续运行 + native 回退计数为 0**（prompts/07 验收第 2 条）：没有 7×24 环境。
 - **非 Windows 平台 / ASan / UBSan**：本机无工具链、Docker 守护进程未运行、WSL 被拒。
 - ~~区段并发卸载 fuzz / hs_err 崩溃取证~~：**已闭合**（P4-C，captain 独立复跑；见门禁 #8 §8.5）。

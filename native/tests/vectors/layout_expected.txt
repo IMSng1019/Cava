@@ -1,6 +1,6 @@
 # cava layout reference (ABI v1)
 # build_id: cava 0.1.0 win-x64 mingw-gcc-15.2.0 O2/fwrapv/ffp-contract=off safe=0 asan=0 ubsan=0
-# struct_count=9 pointer_size=8 platform=1 build_flags=0x00000000
+# struct_count=14 pointer_size=8 platform=1 build_flags=0x00000000
 # build_id_hash=0x982192f1
 # 哈希公式（契约 2.3）：h=0x811C9DC5；每字段按声明顺序 4 步：
 #   h^=(u32)(off&0xFFFFFFFF); h*=0x01000193; h^=(u32)(size&0xFFFFFFFF); h*=0x01000193;
@@ -60,7 +60,7 @@ struct CavaPathNode size=32 align=4 fields=8 hash=0x0dcffe65
   field flags                offset=28     size=4     
 struct CavaMobProfile size=192 align=8 fields=18 hash=0x9c6c98cd
   field penalty              offset=0      size=104   
-  field max_fall_distance    offset=104    size=4     
+  field reserved_max_fall_distance offset=104    size=4     
   field start_x              offset=112    size=8     
   field start_y              offset=120    size=8     
   field start_z              offset=128    size=8     
@@ -90,4 +90,72 @@ struct CavaCollisionBox size=24 align=4 fields=6 hash=0x250ecbe1
   field max_x                offset=12     size=4     
   field max_y                offset=16     size=4     
   field max_z                offset=20     size=4     
-layout_hash_sum 0x6975cbf9 (1769327609)
+struct CavaShapeRecord size=32 align=4 fields=8 hash=0x0dcffe65
+  field points_kind          offset=0      size=4     
+  field point_offset         offset=4      size=4     
+  field bit_offset           offset=8      size=4     
+  field bit_words            offset=12     size=4     
+  field size_x               offset=16     size=4     
+  field size_y               offset=20     size=4     
+  field size_z               offset=24     size=4     
+  field reserved0            offset=28     size=4     
+struct CavaMoveShapeRef size=48 align=8 fields=11 hash=0x1545b999
+  field shape_token          offset=0      size=8     
+  field kind                 offset=8      size=4     
+  field state_id             offset=12     size=4     
+  field block_x              offset=16     size=4     
+  field block_y              offset=20     size=4     
+  field block_z              offset=24     size=4     
+  field source               offset=28     size=4     
+  field inline_slot          offset=32     size=4     
+  field reserved0            offset=36     size=4     
+  field reserved1            offset=40     size=4     
+  field reserved2            offset=44     size=4     
+struct CavaMoveRequest size=104 align=8 fields=15 hash=0xb542d3d5
+  field reserved0            offset=0      size=8     
+  field min_x                offset=8      size=8     
+  field min_y                offset=16     size=8     
+  field min_z                offset=24     size=8     
+  field max_x                offset=32     size=8     
+  field max_y                offset=40     size=8     
+  field max_z                offset=48     size=8     
+  field move_x               offset=56     size=8     
+  field move_y               offset=64     size=8     
+  field move_z               offset=72     size=8     
+  field step_height          offset=80     size=8     
+  field flags                offset=88     size=4     
+  field on_ground            offset=92     size=4     
+  field shape_count          offset=96     size=4     
+  field reserved1            offset=100    size=4     
+struct CavaMoveEvent size=80 align=8 fields=16 hash=0x630c22d5
+  field source               offset=0      size=4     
+  field axis                 offset=4      size=4     
+  field block_x              offset=8      size=4     
+  field block_y              offset=12     size=4     
+  field block_z              offset=16     size=4     
+  field pass                 offset=20     size=4     
+  field accepted             offset=24     size=4     
+  field cell_x               offset=28     size=4     
+  field cell_y               offset=32     size=4     
+  field cell_z               offset=36     size=4     
+  field reserved0            offset=40     size=4     
+  field reserved1            offset=44     size=4     
+  field shape_token          offset=48     size=8     
+  field offset               offset=56     size=8     
+  field max_dist_before      offset=64     size=8     
+  field max_dist_after       offset=72     size=8     
+struct CavaMoveResult size=88 align=8 fields=13 hash=0x7737abbd
+  field status               offset=0      size=4     
+  field step_used            offset=4      size=4     
+  field event_count          offset=8      size=4     
+  field event_overflow       offset=12     size=4     
+  field delta_x              offset=16     size=8     
+  field delta_y              offset=24     size=8     
+  field delta_z              offset=32     size=8     
+  field base_x               offset=40     size=8     
+  field base_y               offset=48     size=8     
+  field base_z               offset=56     size=8     
+  field step_x               offset=64     size=8     
+  field step_y               offset=72     size=8     
+  field step_z               offset=80     size=8     
+layout_hash_sum 0x1c12265e (470951518)

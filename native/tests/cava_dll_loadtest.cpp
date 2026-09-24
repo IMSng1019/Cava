@@ -110,9 +110,13 @@ int main(int argc, char** argv) {
     static CavaLayoutReport rep; /* 34 KB，放静态区 */
     std::memset(&rep, 0, sizeof(rep));
     const int32_t n = layout_report(&rep);
-    check(n == 9, "cava_layout_report 返回 9（P0 的 4 个 + P1 的 5 个）");
+    check(n == 14, "cava_layout_report 返回 14（P0 4 + P1 5 + P2 5）");
+    /* ⚠️ 上界必须是 n（= cava_layout_report 实际返回的条数），**不能写死数字**。
+     * 这里原来是 `i < 9`：ABI 扩到 14 个结构体后，它只累加了前 9 个 ⇒ 和值算错 ⇒
+     * cava_open 返回 CAVA_ERR_LAYOUT ⇒ 整条原生路径不可用，而报错看起来像"布局漂移"。
+     * 教训与契约 2.3 那条同源：**凡是能推导出来的常量就不要写死。** */
     uint32_t sum = 0;
-    for (int32_t i = 0; i < n && i < 9; ++i) {
+    for (int32_t i = 0; i < n; ++i) {
         sum += rep.entries[i].layout_hash;
         std::printf("    %d: hash=0x%08x size=%llu fields=%u\n", (int)i,
                     (unsigned)rep.entries[i].layout_hash,

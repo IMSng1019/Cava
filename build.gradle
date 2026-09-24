@@ -146,10 +146,20 @@ tasks.withType(Test).configureEach {
 	// 但 6 个原生 ABI 用例一次都没执行 —— "绿"不等于"测过"。
 	def cavaOsName = System.getProperty('os.name', '').toLowerCase(Locale.ROOT)
 	def cavaOsArch = System.getProperty('os.arch', '').toLowerCase(Locale.ROOT)
-	def cavaLibName = cavaOsName.contains('win') ? 'cava.dll'
+	def cavaIsWin = cavaOsName.contains('win')
+	def cavaLibName = cavaIsWin ? 'cava.dll'
 			: (cavaOsName.contains('mac') ? 'libcava.dylib' : 'libcava.so')
-	// 平台标签与 CMake 的 CavaPlatform.cmake 一致；目前 P0/P1 只构建 windows-x64
-	def cavaBuiltNativeLib = layout.projectDirectory.file("natives/windows-x64/${cavaLibName}").asFile
+	// 平台标签必须与 CMake 的 CavaPlatform.cmake 一致，且**必须由"当前主机"推导**。
+	//
+	// ⚠️ 这里以前把目录写死成 "natives/windows-x64/"（只按 os 换了库名），后果是：
+	//   Linux/macOS 上永远找不到库 -> cavaAutoNative=false -> 测试整类 skip -> **构建照样绿**。
+	//   那正是门禁 #7 记过的"绿 ≠ 测过"，并且会在 4 个新平台上原样复发（P4-B 实测发现）。
+	def cavaPlatformTag = cavaIsWin
+			? (cavaOsArch.contains('aarch64') || cavaOsArch.contains('arm64') ? 'windows-arm64' : 'windows-x64')
+			: (cavaOsName.contains('mac')
+					? (cavaOsArch.contains('aarch64') || cavaOsArch.contains('arm64') ? 'macos-arm64' : 'macos-x64')
+					: (cavaOsArch.contains('aarch64') || cavaOsArch.contains('arm64') ? 'linux-arm64' : 'linux-x64'))
+	def cavaBuiltNativeLib = layout.projectDirectory.file("natives/${cavaPlatformTag}/${cavaLibName}").asFile
 	def cavaAutoNative = cavaBuiltNativeLib.isFile()
 	if (project.findProperty('cava.native.enabled') == null) {
 		systemProperty 'cava.native.enabled', cavaAutoNative ? 'true' : 'false'

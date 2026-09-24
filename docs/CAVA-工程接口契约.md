@@ -126,7 +126,7 @@ Java 侧算出期望值填进 `CavaOpenParams.layout_hash_sum`；原生侧比较
 | `CavaStateRecord` | 方块状态表条目（**20 字节 / 5 字段**） |
 | `CavaCollisionBox` | 扁平 AABB（**24 字节 / 6 字段**） |
 
-> **当前权威 `layout_hash_sum` = `0x6975CBF9`**（9 个结构体，MinGW g++ 15.2 / x86-64 实测；
+> **当前权威 `layout_hash_sum` = `0x1C12265E`**（**14 个结构体**：P0 4 + P1 5 + P2 5，MinGW g++ 15.2 / x86-64 实测；
 > Java 侧独立重算得到**完全相同**的值）。任何结构体改动都必须两侧同时改并重跑两边的自检。
 
 ### 2.4 P1 寻路 ABI（**已冻结**，`CavaPathRequest` / `CavaPathNode`）

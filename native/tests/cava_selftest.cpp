@@ -195,7 +195,81 @@ static const FieldExpect kCollisionBoxFields[] = {
     { "max_z", 20, 4 },
 };
 
-static const StructExpect kExpect[9] = {
+static const FieldExpect kShapeRecordFields[] = {
+    { "points_kind",  0,  4 },
+    { "point_offset", 4,  4 },
+    { "bit_offset",   8,  4 },
+    { "bit_words",    12, 4 },
+    { "size_x",       16, 4 },
+    { "size_y",       20, 4 },
+    { "size_z",       24, 4 },
+    { "reserved0",    28, 4 },
+};
+static const FieldExpect kMoveShapeRefFields[] = {
+    { "shape_token", 0,  8 },
+    { "kind",        8,  4 },
+    { "state_id",    12, 4 },
+    { "block_x",     16, 4 },
+    { "block_y",     20, 4 },
+    { "block_z",     24, 4 },
+    { "source",      28, 4 },
+    { "inline_slot", 32, 4 },
+    { "reserved0",   36, 4 },
+    { "reserved1",   40, 4 },
+    { "reserved2",   44, 4 },
+};
+static const FieldExpect kMoveRequestFields[] = {
+    { "reserved0",   0,  8 },
+    { "min_x",       8,  8 },
+    { "min_y",       16, 8 },
+    { "min_z",       24, 8 },
+    { "max_x",       32, 8 },
+    { "max_y",       40, 8 },
+    { "max_z",       48, 8 },
+    { "move_x",      56, 8 },
+    { "move_y",      64, 8 },
+    { "move_z",      72, 8 },
+    { "step_height", 80, 8 },
+    { "flags",       88, 4 },
+    { "on_ground",   92, 4 },
+    { "shape_count", 96, 4 },
+    { "reserved1",   100, 4 },
+};
+static const FieldExpect kMoveEventFields[] = {
+    { "source",         0,  4 },
+    { "axis",           4,  4 },
+    { "block_x",        8,  4 },
+    { "block_y",        12, 4 },
+    { "block_z",        16, 4 },
+    { "pass",           20, 4 },
+    { "accepted",       24, 4 },
+    { "cell_x",         28, 4 },
+    { "cell_y",         32, 4 },
+    { "cell_z",         36, 4 },
+    { "reserved0",      40, 4 },
+    { "reserved1",      44, 4 },
+    { "shape_token",    48, 8 },
+    { "offset",         56, 8 },
+    { "max_dist_before", 64, 8 },
+    { "max_dist_after",  72, 8 },
+};
+static const FieldExpect kMoveResultFields[] = {
+    { "status",         0,  4 },
+    { "step_used",      4,  4 },
+    { "event_count",    8,  4 },
+    { "event_overflow", 12, 4 },
+    { "delta_x",        16, 8 },
+    { "delta_y",        24, 8 },
+    { "delta_z",        32, 8 },
+    { "base_x",         40, 8 },
+    { "base_y",         48, 8 },
+    { "base_z",         56, 8 },
+    { "step_x",         64, 8 },
+    { "step_y",         72, 8 },
+    { "step_z",         80, 8 },
+};
+
+static const StructExpect kExpect[14] = {
     { "CavaLayoutEntry",   544,   8, 8,  kEntryFields        },
     { "CavaLayoutReport",  34848, 8, 8,  kReportFields       },
     { "CavaOpenParams",    32,    8, 5,  kParamsFields       },
@@ -205,6 +279,12 @@ static const StructExpect kExpect[9] = {
     { "CavaMobProfile",    192,   8, 18, kMobProfileFields   },
     { "CavaStateRecord",   20,    4, 5,  kStateRecordFields  },
     { "CavaCollisionBox",  24,    4, 6,  kCollisionBoxFields },
+    /* P2 实体位移（2026-09-22 冻结；逐字段与 CavaLayouts.java 对齐过）*/
+    { "CavaShapeRecord",   32,    4, 8,  kShapeRecordFields  },
+    { "CavaMoveShapeRef",  48,    8, 11, kMoveShapeRefFields },
+    { "CavaMoveRequest",   104,   8, 15, kMoveRequestFields  },
+    { "CavaMoveEvent",     80,    8, 16, kMoveEventFields    },
+    { "CavaMoveResult",    88,    8, 13, kMoveResultFields   },
 };
 
 /* ------------------------------------------------------------------ */
@@ -252,6 +332,32 @@ static const StructExpect kExpect[9] = {
 #define CAVA_ROWS_CavaCollisionBox(T) \
     CAVA_ROW(T, min_x), CAVA_ROW(T, min_y), CAVA_ROW(T, min_z), CAVA_ROW(T, max_x), CAVA_ROW(T, max_y), CAVA_ROW(T, max_z)
 
+#define CAVA_ROWS_CavaShapeRecord(T)                                                                    \
+    CAVA_ROW(T, points_kind), CAVA_ROW(T, point_offset), CAVA_ROW(T, bit_offset), CAVA_ROW(T, bit_words),  \
+    CAVA_ROW(T, size_x), CAVA_ROW(T, size_y), CAVA_ROW(T, size_z), CAVA_ROW(T, reserved0)
+
+#define CAVA_ROWS_CavaMoveShapeRef(T)                                                                   \
+    CAVA_ROW(T, shape_token), CAVA_ROW(T, kind), CAVA_ROW(T, state_id), CAVA_ROW(T, block_x),            \
+    CAVA_ROW(T, block_y), CAVA_ROW(T, block_z), CAVA_ROW(T, source), CAVA_ROW(T, inline_slot),           \
+    CAVA_ROW(T, reserved0), CAVA_ROW(T, reserved1), CAVA_ROW(T, reserved2)
+
+#define CAVA_ROWS_CavaMoveRequest(T)                                                                    \
+    CAVA_ROW(T, reserved0), CAVA_ROW(T, min_x), CAVA_ROW(T, min_y), CAVA_ROW(T, min_z), CAVA_ROW(T, max_x), \
+    CAVA_ROW(T, max_y), CAVA_ROW(T, max_z), CAVA_ROW(T, move_x), CAVA_ROW(T, move_y), CAVA_ROW(T, move_z), \
+    CAVA_ROW(T, step_height), CAVA_ROW(T, flags), CAVA_ROW(T, on_ground), CAVA_ROW(T, shape_count),      \
+    CAVA_ROW(T, reserved1)
+
+#define CAVA_ROWS_CavaMoveEvent(T)                                                                      \
+    CAVA_ROW(T, source), CAVA_ROW(T, axis), CAVA_ROW(T, block_x), CAVA_ROW(T, block_y), CAVA_ROW(T, block_z), \
+    CAVA_ROW(T, pass), CAVA_ROW(T, accepted), CAVA_ROW(T, cell_x), CAVA_ROW(T, cell_y), CAVA_ROW(T, cell_z),  \
+    CAVA_ROW(T, reserved0), CAVA_ROW(T, reserved1), CAVA_ROW(T, shape_token), CAVA_ROW(T, offset),        \
+    CAVA_ROW(T, max_dist_before), CAVA_ROW(T, max_dist_after)
+
+#define CAVA_ROWS_CavaMoveResult(T)                                                                     \
+    CAVA_ROW(T, status), CAVA_ROW(T, step_used), CAVA_ROW(T, event_count), CAVA_ROW(T, event_overflow),   \
+    CAVA_ROW(T, delta_x), CAVA_ROW(T, delta_y), CAVA_ROW(T, delta_z), CAVA_ROW(T, base_x), CAVA_ROW(T, base_y), \
+    CAVA_ROW(T, base_z), CAVA_ROW(T, step_x), CAVA_ROW(T, step_y), CAVA_ROW(T, step_z)
+
 static const FieldExpect kMechEntry[]        = { CAVA_ROWS_CavaLayoutEntry(CavaLayoutEntry) };
 static const FieldExpect kMechReport[]       = { CAVA_ROWS_CavaLayoutReport(CavaLayoutReport) };
 static const FieldExpect kMechParams[]       = { CAVA_ROWS_CavaOpenParams(CavaOpenParams) };
@@ -261,6 +367,11 @@ static const FieldExpect kMechPathNode[]     = { CAVA_ROWS_CavaPathNode(CavaPath
 static const FieldExpect kMechMobProfile[]   = { CAVA_ROWS_CavaMobProfile(CavaMobProfile) };
 static const FieldExpect kMechStateRecord[]  = { CAVA_ROWS_CavaStateRecord(CavaStateRecord) };
 static const FieldExpect kMechCollisionBox[] = { CAVA_ROWS_CavaCollisionBox(CavaCollisionBox) };
+static const FieldExpect kMechShapeRecord[]  = { CAVA_ROWS_CavaShapeRecord(CavaShapeRecord) };
+static const FieldExpect kMechMoveShapeRef[] = { CAVA_ROWS_CavaMoveShapeRef(CavaMoveShapeRef) };
+static const FieldExpect kMechMoveRequest[]  = { CAVA_ROWS_CavaMoveRequest(CavaMoveRequest) };
+static const FieldExpect kMechMoveEvent[]    = { CAVA_ROWS_CavaMoveEvent(CavaMoveEvent) };
+static const FieldExpect kMechMoveResult[]   = { CAVA_ROWS_CavaMoveResult(CavaMoveResult) };
 
 struct MechExpect {
     const FieldExpect* fields;
@@ -269,7 +380,7 @@ struct MechExpect {
     uint64_t           align;
 };
 
-static const MechExpect kMech[9] = {
+static const MechExpect kMech[14] = {
     { kMechEntry,        (int32_t)(sizeof(kMechEntry) / sizeof(FieldExpect)),             sizeof(CavaLayoutEntry),   alignof(CavaLayoutEntry)   },
     { kMechReport,       (int32_t)(sizeof(kMechReport) / sizeof(FieldExpect)),            sizeof(CavaLayoutReport),  alignof(CavaLayoutReport)  },
     { kMechParams,       (int32_t)(sizeof(kMechParams) / sizeof(FieldExpect)),            sizeof(CavaOpenParams),    alignof(CavaOpenParams)    },
@@ -279,9 +390,14 @@ static const MechExpect kMech[9] = {
     { kMechMobProfile,   (int32_t)(sizeof(kMechMobProfile) / sizeof(FieldExpect)),        sizeof(CavaMobProfile),    alignof(CavaMobProfile)    },
     { kMechStateRecord,  (int32_t)(sizeof(kMechStateRecord) / sizeof(FieldExpect)),       sizeof(CavaStateRecord),   alignof(CavaStateRecord)   },
     { kMechCollisionBox, (int32_t)(sizeof(kMechCollisionBox) / sizeof(FieldExpect)),      sizeof(CavaCollisionBox),  alignof(CavaCollisionBox)  },
+    { kMechShapeRecord,  (int32_t)(sizeof(kMechShapeRecord) / sizeof(FieldExpect)),       sizeof(CavaShapeRecord),   alignof(CavaShapeRecord)   },
+    { kMechMoveShapeRef, (int32_t)(sizeof(kMechMoveShapeRef) / sizeof(FieldExpect)),      sizeof(CavaMoveShapeRef),  alignof(CavaMoveShapeRef)  },
+    { kMechMoveRequest,  (int32_t)(sizeof(kMechMoveRequest) / sizeof(FieldExpect)),       sizeof(CavaMoveRequest),   alignof(CavaMoveRequest)   },
+    { kMechMoveEvent,    (int32_t)(sizeof(kMechMoveEvent) / sizeof(FieldExpect)),         sizeof(CavaMoveEvent),     alignof(CavaMoveEvent)     },
+    { kMechMoveResult,   (int32_t)(sizeof(kMechMoveResult) / sizeof(FieldExpect)),        sizeof(CavaMoveResult),    alignof(CavaMoveResult)    },
 };
 
-static const int32_t kStructExpectCount = 9;
+static const int32_t kStructExpectCount = 14;
 
 /* Java 侧对齐的和值（captain 复算并让 Java/C 两边逐字段一致后给出）。*/
 static const uint32_t kExpectedLayoutSum = 0x1C12265Eu;

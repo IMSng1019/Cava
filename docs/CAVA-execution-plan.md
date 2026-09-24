@@ -148,12 +148,12 @@ P1 的每次寻路本来就有天然边界（起点→终点 + maxVisitedNodes�
 
 | 流 | 任务书 | 状态 | 交付 |
 | --- | --- | --- | --- |
-| **P2-K** | `prompts/05` 第 1 个核 | 运行中 | **原版碰撞语义规格**（javap 证据）+ 纯几何内核（`resolve_movement`）+ 定点真值表 + 向量 + **ABI 提案** |
-| **P2-Java** | `prompts/05` 设计要求 | 运行中 | 实体 SoA 镜像（打包/读取）+ 事件回放骨架 + **VMP 黏滞语义复刻** + ServerCore inactive 观测 |
-| **P03-差分** | `prompts/03` | 运行中 | 单元层 harness + 场景层黄金轨迹（**自采**）+ 整服层不变量 + mod 组合矩阵 + 一条命令出报告 |
-| P1-性能对比 | `prompts/04` 验收 | **推迟（用户指示）** | 重场景（长路径/迷宫/多生物）下的 native on/off |
-| P3 红石 | `prompts/06` | pending | 需先做 Carpet/TIS 源码比对 → 归属决策（复刻 Carpet vs 让位） |
-| P4 跨平台加固 | `prompts/07` | pending | arm64/macOS + CI 矩阵 + 熔断/看门狗/崩溃取证 + fuzz + ASan/UBSan |
+| **P2-K** | `prompts/05` 第 1 个核 | ✅ 完成 | 原版碰撞语义规格（javap 证据）+ 纯几何内核 + 定点真值表 + 向量；**结论：core1 净 +1.86 µs/次、core2 净 +6.8 µs/次 ⇒ 决定不上线**（负面结论同样入库，见 `docs/CAVA-p2-*-notes.md`） |
+| **P2-Java** | `prompts/05` 设计要求 | ✅ 完成（含 live 接管） | 实体 SoA 镜像 + 事件回放 + VMP 黏滞语义复刻；live 接管 144158 次、自证 96220、mismatch **0** |
+| **P03-差分** | `prompts/03` | ✅ 完成 | 单元层 harness + 场景层黄金轨迹（自采）+ 整服层不变量 + mod 组合矩阵 + 一条命令出报告；三层结果见 `docs/CAVA-gates.md` |
+| P1-性能对比 | `prompts/04` 验收 | 🔄 进行中（提示词推完后的补测） | 大搜索空间（长路径/迷宫）下的 native on/off，每次调用与每 tick 数字 |
+| P3 红石 | `prompts/06` | ✅ 完成（**决策=让位**） | Carpet/TIS 源码比对已完成：`RedstoneWireBlock.update` 在 `fastRedstoneDust` 开启时是**死方法**（3 个调用点全被 redirect）+ 算法用 `ThreadLocalRandom` + 需镜像 23 个 MC 成员 ⇒ **零红石加速**；并记录了"现夹具对红石算法不敏感"这个盲点 |
+| P4 跨平台加固 | `prompts/07` | ✅ 完成（有明确未闭合项） | 熔断/看门狗/ABI fuzz/SAFE 断言/一键回滚**全部有实跑证据**；5 平台构建矩阵 + 数值一致性套件 + CI 矩阵**写全但非 Windows 未跑过**；**交付物换成契约要求的 MSVC `/MT` 产物**。详见 `docs/CAVA-gates.md` 门禁 #8 |
 
 **P2 的关键设计约束（captain 已读字节码后写的，供后续流遵守）**：
 `Entity.adjustMovementForCollisions` 的**形状来源顺序有语义**：
@@ -178,4 +178,6 @@ P1 的每次寻路本来就有天然边界（起点→终点 + maxVisitedNodes�
 | **接口语义太"软"导致调用方误用** | **已实际发生一次** | 我把位姿放进 `CavaMobProfile`，却在注释里写"每生物一份、变化时重推" → 会得到**陈旧起点** | 把约束**写进方法名**：`uploadProfileForSolve` / `isProfileReadyForSolve`，并在 javadoc 里写死"每次求解前重推、不得跨 tick 复用"。<br>**通用规则**：**会致命的调用时序约束要进方法名，不要只写在注释里。** |
 | **按字段名查结构体偏移** | 已实际发生一次 | `MOB_PROFILE.byteOffset(groupElement("max_fall_distance"))` 在字段改名后**运行期抛异常**（不是编译期），我在加 `reserved_` 前缀时撞到 | 偏移改为 `CavaLayouts.MobProfileOffset.*` 实测常量；**通用规则：关键偏移不用字符串查字段名** |
 | **编译失败会让同一轮里留下过期可执行文件，产生"看起来很真"的假失败** | 已实际发生一次 | `ctest` 报 `cava_pathfind_vectors` **9664/10000 不一致**，看着像 parity 崩了；实际是上一次 build 已经失败、**旧 exe 与旧 dll 还在盘上**。干净重建后 **4/4 通过** | **通用规则：看到"大规模不一致"先确认被测二进制是刚构建的**（看时间戳或强制重建），再怀疑代码 |
+| **共享产物目录被别的流重建 ⇒ 已验证的结论被静默作废** | **已实际发生两次** | `natives/<tag>/cava.dll` 有**两个生产者**（根 CMakeLists 与 `native/tests/build-mingw.ps1`）。P4-B 的验证哈希 `43129D92…` 被 P4-A 的一次 `cmake --build` 换成 `D751A3D1…`；P4-A 的一条 fuzz 结论随后也被作废 | **产物指纹纪律**：任何依赖产物的结论必须记 **Size+SHA256**，哈希一变即作废重跑；交付物权威生产者 = 根 CMakeLists（`gradlew buildNative`）。见门禁 #8 §8.4 |
+| **存在"未被 `cava_open` 覆盖、也没有自动守卫"的第二导出面** | 已实际存在 | `cava_push_away_from` / `cava_push_box_filter` / `cava_push_section_plan` 不在 `cava_abi.h` 里，却在两份产物里都导出，**而且 `cava.push.NativePush` 真的会解析它们**（它自己做 `libraryLookup`+`downcallHandle`）。签名漂移 ⇒ 静默 FFM UB，没有任何自动报警 | 契约 §2.1 第 9 条已写明；默认配置不触发（`cava.push.mode` 默认 `off`）；改这三个入口必须**同时**改 `NativePush` 的 `FD_*` 与 `native/tests/push/` 向量并重跑 |
 | **读原版行为的 jar 路径被写错** | 已实际发生一次 | `docs/CAVA-dev-toolbox.md` 早期写 `minecraft-clientonly`，而 `entity/*` 与 `ai/pathing/*` **只在 `minecraft-common` 里**（clientonly 的 entity 条目数 = 0） | 已勘误并写进 toolbox；所有"读原版"的流都被这条卡过，固化进门禁 #5 的教训 |

@@ -152,6 +152,18 @@ function(cava_configure_target target)
 
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
+        # 静态 CRT（/MT）。与 MinGW 侧的 -static -static-libgcc -static-libstdc++ **完全对称**：
+        # Java 侧是 System.load/LoadLibrary 直接加载 cava.dll，用户机器上不一定有 VC++ 运行库；
+        # CMake 在 MSVC 上的默认是 /MD，产物会依赖 MSVCP140.dll / VCRUNTIME140.dll /
+        # VCRUNTIME140_1.dll / api-ms-win-crt-*.dll —— 缺一个就是 error 126（P0-B 在 MinGW 上
+        # 实测过同一个坑，脚本里写着「Java 在没装 MinGW 的机器上会加载失败」）。
+        # 契约依据：docs/CAVA-platform-and-compat.md §1.1「Windows x64 MSVC /MT 静态 CRT
+        #（不要求用户装 VC++ 运行库）」+ §1.3「Windows /MT」；docs/CAVA-v1-plan.md 同。
+        # 安全性：ABI 只传 extern "C" + POD，没有 C++ 对象/分配跨边界，不存在两套 CRT 的
+        # malloc/free 混用（cava_build_id 返回的是静态字符串字面量，不归调用方释放）。
+        # 实测（MSVC 19.44 + VS17 生成器）：/MT 后 cava.dll 的导入表只剩 KERNEL32.dll。
+        set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY
+                     "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     else()
         target_compile_options(${target} PRIVATE -Wall -Wextra)
     endif()

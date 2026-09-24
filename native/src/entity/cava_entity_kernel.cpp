@@ -228,9 +228,13 @@ double calculate_max_offset(Axis axis, const Box& box, const ShapeListView& shap
         const double before = max_dist;
         HitInfo h;
         max_dist = calculate_max_distance(sh, axis, box, max_dist, &h);
-        if (h.hit) sink_emit(sink, sh, axis, h.accepted,
-                             (const int32_t[3]){ h.cell_x, h.cell_y, h.cell_z },
-                             h.d, before, max_dist);
+        if (h.hit) {
+            /* C99 复合字面量 (const int32_t[3]){...} 在 MSVC 上直接报 error C4576
+             * （GCC/Clang 只当扩展接受）。换具名临时数组，语义完全一样：
+             * 都是"本次调用内有效的 3 个 int32_t"，sink_emit 只读不存。*/
+            const int32_t cell[3] = { h.cell_x, h.cell_y, h.cell_z };
+            sink_emit(sink, sh, axis, h.accepted, cell, h.d, before, max_dist);
+        }
     }
     return max_dist;
 }

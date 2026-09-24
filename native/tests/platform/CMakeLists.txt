@@ -42,5 +42,5 @@ target_include_directories(cava_platform_suite PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/../../include"
 )
 
-message(STATUS "cava platform-suite: fp-flags=${CAVA_HARDENED_FP_FLAGS")
-message(STATUS "cava platform-suite: system=${CMAKE_SYSTEM_NAME/${CMAKE_SYSTEM_PROCESSOR host=${CMAKE_HOST_SYSTEM_NAME/${CMAKE_HOST_SYSTEM_PROCESSOR crosscompiling=${CMAKE_CROSSCOMPILING")
+message(STATUS "cava platform-suite: fp-flags=${CAVA_HARDENED_FP_FLAGS}")
+message(STATUS "cava platform-suite: system=${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR} host=${CMAKE_HOST_SYSTEM_NAME}/${CMAKE_HOST_SYSTEM_PROCESSOR} crosscompiling=${CMAKE_CROSSCOMPILING}")

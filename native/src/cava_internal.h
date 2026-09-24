@@ -25,7 +25,14 @@
  *  - 其它平台: visibility default
  * 静态库 / 自测单文件编译时加了这个也没害处。*/
 #if defined(_WIN32) || defined(__CYGWIN__)
-#  define CAVA_EXPORT __declspec(dllexport)
+#  if defined(_MSC_VER)
+/* MSVC 下**故意**定义成空：cava_abi.h（冻结的公开头）里的声明没有 __declspec(dllexport)，
+ * 在定义上再写一次就是 C2375「重定义；不同的链接」——**每个导出符号都中**（MSVC 19.44 实测）。
+ * 导出改由 CMake 的 WINDOWS_EXPORT_ALL_SYMBOLS 负责（native/cmake/CavaFlags.cmake 在 MSVC 上已开）。*/
+#    define CAVA_EXPORT
+#  else
+#    define CAVA_EXPORT __declspec(dllexport)
+#  endif
 #elif defined(__GNUC__)
 #  define CAVA_EXPORT __attribute__((visibility("default")))
 #else

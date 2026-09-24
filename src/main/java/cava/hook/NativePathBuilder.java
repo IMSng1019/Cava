@@ -22,7 +22,8 @@ import org.slf4j.LoggerFactory;
  * <p><b>后处理规则</b>（oracle spec 6.2）：原版的 {@code createPath} **只做** previous 回溯 + {@code add(0,...)}，
  * 没有去尾、没有平滑、没有 {@code setLength}。原生返回的顺序已经是 Path 顺序，所以这里**不做任何后处理**。
  *
- * <p><b>reachesTarget 的语义是反的</b>（spec 4.3.1）：见 {@link NativeNodeCodec#reachesTargetFlag}。
+ * <p><b>reachesTarget 的语义是直接的（true = 抵达）</b>：spec 4.3.1 的"反语义"说法已被
+ * 2026-09-24 的实跑推翻，见 {@link NativeNodeCodec#reachesTarget}（那里贴了逐条回执）。
  */
 public final class NativePathBuilder {
 
@@ -56,7 +57,7 @@ public final class NativePathBuilder {
             list.add(node);
         }
         NativeNodeCodec.Node last = nodes.get(nodes.size() - 1);
-        boolean reachesTarget = NativeNodeCodec.reachesTargetFlag(
+        boolean reachesTarget = NativeNodeCodec.reachesTarget(
                 last.x(), last.y(), last.z(), target.getX(), target.getY(), target.getZ(), reachRange);
         return new Path(list, target, reachesTarget);
     }

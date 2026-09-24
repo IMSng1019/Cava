@@ -14,13 +14,20 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * {@code CavaPathNode[]} 解码 + {@code reachesTarget} 反语义的还原（纯函数 + FFM，不需要 MC/原生库）。
+ * {@code CavaPathNode[]} 解码 + {@code Path.reachesTarget} 的还原（纯函数 + FFM，不需要 MC/原生库）。
  *
  * <p>两个都是"错了也不崩、只是与原版不一致"的地方，必须钉死：
  * <ul>
  *   <li>字段偏移写错 ⇒ 节点坐标串味；</li>
- *   <li>{@code reachesTarget} 用正语义 ⇒ 上层的导航行为与原版相反（oracle spec 4.3.1）。</li>
+ *   <li>{@code reachesTarget} 填反 ⇒ 路径对象与原版不一致（而这个字段**被
+ *       {@code Path.toBuf} 序列化**、被 {@code copy()} 复制，是网络可见字段）。</li>
  * </ul>
+ *
+ * <p><b>2026-09-24 勘误</b>：旧注释（与 oracle spec 4.3.1）说语义是反的，实测证伪 ——
+ * 纯原版回执里 {@code long128hash}（起点终点 {@code PathNode.hash} 同键、搜索第 1 个节点就
+ * {@code FOUND@pop1}）给的是 {@code reachedTargetFlag=true}，而 {@code maze63}（预算耗尽、未抵达）
+ * 给的是 {@code false} ⇒ {@code reachesTarget() == found}（true = 抵达）。
+ * 详见 {@link NativeNodeCodec#reachesTarget}。
  */
 class NativeNodeCodecTest {
 
@@ -80,17 +87,27 @@ class NativeNodeCodecTest {
         }
     }
 
+    /**
+     * {@code reachesTarget} 的语义 = **原版 {@code found}**（true = 抵达）。
+     *
+     * <p>每一条都对着实测回执写（{@code testbed/perf-fix/results/off.txt}）：
+     * <ul>
+     *   <li>long128/slalom/maze41 末节点 {@code manh=1}、{@code reachRange=1} ⇒ 原版回执 {@code true}；</li>
+     *   <li>maze63 末节点 {@code manh=22} ⇒ 原版回执 {@code false}；</li>
+     *   <li>边界：恰好等于半径算"抵达"（原版是 {@code <=}，bytecode 是 {@code fcmpg/ifgt}）；</li>
+     *   <li>负数半径：任何距离都不在半径内 ⇒ 只能给最接近点 ⇒ {@code false}。</li>
+     * </ul>
+     */
     @Test
-    void reachesTargetFlagIsInvertedLikeVanilla() {
-        // 末节点落在 reachRange 内 ⇒ 原版走 found 分支 ⇒ createPath(..., false) ⇒ reachesTarget = false
-        assertFalse(NativeNodeCodec.reachesTargetFlag(10, 64, 10, 11, 64, 10, 1));
-        assertFalse(NativeNodeCodec.reachesTargetFlag(10, 64, 10, 10, 64, 10, 0));
-        // 末节点在半径外 ⇒ found 为空 ⇒ createPath(..., true) ⇒ reachesTarget = true
-        assertTrue(NativeNodeCodec.reachesTargetFlag(10, 64, 10, 20, 64, 10, 1));
-        // 边界：恰好等于半径算"抵达"（原版是 <= ，bytecode 是 fcmpg/ifgt）
-        assertFalse(NativeNodeCodec.reachesTargetFlag(0, 0, 0, 1, 1, 0, 2));
-        assertTrue(NativeNodeCodec.reachesTargetFlag(0, 0, 0, 1, 1, 0, 1));
-        // 负数半径：任何距离都不在半径内 ⇒ 只能给最接近点 ⇒ reachesTarget = true
-        assertTrue(NativeNodeCodec.reachesTargetFlag(0, 0, 0, 0, 0, 0, -1));
+    void reachesTargetMatchesVanillaFoundSemantics() {
+        assertTrue(NativeNodeCodec.reachesTarget(10, 64, 10, 11, 64, 10, 1), "manh=1 <= 1 ⇒ 抵达");
+        assertTrue(NativeNodeCodec.reachesTarget(10, 64, 10, 10, 64, 10, 0), "manh=0 <= 0 ⇒ 抵达");
+        assertFalse(NativeNodeCodec.reachesTarget(10, 64, 10, 20, 64, 10, 1), "manh=10 > 1 ⇒ 未抵达");
+        assertFalse(NativeNodeCodec.reachesTarget(83, 71, -111, 93, 71, -99, 1), "maze63 实测：manh=22 ⇒ false");
+        // 边界：恰好等于半径算"抵达"
+        assertTrue(NativeNodeCodec.reachesTarget(0, 0, 0, 1, 1, 0, 2));
+        assertFalse(NativeNodeCodec.reachesTarget(0, 0, 0, 1, 1, 0, 1));
+        // 负数半径：任何距离都不在半径内 ⇒ 只能给最接近点 ⇒ false
+        assertFalse(NativeNodeCodec.reachesTarget(0, 0, 0, 0, 0, 0, -1));
     }
 }

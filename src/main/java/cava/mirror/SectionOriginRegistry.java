@@ -121,6 +121,17 @@ public final class SectionOriginRegistry {
         publishes.incrementAndGet();
     }
 
+    /**
+     * 放弃本次未发布的登记（推送失败时用）：**保留上一次已发布的快照**。
+     *
+     * <p>为什么不能在这里清空：一次失败的推送（OOM / ARG / 形状守卫拒绝）**不会**改掉原生里的内容
+     * （ABI 约定：错误码路径不部分写入），而 {@code RegionMirror.lastRect} 也仍然指向那个旧矩形 ⇒
+     * 旧矩形里的写入必须继续让它失效。清空登记表会留下"旧矩形还在用、但写入不再失效"的洞。
+     */
+    static void abortWindow() {
+        pending = null;
+    }
+
     /** 原生侧区域被清空（换世界/换维度/显式 clear）：此后没有任何缓存内容需要失效。 */
     static void clearWindow() {
         pending = null;

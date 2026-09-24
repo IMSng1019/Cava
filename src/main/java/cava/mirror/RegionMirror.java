@@ -395,7 +395,7 @@ public final class RegionMirror implements RegionSource {
             }
             if (rc != CavaLayouts.CAVA_OK) {
                 failures++;
-                SectionOriginRegistry.clearWindow();   // 上传失败 ⇒ 原子里到底是什么不知道，宁可不复用
+                SectionOriginRegistry.abortWindow();   // 上传失败：原生里仍是**旧内容**（ABI 不部分写入）⇒ 旧登记必须留着
                 throw new MirrorUnavailableException("cava_region_upload → " + CavaLayouts.errorName(rc)
                         + " " + rect.describe());
             }

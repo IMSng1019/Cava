@@ -155,7 +155,10 @@ if ($Compare) {
   foreach ($k in $keys) {
     $o = $off[$k]; $n = $on[$k]
     if (-not $o -or -not $n) { $red += "$k 只在一侧"; continue }
-    $perfFields = @('ok', 'n', 'nodes_avg', 'nodes_p50', 'nodes_min', 'nodes_max', 'nullPaths', 'endDistinct', 'end', 'manh', 'reachesTargetFlag')
+    # 勘误（2026-09-24 P1-FIX）：这里原来写的是 'reachesTargetFlag'，而回执里的键是
+    # 'reachedTargetFlag' ⇒ Field() 两边都返回 '(缺)'，**这个字段其实从来没被比过**。
+    # 而它恰好是 native 侧填反了的那个字段（见 NativeNodeCodec.reachesTarget 的实测证据）。
+    $perfFields = @('ok', 'n', 'nodes_avg', 'nodes_p50', 'nodes_min', 'nodes_max', 'nullPaths', 'endDistinct', 'end', 'manh', 'reachedTargetFlag')
     $detFields = @('sig_coords', 'sig_types', 'sigDistinct', 'analyzeLen', 'startNode', 'endNode', 'collisionNodes', 'firstBadNode')
     $diff = @()
     foreach ($f in $perfFields) {

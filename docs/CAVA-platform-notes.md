@@ -510,3 +510,315 @@ cava_open 只校验 abi_version 与 layout_hash_sum（cava_handle.cpp:104-112）
 
 YAML 语法本地校验过（js-yaml）：jobs = build / native / sanitize，native 矩阵 5 条、11 个 step，
 java-version = "21"。**语法通过 ≠ 跑过。**
+---
+
+## 13. MSVC 19.44 阻塞**已落地**：真编一遍之后又挖出两个（`/MT` 与一条必红的 CI configure）
+
+> 本节由 **MSVC 工具链修复轮**（native 侧子代理）追加，不改动 §1-§12 的结论，也不改 §6 里
+> captain 的更正。§6 记的两个阻塞（P4-B 当时只打在**副本**上）本轮**已进 native/src 并提交**：
+> commit `77480f9`，4 个文件，+29/-6。
+> 一句话教训：**§6 的两个补丁确实够让 `cl` 编过，但不够让产物满足契约** —— 后两个阻塞只有
+> 「用项目自己的 CMake 真的构建一遍 + 真的跑套件」才会露出来。
+
+### 13.1 结论速览
+
+| # | 阻塞 | 症状 | 修法 | §6 已记？ |
+| --- | --- | --- | --- | --- |
+| 1 | `CAVA_EXPORT` 在 MSVC 上是 `__declspec(dllexport)`，而冻结的 `cava_abi.h` 声明没有它 | **每个**导出符号 `error C2375`「重定义；不同的链接」 | MSVC 下定义为**空**，导出交给 `WINDOWS_EXPORT_ALL_SYMBOLS`（CavaFlags.cmake 早已打开；**确认过没有重复加**） | ✅ |
+| 2 | `cava_entity_kernel.cpp:232` 的 C99 复合字面量 `(const int32_t[3]){...}` | `error C4576` | 换具名临时数组（语义不变，纯几何内核） | ✅ |
+| 3 | **契约要求 MSVC 用 `/MT` 静态 CRT，但 CavaFlags.cmake 从来没设置过** ⇒ CMake 默认 `/MD` | 编译链接**都过**，但产物依赖 `MSVCP140/VCRUNTIME140/VCRUNTIME140_1/api-ms-win-crt-*` ⇒ 用户机没装 VC++ 运行库就 `LoadLibrary` 失败（= P0-B 在 MinGW 侧踩过的 error 126） | `MSVC_RUNTIME_LIBRARY = MultiThreaded$<$<CONFIG:Debug>:Debug>` | ❌ **本轮新发现** |
+| 4 | `native/tests/platform/CMakeLists.txt:45-46` 的 `${` **不配对**（各少一个 `}`） | `cmake -S native/tests/platform ...` 直接 configure 失败；而 `.github/workflows/build.yml:124` **正是这么调的** ⇒ 这条 CI 步骤在**全部 5 个平台**上都会红 | 补两个 `}` | ❌ **本轮新发现** |
+
+阻塞 3、4 都**不是「MSVC 特有语法」**，而是只有真编/真配置才会碰到的**构建系统缺口**。
+
+### 13.2 补丁 1：`native/src/cava_internal.h`（导出属性）
+
+```diff
+ #if defined(_WIN32) || defined(__CYGWIN__)
+-#  define CAVA_EXPORT __declspec(dllexport)
++#  if defined(_MSC_VER)
++/* MSVC 下**故意**定义成空：cava_abi.h（冻结的公开头）里的声明没有 __declspec(dllexport)，
++ * 在定义上再写一次就是 C2375「重定义；不同的链接」——**每个导出符号都中**（MSVC 19.44 实测）。
++ * 导出改由 CMake 的 WINDOWS_EXPORT_ALL_SYMBOLS 负责（native/cmake/CavaFlags.cmake 在 MSVC 上已开）。*/
++#    define CAVA_EXPORT
++#  else
++#    define CAVA_EXPORT __declspec(dllexport)
++#  endif
+ #elif defined(__GNUC__)
+```
+
+**只改了这一处**；`__attribute__((visibility("default")))` 那条分支原样保留（MSVC 走不到它）。
+`WINDOWS_EXPORT_ALL_SYMBOLS` 确认**早就在 `CavaFlags.cmake:243-246` 打开，没有重复加**。
+
+### 13.3 补丁 2：`native/src/entity/cava_entity_kernel.cpp`（复合字面量）
+
+```diff
+-        if (h.hit) sink_emit(sink, sh, axis, h.accepted,
+-                             (const int32_t[3]){ h.cell_x, h.cell_y, h.cell_z },
+-                             h.d, before, max_dist);
++        if (h.hit) {
++            /* C99 复合字面量 (const int32_t[3]){...} 在 MSVC 上直接报 error C4576
++             * （GCC/Clang 只当扩展接受）。换具名临时数组，语义完全一样：
++             * 都是"本次调用内有效的 3 个 int32_t"，sink_emit 只读不存。*/
++            const int32_t cell[3] = { h.cell_x, h.cell_y, h.cell_z };
++            sink_emit(sink, sh, axis, h.accepted, cell, h.d, before, max_dist);
++        }
+```
+
+`sink_emit` 第 5 个形参本来就是 `const int32_t cell[3]`（= `const int32_t*`），只读、不存指针 ⇒
+具名数组与临时数组**语义完全一致**。
+
+### 13.4 ★ 真编一遍才发现 (3)：契约写 `/MT`，构建系统从来没实现过
+
+`docs/CAVA-platform-and-compat.md` §1.1 的产物矩阵写着「Windows x64 MSVC 14.4x → cava.dll →
+**/MT 静态 CRT（不要求用户装 VC++ 运行库）**」，§1.3 又写「Windows /MT」。但 `CavaFlags.cmake`
+里**没有任何一处**设置 `CMAKE_MSVC_RUNTIME_LIBRARY` / `MSVC_RUNTIME_LIBRARY` ⇒ CMake 用默认
+`MultiThreadedDLL` = `/MD`。**同一个 VS17 生成器、同一份源码，只差这一个属性**：
+
+| | 修前（CMake 默认 `/MD`） | 修后（`/MT`） |
+| --- | --- | --- |
+| cava.dll 大小 | 112128 B | **257536 B** |
+| sha256 | `2BB7C06268DDCC52…` | `90EBE32352503EC8AE1AAEC7B4540D874C4C6CBB61146D32C85CFA23F5BA9135` |
+| `dumpbin /dependents` | `MSVCP140.dll` `VCRUNTIME140.dll` `VCRUNTIME140_1.dll` `api-ms-win-crt-runtime/string/stdio/math/heap-l1-1-0.dll` `KERNEL32.dll` | **`KERNEL32.dll`（仅此一个）** |
+
+生成的 `cava.vcxproj` 里直接可查（`ItemDefinitionGroup`）：
+
+    Debug|x64          -> RuntimeLibrary=MultiThreadedDebug
+    Release|x64        -> RuntimeLibrary=MultiThreaded
+    MinSizeRel|x64     -> RuntimeLibrary=MultiThreaded
+    RelWithDebInfo|x64 -> RuntimeLibrary=MultiThreaded
+
+**这条顺带更正 §6 的一句话**：§6 写「MSVC 产物只依赖 KERNEL32.dll」。这句话**只有加了 `/MT`**
+才成立 —— P4-B 当时手工 `cl` 编的 150528 B 那份应该是带 `/MT` 的，但**项目的 CMake 路径默认产出的
+不是这样**。也就是说：即使 §6 的两个补丁落地，走 CMake 的 MSVC 交付物**仍然不满足契约**。
+（`/MT` 会不会改变浮点结果？套件实测：**不会**，见 §13.8。）
+
+```diff
+     if(MSVC)
+         target_compile_options(${target} PRIVATE /W4 /permissive- /Zc:preprocessor /utf-8)
++        # 静态 CRT（/MT）。与 MinGW 侧的 -static -static-libgcc -static-libstdc++ **完全对称**：
++        # Java 侧是 System.load/LoadLibrary 直接加载 cava.dll，用户机器上不一定有 VC++ 运行库；
++        # CMake 在 MSVC 上的默认是 /MD，产物会依赖 MSVCP140.dll / VCRUNTIME140.dll /
++        # VCRUNTIME140_1.dll / api-ms-win-crt-*.dll —— 缺一个就是 error 126（P0-B 在 MinGW 上
++        # 实测过同一个坑，脚本里写着「Java 在没装 MinGW 的机器上会加载失败」）。
++        # 契约依据：docs/CAVA-platform-and-compat.md §1.1 + §1.3；docs/CAVA-v1-plan.md 同。
++        # 安全性：ABI 只传 extern "C" + POD，没有 C++ 对象/分配跨边界，不存在两套 CRT 的
++        # malloc/free 混用（cava_build_id 返回的是静态字符串字面量，不归调用方释放）。
++        # 实测（MSVC 19.44 + VS17 生成器）：/MT 后 cava.dll 的导入表只剩 KERNEL32.dll。
++        set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY
++                     "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+     else()
+```
+
+### 13.5 ★ 真编一遍才发现 (4)：CI 里那条套件 configure 在 5 个平台上都必红
+
+`native/tests/platform/CMakeLists.txt` 第 45-46 行的 `message()` 里**变量引用少了一个 `}`**：
+
+```diff
+-message(STATUS "cava platform-suite: fp-flags=${CAVA_HARDENED_FP_FLAGS")
+-message(STATUS "cava platform-suite: system=${CMAKE_SYSTEM_NAME/${CMAKE_SYSTEM_PROCESSOR host=${CMAKE_HOST_SYSTEM_NAME/${CMAKE_HOST_SYSTEM_PROCESSOR crosscompiling=${CMAKE_CROSSCOMPILING")
++message(STATUS "cava platform-suite: fp-flags=${CAVA_HARDENED_FP_FLAGS}")
++message(STATUS "cava platform-suite: system=${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR} host=${CMAKE_HOST_SYSTEM_NAME}/${CMAKE_HOST_SYSTEM_PROCESSOR} crosscompiling=${CMAKE_CROSSCOMPILING}")
+```
+
+未修之前的真实报错（VS17 生成器）：`CMake Error at CMakeLists.txt:45 (message):` ⇒ configure exit=1，
+随后 `cmake --build` 报 `could not load cache`。而 `build.yml:124` 正是
+`cmake -S native/tests/platform -B build/platform-suite`。§12 说过 5 个 CI job 一次都没跑过，
+所以这条一直没暴露。**这是 CMake 语言层面的解析问题，与生成器/平台无关** ⇒ Linux/macOS 的
+`-G "Unix Makefiles"` 那条路也会一样红。修复后**两条生成器路都实测 configure+build 成功**：
+
+    VS17 生成器（MSVC 2022 BuildTools） : exit=0，打印 fp-flags=/O2 /fp:strict
+    MinGW Makefiles + g++ 15.2.0        : exit=0，打印 fp-flags=-O2 -fwrapv -ffp-contract=off -fno-fast-math -fno-math-errno
+                                          [100%] Built target cava_platform_suite
+    Ninja + g++                         : ❌ 本沙箱里某次 try_compile **卡死**（cmake/ninja 进程 CPU 增量 0s，
+                                          16 分钟后被 captain 按 PID 杀掉）。**根因未定位**，本轮**没有**拿到
+                                          Ninja 这条路的证据 —— 只能说「这次卡了」，**不能说「Ninja 不能用」**。
+
+### 13.6 MSVC 构建命令（可复现，全程不碰 `natives/`）
+
+`natives/<tag>/` 是**共享输出目录**（§10 第 9 条），所以本轮沿用 P4-B 的「源视图」手法：把仓库拷成
+一份**逐字节相同**的视图再配 CMake，产物自然落进视图里。
+
+```powershell
+$cmake = 'J:\mc\Cava\tools\cmake\cmake-3.31.2-windows-x86_64\bin\cmake.exe'
+$root  = 'J:\mc\Cava'; $dst = "$root\build\native-msvc\src"
+robocopy "$root\native" "$dst\native" /E /XD build /NFL /NDL /NJH /NJS /NP   # exit 0/1 = ok
+Copy-Item "$root\CMakeLists.txt" $dst -Force
+# 源视图 vs 真实树逐文件 SHA256 比对：49 个文件全部一致（含 CMakeLists.txt）
+$env:TMP = "$root\build\native-msvc\tmp"; $env:TEMP = $env:TMP   # %TEMP% 含中文会让汇编器失败
+& $cmake -S $dst -B "$root\build\native-msvc\build" -G "Visual Studio 17 2022" -A x64
+& $cmake --build "$root\build\native-msvc\build" --config Release -- /nologo /v:minimal
+```
+
+真实输出：
+
+    -- cava: compiler=MSVC 19.44.35228.0 (MSVC toolset v143) (MSVC 19.44.35228.0)
+    -- cava: fp-flags=/O2 /fp:strict
+    -- cava: natives-dir=J:/mc/Cava/build/native-msvc/src/natives/windows-x64
+    -- Configuring done (13.9s)                                  → configure exit=0
+      cava.vcxproj -> ...\build\native-msvc\src\natives\windows-x64\cava.dll
+      build exit=0（**连 4 个测试 target 一起编过**）
+
+> **本沙箱的多节点 MSBuild 坑（captain 实测，不是代码问题）**：`cmake --build ... --parallel`
+> （多节点 MSBuild）在本沙箱里会**静默失败** —— 只打两行 `Checking File Globs` /
+> `1>Checking Build System` 就 `exit=1`，**没有任何 error 行**。加 `--parallel 1` +
+> `set MSBUILDDISABLENODEREUSE=1` 后 0 错误、`BUILD_EXIT=0`。
+> **不要**把这个写成「MSVC 编译不稳定」—— 是沙箱 + MSBuild 节点复用的环境问题。
+
+### 13.7 阻塞 1/2 修好之后：整个 solution **0 error**，只剩警告
+
+`C2375` / `C4576` 全部消失。库 + 4 个测试 target 一起编，**零 error**，只剩三类警告，
+**没有一处需要改代码**：
+
+| 警告 | 位置 | 处理 |
+| --- | --- | --- |
+| `C4723` 潜在的被 0 除 | `native/src/entity/cava_entity.h(54)` | MSVC 静态推测，GCC 不报；**未改** |
+| `C4996` `fopen`/`getenv` 不安全 | `cava_fp_probe.cpp(113)`、`cava_selftest.cpp(540)`、`cava_pathfind_vectors.cpp(499/753/800)`、`cava_dll_loadtest.cpp(54)` | 只是建议用 `_s` 变体；**未改** |
+| `C4100` 未引用的参数 `c` | `cava_pathfind_vectors.cpp(335)` | **未改** |
+
+`ctest`（VS17 生成器，Release）：
+
+    1/4 Test #1: cava_dll_loadtest .......   Passed    0.19 sec
+    2/4 Test #2: cava_fp_probe ...........   Passed    0.11 sec
+    3/4 Test #3: cava_pathfind_vectors ...   Passed    0.95 sec
+    4/4 Test #4: cava_selftest ...........   Passed    0.11 sec
+    100% tests passed, 0 tests failed out of 4
+
+### 13.8 导出符号实数与依赖表（**实际数出来的**）
+
+命令：`dumpbin /nologo /exports <dll>` 与 `/dependents`（**同一把 dumpbin 量两份产物**）：
+
+| 产物 | 导出名字总数 | 其中 `cava_*` | 导入表 |
+| --- | --- | --- | --- |
+| MSVC `/MT`（257536 B，sha256 `90EBE323…`） | **188** | **22** | **`KERNEL32.dll`** |
+| MinGW（`natives/windows-x64/cava.dll`，711521 B，sha256 `5C4E777857D50DF8…`） | **188** | **22** | `KERNEL32.dll` + `msvcrt.dll` |
+
+`Compare-Object` 逐名比对 ⇒ **两边的 `cava_*` 集合完全相同**。22 = `cava_abi.h` 声明的 **19** 个
++ `cava_push_*` **3** 个（`cava_push_away_from` / `cava_push_box_filter` / `cava_push_section_plan`，
+这三个**没有**在冻结头里声明，MinGW 侧同样导出 ⇒ 不是 MSVC 特有的多导出）。
+
+    cava_abi_touch, cava_abi_version, cava_bits_of_double, cava_build_id, cava_close, cava_d2i_sat,
+    cava_d2l_sat, cava_double_of_bits, cava_layout_report, cava_mob_profile_clear,
+    cava_mob_profile_upload, cava_open, cava_pathfind, cava_push_away_from, cava_push_box_filter,
+    cava_push_section_plan, cava_region_clear, cava_region_state_id_at, cava_region_upload,
+    cava_resolve_move, cava_shape_table_upload, cava_state_table_upload
+
+（另 166 个非 `cava_*` 是 `WINDOWS_EXPORT_ALL_SYMBOLS` 一起导出的 C++ 修饰名；MinGW 侧因为
+`--export-all-symbols` 也是同样规模 —— 两边总数都是 188。）
+
+### 13.9 数值一致性套件：**两种编译器编的套件，都对 MSVC dll 跑通**
+
+§6 那次用的是 **gcc 编的套件**，套件自己的 `+ - * / sqrt` 是 gcc 算的 ⇒ 只证明了「MSVC 库的 ABI
+能调通」。本轮**额外用 MSVC 编了一份套件**，于是「**MSVC 算的** `+ - * / sqrt`」对
+「**MinGW 生成的**黄金向量」也逐位比过了 —— 这才是完整的跨编译器证据。
+
+    # ① gcc 编的套件（run-platform-suite.ps1）对 MSVC /MT dll
+    PLATFORM-SUITE|platform=windows-x64|compiler=gcc|golden=...\fp_probe.txt|lib=...\cava-msvc.dll|pass=32|fail=0|skip=0|verdict=PASS
+      [ ok ] 逐位一致性总计：15456 行，数值位不一致 0 行（NaN 载荷豁免 40 行）
+      [ ok ] layout_hash_sum = 0x1C12265E（期望 0x1C12265E）
+
+    # ② MSVC 编的套件（VS17 生成器 build/native-msvc/suite-msvc）对 MSVC /MT dll
+    PLATFORM-SUITE|platform=windows-x64|compiler=msvc|golden=...|lib=...\cava-msvc.dll|pass=31|fail=0|skip=1|verdict=PASS
+      [ ok ] 逐位一致性总计：15456 行，数值位不一致 0 行（NaN 载荷豁免 40 行）
+      [info] build_id = cava 0.1.0 windows-x64 MSVC 19.44.35228.0 (MSVC toolset v143) /O2 /fp:strict safe=0 asan=0 ubsan=0
+
+**结论**：MSVC `/O2 /fp:strict` 与 MinGW-GCC（黄金向量的生成者）在 15456 行 `+ - * / sqrt` 上
+**数值位零差异**，NaN 载荷豁免行数也一样（40）。`/MT`（§13.4）**没有**改变任何一位。
+
+**`pass=` 的口径（一处**未对齐**的差异，如实记下）**：本机实测 gcc 套件报 `pass=32`、
+msvc 套件报 `pass=31 skip=1`，**对两种产物重复测过都是这个数**；逐节数 `[ ok ]` 也对得上：
+
+| 节 | gcc 套件 | msvc 套件 |
+| --- | --- | --- |
+| S1 环境画像 | 4 | 3（+1 skip：MSVC 无 `__BYTE_ORDER__`） |
+| S2 编译开关自检 | 5 | 5 |
+| S3 逐位一致性 | **7** = add/sub/mul/div/sqrt + 「黄金向量行数=15456」+「逐位一致性总计」 | **7** |
+| S4 ABI 布局自检 | 16 | 16 |
+| 合计 | **32 / 0 / 0** | **31 / 0 / 1** |
+| captain 独立复验（3 个 gcc 二进制） | 31 / 0 / 0 | 30 / 0 / 1 |
+
+差的那一条**都在 S3**（很可能漏了「黄金向量行数 = 15456」）。**差异不影响任何 PASS/FAIL 判定**
+（两边 `fail=0` 都成立），但**数字以各自的原始 `PLATFORM-SUITE|` 输出行为准**；截至本节写作时
+**未对齐**，留给 owner 定。否则任何引用它的下游文档都会带着一个错数。
+
+### 13.10 ★ 真实服务端冒烟：**MSVC 产物第一次在真实 Fabric 服务端里跑起来**
+
+§10 第 2 条与门禁 #6 的缺口是「MSVC 产物从没在真实服务端里跑过」（#6 那份证据的 build_id 是
+`GNU 15.2.0`）。本轮补上了。
+
+**环境**：私有根 `testbed/p4-msvc-smoke/`（**没用**共享的 `testbed/server`，也**没用**
+`testbed/gate-preview`），私有端口 **25670/25671**（跑前 `netstat` 确认空闲），
+真实 Fabric 服务端 + 34 个 mod（lithium / servercore / vmp / ferritecore / carpet / TIS / spark …）。
+
+**被测产物 = 交付物本身**：`natives\windows-x64\cava.dll`，257536 B，
+sha256 `0EBE3B04A869819D7A59C8ADC11B0D1277B120B80F956A7C05D2EB62D007904D`。
+（`build/libs/cava-0.1.0.jar` 里**打包的那份 dll 是另一个哈希** `2d8d8e28…`，所以用
+`-Dcava.native.path=<dll>` 明确指定了被测文件；落盘日志里的哈希名 `cava-0ebe3b04a869819d.dll`
+证明**确实加载的是上面这一份**。）
+
+真实 stdout（节选，**原文**）：
+
+    - cava 0.1.0
+    [native] 原子落盘 …\cava\natives\0.1.0\windows-x64\cava-0ebe3b04a869819d.dll (len=257536, sha256=0ebe3b04a869819d…)
+    [native] System.load(…\cava-0ebe3b04a869819d.dll) 成功
+    [native] defaultLookup() 找不到 cava_build_id，回退 SymbolLookup.libraryLookup()
+    [cava/native] 布局自检通过：native_entries=14 java_sum=0x1c12265e native_sum(per-entry sum)=0x1c12265e
+    [cava/native] cava_open → sent_sum=0x1c12265e rc=CAVA_OK result.status=CAVA_OK result.abi=1 result.native_layout_sum=0x1c12265e handle=4294967297
+    [cava/native] 原生库已打开：status=OPEN build_id="cava 0.1.0 windows-x64 MSVC 19.44.35228.0 (MSVC toolset v143) /O2 /fp:strict safe=0 asan=0 ubsan=0" abi=1/1 java_sum=0x1c12265e native_sum=0x1c12265e entries=14 handle=4294967297
+    [cava] 兼容层：2 个子系统按归属让位（[entity, redstone]）
+    ################ Cava 0.1.0  （Java 21 预览版 FFM + C++ 原生；P0 骨架，未注入任何游戏逻辑） ################
+    build_id        : cava 0.1.0 windows-x64 MSVC 19.44.35228.0 (MSVC toolset v143) /O2 /fp:strict safe=0 asan=0 ubsan=0
+    熔断            : 熔断[enabled=true threshold=5 tripped=false failures=0 softFailures=0 trips=0 errorEmits=0 suppressedAfterTrip=0]
+    [Server thread/INFO]: Done (2.325s)! For help, type "help"
+    [cava/pathfind] 金丝雀 PASS：主动触发 findPathToAny 一次，计数 0 -> 1（原版返回 Path(6 节点)）；canary=1 takeovers=0 nativeCalls=0 errors=0 disabled=false reasons={skipped=1}
+
+**判据逐条核对（captain 给的 4 条，全部命中）**：
+
+| 判据 | 结果 |
+| --- | --- |
+| 启动横幅 | ✅ `################ Cava 0.1.0 … ################` |
+| `[native] System.load(…cava.dll)` 成功 | ✅（文件名带本产物哈希 `0ebe3b04a869819d`） |
+| 布局自检 `native_entries=14 java_sum=0x1c12265e` | ✅ `native_sum` 也 = `0x1c12265e` |
+| 不出现任何 `[cava/native] ERROR` | ✅ 无 |
+
+**附带证据**：`cava_open rc=CAVA_OK`；`handle=4294967297`；**`build_id` 明写 `MSVC 19.44.35228.0`**
+（不是 `GNU 15.2.0`）⇒ 确实跑的是 MSVC 产物；熔断器未触发；与 lithium/servercore/vmp/ferritecore/
+carpet/TIS 共存启动成功（兼容层让位 2 个子系统）；服务端 `Done (2.325s)`。
+日志里那些 `EasyBotBridge-Jetty … Connection refused` 是**别的 mod** 的，与 cava 无关。
+
+**收尾**：`taskkill /PID 42188 /T /F` 在本沙箱返回 `Access denied`（拦了），改用
+`Stop-Process -Id 42188 -Force` 成功；随后 `netstat` 确认 25670/25671 **已释放**、进程已退出。
+
+### 13.11 MinGW 没有退化（验收口径）
+
+`pwsh -File native/tests/build-mingw.ps1`（**全部改动落地之后**重跑，日志
+`build/native-msvc/logs/mingw-final.log`）：
+
+    selftest (release/c++17)  === SUMMARY: 180 passed, 0 failed ===   RESULT: PASS
+    selftest (CAVA_SAFE=1)    === SUMMARY: 180 passed, 0 failed ===   RESULT: PASS
+    selftest (c++20)          === SUMMARY: 180 passed, 0 failed ===   RESULT: PASS
+    cava_dll_loadtest.exe (clean PATH)  RESULT: PASS
+    import table: DLL Name: KERNEL32.dll / DLL Name: msvcrt.dll（无 MinGW 运行时 DLL）
+    ALL DONE. (FpProbeJava exit=1 —— 这是脚本明说的 NaN 载荷差异，**不算失败**，见脚本第 158 行)
+
+任务书要求的 **180 passed / 0 failed 保持原样**。三个补丁对 MinGW 全是零影响：补丁 1/2 在
+`#if defined(_MSC_VER)` 与等价的具名数组里，补丁 3 在 `if(MSVC)` 里，补丁 4 只改 CMake 的
+`message()` 字符串。
+
+### 13.12 本轮**未验证**清单（不要当成已完成）
+
+1. **MSVC 产物没有跑过任何 fuzz**：`native/tests/fuzz/cava_fuzz_abi.cpp` 与 20 万例 ABI fuzz
+   **一次都没用 MSVC 产物跑过**（本轮没编 fuzz 驱动、没跑）。已有 fuzz 证据全部来自 MinGW。
+2. **MSVC 产物跑的真实服务端只有上面这一次**（17.5s 就绪、`Done (2.325s)` 后即停）：
+   **没有**做长时间运行、没有跑游戏逻辑、没有跑多玩家/压力场景。
+3. **`build/libs/cava-0.1.0.jar` 里打包的那份 dll（sha256 `2d8d8e28…`）本轮没有测**：
+   冒烟用的是 `-Dcava.native.path` 指到交付物。**jar 里那份是什么、要不要重新打包，留给 owner。**
+4. **MSVC 产物里 `sqrt` 被编成了什么**未确认（§10 第 6 条仍成立；本轮没做反汇编）。
+5. **MSVC 产物里的 VEX/AVX 指令是否有运行期 CPU 保护**未确认（§10 第 7 条仍成立）。
+6. **Ninja 生成器那条路没拿到证据**（§13.5）。VS17 与 MinGW Makefiles 两条路都真跑通了。
+7. **CI 仍然一次都没跑过**（§12 不变）。本轮只证明了 `build.yml:124` 那条命令现在**能 configure**，
+   **没有**证明整条 CI 能绿。
+8. **`pass=` 口径的 32 vs 31 差异未对齐**（§13.9）。
+9. **Linux/macOS/ARM 上没跑过任何东西**：§13.5 只用 MinGW Makefiles 证明「同类非 VS 生成器可行」。
+10. **`/MT` 之后 MSVC 的 C++ 运行时行为**只由套件 + 4 个 ctest + 一次服务端冒烟覆盖。
+

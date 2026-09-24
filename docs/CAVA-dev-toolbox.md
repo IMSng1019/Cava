@@ -85,6 +85,30 @@ javadoc 行也以 `c` 开头，判别式必须是 `p.length === 4 && p[2].indexO
    用 `$env:JAVA_TOOL_OPTIONS = '-Duser.language=en -Dfile.encoding=UTF-8'`。
 2. 中文/英文诊断可能是乱码：脚本开头加 `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`。
 
-## 7. 每完成一项就更新这份表
+## 7. 上线加固 / 平台 / 崩溃取证 工具（P4 轮的产出，**每条都实跑过**）
+
+| 工具 | 用途 | 命令 |
+| --- | --- | --- |
+| `tools/harden-breaker.ps1` | 熔断行为端到端验证（软失败不熔断 / 硬失败第 5 次熔断 / 熔断后不再尝试原生） | `pwsh -File tools/harden-breaker.ps1` |
+| `tools/harden-rollback.ps1` | 一键回滚验证（`-Dcava.native.enabled=false` 两腿对比，成功判据机器校验） | `pwsh -File tools/harden-rollback.ps1 [-SkipBuild]` |
+| `tools/harden-fuzz.ps1` / `native/tests/fuzz/build-fuzz.ps1` | **已冻结 ABI 的坏输入 fuzz**（越界/NaN/颠倒 AABB/cap 不足/伪造句柄；输出缓冲区顶到 guard page + 0xA5 哨兵） | `pwsh -File native/tests/fuzz/build-fuzz.ps1 -Cases 20000`（`-Dll <路径>` 可换任意产物） |
+| `tools/platform-flagcheck.ps1` | **从产物反查编译开关**（flags.make / compile_commands.json / 导入表 / 反汇编里有没有 AVX） | `pwsh -File tools/platform-flagcheck.ps1 -BuildDir build/native-captain -Lib natives/windows-x64/cava.dll` |
+| `tools/platform-tagmatrix.ps1` | 5 平台标签推导矩阵（`-RealCrossConfigure` 会真的交叉 configure 成 Linux） | `pwsh -File tools/platform-tagmatrix.ps1` |
+| `native/tests/platform/` | **平台数值一致性套件**（逐位 + 编译开关 + ABI 布局；31 项） | `cava_platform_suite.exe --golden native/tests/vectors/fp_probe.txt`（`CAVA_SUITE_LIB` 指定被测库） |
+| `tools/hs-err-report.ps1` + `tools/crash-probe.ps1` | **崩溃取证**：真崩出 hs_err → 判定"问题帧在哪个模块"（模块级判定，不是 grep 文本） | `pwsh -File tools/crash-probe.ps1`；单跑 `pwsh -File tools/hs-err-report.ps1 -Log <hs_err>` |
+| `tools/CavaArtifactProbe.java` | 交付物指纹（Size/SHA256/build_id/entries/layout_sum） | 见脚本头 |
+
+**本机两个构建坑（P4 实测）**：
+1. **多节点 MSBuild 会静默失败**：`cmake --build ... --parallel` 在本沙箱里 exit=1 却**一行 error 都没有**
+   （只打 `Checking File Globs / 1>Checking Build System`）。用 `--parallel 1` + `set MSBUILDDISABLENODEREUSE=1`。
+   现成脚本：`build/msvc-captain.bat`（configure）+ `build/msvc-captain-build.bat`（build）。
+2. **Ninja 生成器卡死过一次**（cmake+ninja CPU 0% 十六分钟，未定位根因）。本机稳妥的两个生成器是
+   **MinGW Makefiles** 与 **Visual Studio 17 2022**。
+
+**交付物（windows-x64）**：`natives/windows-x64/cava.dll` = **MSVC /MT** 产物
+（257536 B，sha256 `0EBE3B04…`，导入表只有 KERNEL32.dll）。契约 §1.1/§1.5 规定 MSVC 是生产工具链，
+MinGW「仅作辅助」。
+
+## 8. 每完成一项就更新这份表
 
 新踩到的坑、新验证可用的命令，**追加到这里**（或对应主题的 `docs/CAVA-*.md`）。

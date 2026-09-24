@@ -11,6 +11,13 @@
 **It is hand-made.** It must never be cited as evidence that a crash happened; it exists only to
 prove that the forensics parser *refuses* input it cannot trust.
 
+**It is committed with `git add -f` on purpose.** `.gitignore` line 72 has `hs_err_*.log`
+(that rule exists to keep *real* crash logs -- which contain the machine's environment block, user
+names and paths -- out of the repo). This file is the single deliberate exception: it is an **input
+to a test**, not a crash record, so it must be versioned; without it the negative-control leg of
+`tools/crash-probe.ps1` cannot run on a clean checkout. If `.gitignore` is ever tightened, keep
+this path admissible (e.g. `!native/tests/vectors/hs_err_truncated_fixture.log`).
+
 How it was produced (reproducible):
 
 1. run the P4-C crash probe once, so a real log exists:

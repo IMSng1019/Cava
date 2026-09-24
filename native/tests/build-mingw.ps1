@@ -98,6 +98,12 @@ if ($badImports.Count -gt 0) {
 }
 Write-Host "    OK: 只有系统 DLL"
 
+# ---- 产物指纹：写进共享输出目录之后立刻打印，谁在后面重建都留得下痕迹 ----
+$dllItem = Get-Item -LiteralPath $Dll
+$dllSha  = (Get-FileHash -LiteralPath $Dll -Algorithm SHA256).Hash
+Write-Host ">>> ARTIFACT $Dll size=$($dllItem.Length) sha256=$dllSha"
+Write-Host "    (natives/<tag>/ 是共享输出目录：这一行就是『当时交付物是哪一份』的唯一凭据，重建即作废)"
+
 if ($SkipRun) { Write-Host ""; Write-Host '-SkipRun: 只编译，不跑。'; exit 0 }
 
 Write-Host ""

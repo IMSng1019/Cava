@@ -88,6 +88,14 @@ if(CAVA_SOURCES)
     cava_apply_build_definitions(cava)
     cava_set_output_dirs(cava)
 
+    # 产物指纹：每次链接完都把 Size+SHA256 打进构建日志。
+    # 动机：natives/<tag>/ 是共享输出目录、有多个生产者，本项目已两次出现
+    # "验证被另一次重建静默作废"（docs/CAVA-gates.md 门禁 #8 §8.4）。
+    add_custom_command(TARGET cava POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -DCAVA_HASH_FILE="$<TARGET_FILE:cava>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/native/cmake/CavaHash.cmake"
+        COMMENT "cava: 打印产物指纹（Size/SHA256）")
+
     message(STATUS "cava: 源文件 ${_cava_src_count} 个 -> ${CAVA_NATIVES_DIR}")
 else()
     # 允许「契约先行、源码未到位」的状态：配置必须成功，但绝不产出假库。

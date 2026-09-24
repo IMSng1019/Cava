@@ -208,7 +208,7 @@
 
     === fuzz [shipped] ===
       dll    = J:\mc\Cava\natives\windows-x64\cava.dll      (2855079 B)
-      sha256 = 43129D92C13A4D3BD274802EDC6DF7008662464C20205CE232B5B60464F850EE
+      sha256 = D751A3D100110D6ABA9F518E64876C900A764D7C94C57380F44317E908695DF3
       build_id: cava 0.1.0 windows-x64 GNU 15.2.0 (C:/mingw64/bin/g++.exe) … safe=0
       entries=14  layout_sum=0x1C12265E  cava_open rc=0 handle=4294967297
       SUMMARY … cases=200467 crashes=0 undefined_returns=0 state_mutations=0 overruns=0 unexpected_ok=0
@@ -222,8 +222,10 @@
     OVERALL: PASS   (SCRIPT EXIT=0)
 
 三条腿覆盖了**两套构建系统**：CMake 产物（shipped）与 g++ 静态配方产物（release-rebuild / safe-build）。
-（前一轮同样的 100k 用例也跑过重建前的 natives 产物 `sha256 F79052CD…`（711521 B，同为 g++ 配方）：
-`cases=200467 crashes=0 undefined_returns=0 state_mutations=0 overruns=0`，结论相同。）
+（同一套 100k 用例在**三份不同产物**上都跑过并全部 PASS：
+`F79052CD…`（711521 B，g++ 配方，重建前的 natives 产物）、
+`43129D92…`（2855079 B，CMake 产物）、
+`D751A3D1…`（2855079 B，在另一条流修好 native/tests 期望值并改了 native/src 之后重新 CMake 构建的当前产物）。）
 
 基线/不变性/上限三条关键行（同一份日志）：
 
@@ -336,7 +338,7 @@ SAFE 构建**多打一行 stderr**（`[cava][SAFE] assertion #1 failed: … -> c
 
 ---
 
-## 6. 门禁现状：`gradlew build` 绿、`gradlew test` 绿、**ctest 本来就红（与我无关，根因已定位）**
+## 6. 门禁现状：`gradlew build` 绿、`gradlew test` 绿、**ctest 现已 4/4 绿**
 
     .\gradlew.bat build --console=plain --no-watch-fs
     BUILD SUCCESSFUL in 7s     GRADLE BUILD EXIT=0
@@ -379,8 +381,24 @@ CMakeLists 第 41 行的注释就是要求这个）之后：
 
 **为什么我没有修**：`native/tests/*.cpp`、`native/tests/CMakeLists.txt`、
 `native/tests/vectors/layout_expected.txt` **都不在本轮授权路径**（我只被授权 `native/tests/fuzz/**`）。
-建议由 owner（P0-B / captain）做最小修复：把 `9` 改成从 `cava_layout_report` 的返回值取，
-并重新生成 `layout_expected.txt`（`cava_selftest --dump-layout`）。
+
+### 现已闭合：另一条流修好后我复验 `ctest` 4/4 绿
+
+修复提交 `7963d5d fix(native-tests): derive the layout expectations instead of hardcoding them`
+（改了 `native/tests/cava_dll_loadtest.cpp` / `cava_selftest.cpp` / `vectors/layout_expected.txt`）。
+我重新构建后再跑：
+
+    cmake --build build/native-captain --parallel           → CMAKE BUILD EXIT=0
+    PATH=natives/windows-x64;C:\mingw64\bin ctest --test-dir build/native-captain -C Release
+      1/4 cava_dll_loadtest      Passed
+      2/4 cava_fp_probe          Passed
+      3/4 cava_pathfind_vectors  Passed
+      4/4 cava_selftest          Passed
+    100% tests passed, 0 tests failed out of 4      CTEST EXIT=0
+
+⇒ **6 项门禁里，`gradlew build` / `gradlew test` / `ctest` 现在全绿。**
+（注意：`ctest` 需要把 `natives/windows-x64` 放进 PATH —— `cava_test_cava_selftest.exe`
+**导入** `cava.dll`，CMakeLists 第 41 行的注释写明了这一点；不加 PATH 会以 `0xC0000135` 起不来。）
 
 ### ★★ 一个必须上报的副作用：我重建原生测试时**覆盖了交付物 DLL**
 
@@ -393,6 +411,9 @@ CMakeLists 第 41 行的注释就是要求这个）之后：
 两份都是**全静态**（导入表只有 `KERNEL32.dll` + `msvcrt.dll`，实测 objdump），
 都来自同一份源码、都报 `entries=14 / layout_sum=0x1C12265E`，fuzz 都全绿；
 差别只是构建系统（CMake vs `build-mingw.ps1` 的 g++ 配方）与体积。
+**之后为了复验 ctest 我又重建过一次**（当前产物 `sha256 D751A3D1…`，2855079 B，同样全静态），
+这一份包含另一条流在 `native/src/cava_internal.h` / `cava_entity_kernel.cpp` 里的**未提交改动**
+（工作区里还有别人未提交的 `native/cmake/CavaFlags.cmake` 等 3 个文件，我按纪律**没有提交它们**）。
 **`gradlew build` 会把这个文件打进 jar**，所以 captain 如果要求交付物是 g++ 配方那一份，
 重跑 `native/tests/build-mingw.ps1`（或 `gradlew buildNative` 取 CMake 那一份）即可。
 

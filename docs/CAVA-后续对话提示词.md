@@ -372,7 +372,8 @@ J:/mc/Cava　（Fabric mod 项目；原生代码放 native/；文档在 docs/）
 | P2 实体 | **live 接管已达成**，但两个核的**性能是净亏**，明确决定不上线 | core1 净 **+1.86 µs/次**；core2 broadphase 净 **+6.8 µs/次**；`pushCalls=0`（本整合包 MobEntity 会被静默移除） |
 | P3 红石 | **让位（defer）**，零红石加速 | Carpet `fastRedstoneDust` 开启时 `RedstoneWireBlock.update` 是死方法（3 个调用点全被 redirect）；且现夹具对红石算法**不敏感** ⇒ "w 一致"**不能**当红石等价证据 |
 | P4 平台 | 5 平台构建矩阵 + 数值一致性套件**写全**，**非 Windows 一条都没跑过** | 平台套件 windows-x64 **32 项全过（CI 口径：带 `--expect-rows 15456`；不带是 31 项）**、标签推导 17/17、flagcheck 36 过/1 跳过；CI job 名都带 `[unverified-local]` |
-| P4 加固 | 熔断/看门狗/fuzz/SAFE/一键回滚**全部有实跑证据** | fuzz 三产物 × 200467 例 0 崩溃；熔断阈值 5；回滚 = 一个 JVM 参数 |
+| P4 加固 | 熔断/看门狗/fuzz/SAFE/一键回滚/崩溃取证/并发**全部有实跑证据** | fuzz 三产物 × 200467 例 0 崩溃（含 **8 线程 × 4000 轮**并发阶段）；熔断阈值 5；回滚 = 一个 JVM 参数；崩溃取证靠**真崩**（3 次真实 hs_err，四种输入四种判定） |
+| 并发模型 | **写进契约 §2.1 第 10 条**：所有入口由 Java 从**同一个线程**调用（Server thread） | 并发换表时 `cava_resolve_move` 有 **0.381%** 返回 `CAVA_ERR_ARG`（契约内合法拒绝，非损坏）；决定**不加锁**、只加 `offThreadCalls` 计数守卫 |
 
 ### ★ 交付物（Windows x64）
 
@@ -400,5 +401,9 @@ J:/mc/Cava　（Fabric mod 项目；原生代码放 native/；文档在 docs/）
   的每次调用与每 tick 数字 —— 本轮末由 P1-PERF 流在做。
 - **7 天连续运行 + native 回退计数为 0**（prompts/07 验收第 2 条）：没有 7×24 环境。
 - **非 Windows 平台 / ASan / UBSan**：本机无工具链、Docker 守护进程未运行、WSL 被拒。
-- **区段并发卸载 fuzz / hs_err 崩溃取证**：本轮末由 P4-C 流在做。
-- **MSVC 产物的真实服务端冒烟**：MinGW 产物跑过（门禁 #6），MSVC 产物由 P4 MSVC 流补。
+- ~~区段并发卸载 fuzz / hs_err 崩溃取证~~：**已闭合**（P4-C，captain 独立复跑；见门禁 #8 §8.5）。
+- ~~MSVC 产物的真实服务端冒烟~~：**已闭合** —— MSVC 产物在真实 Fabric 服务端跑通（横幅 + `System.load` +
+  布局自检 14/0x1c12265e + 无 ERROR）。
+- **MSVC 产物**：「从产物反查编译开关」（`platform-flagcheck.ps1`）只对 MinGW 构建目录跑过，MSVC 目录没跑。
+- **`cava_open`/`cava_close` 的并发**、**`offThreadCalls` 的真实越线**：都未观测到（单测里是故意造的）。
+- **没有在真实服务端上让 Cava 自己崩过**：崩溃取证的正向判定靠"同名模块替换"构造，不是真实缺陷。

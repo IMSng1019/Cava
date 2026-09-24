@@ -74,8 +74,14 @@
    `pass=31 fail=0 skip=0`，逐行数 `[ ok ]` 也是 31；MSVC 编的套件是 `30 + 1 skip`。
    P4-B 文档那两处已就地更正（提交 `4731a79`）。
 4. **导出面比头文件多 3 个符号**：`cava_push_away_from` / `cava_push_box_filter` / `cava_push_section_plan`
-   两份产物都导出，但 `cava_abi.h` 里没有它们（只给 `native/tests/push/` 用）。
-   不是 ABI 漂移（Java 侧从不解析），但已把"导出面以头文件为准、新符号必须走正规通道"写进契约 §2.1 第 9 条。
+   两份产物都导出，但 `cava_abi.h` 里没有它们。**我第一版结论写错了**（写成"只给 native 测试用、
+   Java 侧从不解析"），随后查 `cava/push/NativePush.java` 发现**Java 真的会解析这三个符号**
+   （它自己做 `libraryLookup` + `downcallHandle`，因为不在冻结的 `CavaBindings.REQUIRED_SYMBOLS` 里）。
+   ⇒ 真正的结论是：**这是一个未被 `cava_open` 布局自检覆盖、也没有任何自动守卫的第二导出面**，
+   签名漂移只会变成一次静默的 FFM UB；默认配置下不会触发（`cava.push.mode` 默认 `off`）。
+   已按这个口径改写契约 §2.1 第 9 条。
+   > 教训：**"多导出的符号没人用"是个假设，不是事实** —— 假设要 grep 过 `src/main/java` 才能写进文档。
+   > （这条正是"复核必须独立做"的价值：P4-A/B 都没查这一层，我一查发现两个流都没覆盖的风险面。）
 
 ### 8.4 新增护栏：**产物指纹纪律**（这是本轮真实付过代价的一条）
 

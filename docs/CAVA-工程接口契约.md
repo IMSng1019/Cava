@@ -81,10 +81,20 @@
    也只覆盖它们。`cava_open` **不校验**"库里是否多导出了别的符号"。
    > **实测事实（2026-09-24，captain 用 objdump 逐符号核对两份产物）**：交付 DLL **多导出 3 个
    > 不在头文件里的符号** —— `cava_push_away_from` / `cava_push_box_filter` / `cava_push_section_plan`
-   > （MinGW 与 MSVC 两份产物都一样）。它们只给 `native/tests/push/` 的向量测试用，Java 侧从不解析；
-   > 之所以会导出，是因为 `__declspec(dllexport)` / CMake 的 `WINDOWS_EXPORT_ALL_SYMBOLS` 会导出**所有**外部符号。
-   > **这不是 ABI 漂移**（多导出的符号不会被任何 Java 代码碰到），但**新加的符号一律要走"改头文件 +
-   > 两侧同时更新 + 重算 layout_hash_sum"的正规通道**，不许靠"反正它会自动导出"溜进来。
+   > （MinGW 与 MSVC 两份产物都一样）。之所以会导出，是因为 `__declspec(dllexport)` / CMake 的
+   > `WINDOWS_EXPORT_ALL_SYMBOLS` 会导出**所有**外部符号。
+   >
+   > ⚠️ **它们是"第二个、未纳入冻结 ABI 的导出面"，而且 Java 侧真的会解析它们**：
+   > `cava.push.NativePush` 自己做 `SymbolLookup.libraryLookup` + `downcallHandle`（因为它不在冻结的
+   > `CavaBindings.REQUIRED_SYMBOLS` 里，本轮拿不到改动授权）。后果必须记住：
+   > - `cava_open` 的布局自检**不覆盖**这三个符号，`CavaBindings` 也**不校验**它们；
+   > - 因此**改了它们的签名（参数个数/类型/顺序）不会有任何自动守卫报警**，只会变成一次静默的
+   >   FFM 未定义行为。改这三个入口时，**必须同时改 `NativePush` 里的 `FD_*` 与
+   >   `native/tests/push/` 的向量用例**，并重跑那套向量。
+   > - 默认配置下它们不会被解析：`cava.push.mode` 默认 `off`（P2 push 已决定不上线）。
+   >
+   > **新加的符号一律要走"改头文件 + 两侧同时更新 + 重算 layout_hash_sum"的正规通道**，
+   > 不许靠"反正它会自动导出"溜进来；`cava_push_*` 是历史遗留的例外，不是可以照抄的先例。
 
 ### 2.2 句柄生命周期
 

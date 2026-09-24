@@ -165,6 +165,24 @@ class CallWatchdogTest {
     }
 
     @Test
+    void anAbortedCallIsNotAnInstrumentationFailure() {
+        // 原生调用抛异常是"被观测对象"出事，不是观测层出事。
+        // 两者混在一个计数里，运维会在真故障时误判成"看门狗坏了"。
+        CallWatchdog w = new CallWatchdog(50 * MS, new FakeClock(0L, MS));
+        NativeCallGuard guard = new NativeCallGuard(new CircuitBreaker(1000), w);
+        guard.setErrorSink(s -> { });
+        int rc = guard.call("cava_pathfind", () -> {
+            throw new IllegalStateException("downcall exploded");
+        });
+        assertEquals(NativeCallGuard.ERR_CALL_FAILED, rc);
+        assertEquals(1, w.abortedCalls(), "原生调用抛异常 ⇒ 记 abortedCalls");
+        assertEquals(0, w.instrumentationFailures(),
+                "观测层没坏 ⇒ 不许记 instrumentationFailures（否则真故障时误导运维）");
+        assertEquals(0, w.slowCalls(), "中止计时的调用不许被当成慢调用");
+        assertTrue(w.report().contains("abortedCalls=1"), w.report());
+    }
+
+    @Test
     void thresholdComesFromSystemProperty() {
         String saved = System.getProperty(CallWatchdog.PROP_THRESHOLD_MICROS);
         try {

@@ -20,7 +20,10 @@ import org.slf4j.LoggerFactory;
  *   <li><b>已熔断</b> ⇒ 直接返回 {@link #ERR_NATIVE_UNAVAILABLE}，<b>一次原生都不尝试</b>
  *       （{@link #attempts()} 不增长）——这是"后续调用不再尝试原生"的可证伪证据。</li>
  *   <li>否则执行原生调用，<b>原样返回它的返回值</b>（看门狗只观测）。</li>
- *   <li>返回值 &lt; 0 ⇒ 记一次失败（连续计数 +1）；返回值 &ge; 0 ⇒ 清零该入口的连续计数。
+ *   <li>返回值分两级记账（<b>不是"负数就算失败"</b>，见 {@link #isTripWorthy(int)}）：
+ *       <b>硬失败</b>（{-1,-2,-5,-6}）⇒ 连续计数 +1，可能触发熔断；
+ *       <b>软失败</b>（{-3,-4,-7}，ABI 明文规定的合法拒绝）⇒ 只加 {@code softFailures} 并把连续计数清零；
+ *       返回值 &ge; 0 ⇒ 同样清零该入口的连续计数。
  *       {@code 0} 是合法结果（例如 {@code cava_pathfind} 的"无路径"），<b>不是失败</b>。</li>
  *   <li>调用抛 {@code Throwable} ⇒ 返回 {@link #ERR_CALL_FAILED}，记一次失败，
  *       并且<b>每个入口只打一条 ERROR</b>（与 {@code CavaNative} 既有行为一致）。</li>

@@ -61,6 +61,7 @@ public final class CallWatchdog {
     private final AtomicLong warnEmissions = new AtomicLong();
     private final AtomicLong instrumentationFailures = new AtomicLong();
     private final AtomicLong clockAnomalies = new AtomicLong();
+    private final AtomicLong abortedCalls = new AtomicLong();
     private final AtomicLong lastNanos = new AtomicLong(-1);
 
     private volatile Consumer<String> warnSink = CallWatchdog::logWarn;
@@ -135,6 +136,17 @@ public final class CallWatchdog {
 
     public long clockAnomalies() {
         return clockAnomalies.get();
+    }
+
+    /**
+     * 被 {@link #abort(long)} 中止计时的调用次数（原生调用抛异常）。
+     *
+     * <p><b>刻意与 {@link #instrumentationFailures()} 分开</b>：那条计数只表示"看门狗自己出错了"
+     * （取时钟失败 / 记账抛异常）。原生调用抛异常是<b>被观测对象</b>出事，不是观测层出事 ——
+     * 混在一起会让运维在真故障时误判成"看门狗坏了"，把注意力引到错误的组件上。
+     */
+    public long abortedCalls() {
+        return abortedCalls.get();
     }
 
     /** 最近一次被测到的耗时（ns；从未测到为 -1）。<b>仅供展示</b>，不得用于任何行为判定。 */
@@ -219,10 +231,13 @@ public final class CallWatchdog {
         }
     }
 
-    /** 不计时的失败路径（原生调用抛异常时用）：只记 instrumentation，不产生"慢调用"结论。 */
+    /**
+     * 不计时的失败路径（原生调用抛异常时用）：只加 {@link #abortedCalls()}，
+     * <b>不加</b> {@link #instrumentationFailures()}（那不是观测层出错），也不产生"慢调用"结论。
+     */
     public void abort(long t0) {
         if (t0 != NO_CLOCK) {
-            instrumentationFailures.incrementAndGet();
+            abortedCalls.incrementAndGet();
         }
     }
 
@@ -242,6 +257,7 @@ public final class CallWatchdog {
         return "看门狗[enabled=" + enabled() + " threshold=" + fmtMicros(thresholdNanos)
                 + " calls=" + calls() + " slow=" + slowCalls.get() + " max=" + fmtMicros(maxNanos.get())
                 + " warns=" + warnEmissions.get() + " clockAnomalies=" + clockAnomalies.get()
+                + " abortedCalls=" + abortedCalls.get()
                 + " instrumentationFailures=" + instrumentationFailures.get()
                 + (slowCalls.get() == 0 ? "" : " perSymbol=" + perSymbolSummary()) + "]";
     }

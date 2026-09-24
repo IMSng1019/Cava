@@ -40,6 +40,15 @@ param(
   [switch]$AiLoad,
   [int]$AiZombies = 40,
   [int]$AiTicks = 1200,
+  # P1-NET：测量前的预热 sprint 跳数（JIT 暖机；**不计入**测量窗口）
+  [int]$AiWarmup = 400,
+  # P1-NET：逐距离换手点扫描（分流阈值的数据出处）；空 = 不跑
+  [string]$Sweep = '',
+  [int]$SweepN = 1500,
+  [ValidateSet('reuse', 'repush')][string]$SweepMode = 'reuse',
+  # P1-NET：按规模分流的阈值（方块）。-1 = 用 jar 里的默认值；0 = **关掉分流**（对照）；
+  # 很大的值 = "把阈值改坏"的可证伪对照（什么都不接管）。
+  [long]$GateMin = -1,
   [int]$OldBench = 0,
   [switch]$SkipBuildCheck,
   # 额外的 JVM 系统属性（**可证伪对照用**）。两种写法等价：
@@ -134,6 +143,35 @@ function Field([string]$line, [string]$key) {
   return '(缺)'
 }
 
+# 从 PERFDETAIL 里的复合记号 'site:cells=..,changed=..,hash=0x..,verify=..' 取子键。
+# 为什么要单独一个函数：Field() 只认 "空白 + key=" 的形态，'site:cells=' 里的 cells 前面是冒号 ⇒ 取不到。
+function SiteField([string]$line, [string]$key) {
+  if (-not $line) { return '(缺)' }
+  $m = [regex]::Match($line, "site:(\S+)")
+  if (-not $m.Success) { return '(缺)' }
+  $sub = [regex]::Match($m.Groups[1].Value, "(?:^|,)$([regex]::Escape($key))=([^,]+)")
+  if ($sub.Success) { return $sub.Groups[1].Value }
+  return '(缺)'
+}
+
+# SWEEP 回执行 → 以 "preset/mode/d" 为键的表（P1-NET：换手点曲线的原始数据）。
+function Get-Sweep([string]$file) {
+  $map = [ordered]@{}
+  foreach ($line in Get-Content -LiteralPath $file) {
+    if ($line -match 'SWEEP id=d+ preset=(S+) mode=(S+) blockDist=(d+)') {
+      $map["$($Matches[1])/$($Matches[2])/$($Matches[3])"] = $line
+    }
+  }
+  $map
+}
+
+# 某个模式在文件里最后一次出现的行（AIDIST/TICKSTAT 会打多次：reset 一次、sprint 后一次）。
+function LastLine([string]$file, [string]$pattern) {
+  $m = Select-String -LiteralPath $file -Pattern $pattern -ErrorAction SilentlyContinue | Select-Object -Last 1
+  if ($m) { return $m.Line.Trim() }
+  return ''
+}
+
 if ($Compare) {
   $offFile = Join-Path $resultsDir "$OffTag.txt"
   $onFile = Join-Path $resultsDir "$OnTag.txt"
@@ -158,16 +196,32 @@ if ($Compare) {
     # 勘误（2026-09-24 P1-FIX）：这里原来写的是 'reachesTargetFlag'，而回执里的键是
     # 'reachedTargetFlag' ⇒ Field() 两边都返回 '(缺)'，**这个字段其实从来没被比过**。
     # 而它恰好是 native 侧填反了的那个字段（见 NativeNodeCodec.reachesTarget 的实测证据）。
+    # **P1-NET（R6）**：这三张表就是"比对脚本到底比了哪些字段"的**唯一出处**，
+    # 它们与回执键名的机械对拍在 src/test/java/cava/hook/ReceiptFieldParityTest.java 里（少一个/多一个都红）。
+    # 为什么要有那条测试：本轮之前 $perfFields 里写的是 'reachesTargetFlag'，而回执里的键是
+    # 'reachedTargetFlag' ⇒ Field() 两边都返回 (缺)、两边相等 ⇒ **这个字段从来没被比过**，
+    # 而且整体还是绿的。只靠人读发现不了这件事。
     $perfFields = @('ok', 'n', 'nodes_avg', 'nodes_p50', 'nodes_min', 'nodes_max', 'nullPaths', 'endDistinct', 'end', 'manh', 'reachedTargetFlag')
-    $detFields = @('sig_coords', 'sig_types', 'sigDistinct', 'analyzeLen', 'startNode', 'endNode', 'collisionNodes', 'firstBadNode')
+    $detFields = @('sig_coords', 'sig_types', 'sigDistinct', 'analyzeLen', 'startNode', 'endNode', 'collisionNodes', 'firstBadNode',
+      'canaryDelta', 'expectDelta', 'analyzeNulls', 'solidNodes', 'params', 'env', 'startProbe')
+    # site: 是个复合 token（Field() 取不到子键）⇒ 用专门的抽取器比"两腿测的是不是同一块地".
+    $siteFields = @('cells', 'hash', 'verify')
     $diff = @()
     foreach ($f in $perfFields) {
       $a = Field $o.perf $f; $b = Field $n.perf $f
+      # **字段缺失必须红**：两边都 (缺) 会"相等"，那正是 R6 那个坑。
+      if ($a -eq '(缺)' -or $b -eq '(缺)') { $diff += "$f(字段缺失! off=$a on=$b)"; continue }
       if ($a -ne $b) { $diff += "$f(off=$a on=$b)" }
     }
     foreach ($f in $detFields) {
       $a = Field $o.detail $f; $b = Field $n.detail $f
-      if ($a -ne $b) { $diff += "$f(off=$a on=$b)" }
+      if ($a -eq '(缺)' -or $b -eq '(缺)') { $diff += "detail.$f(字段缺失! off=$a on=$b)"; continue }
+      if ($a -ne $b) { $diff += "detail.$f(off=$a on=$b)" }
+    }
+    foreach ($f in $siteFields) {
+      $a = SiteField $o.detail $f; $b = SiteField $n.detail $f
+      if ($a -eq '(缺)' -or $b -eq '(缺)') { $diff += "site.$f(字段缺失! off=$a on=$b)"; continue }
+      if ($a -ne $b) { $diff += "site.$f(off=$a on=$b)" }
     }
     # **接管不变量（2026-09-24 P1-FIX 改）**：原来要求"每次调用都必须接管"；现在原生结果
     # 可以被**窗口截断检测**判回退（缺陷 2 的修复），所以不变量改成
@@ -175,9 +229,11 @@ if ($Compare) {
     # —— 每一次调用要么接管、要么被**明确计数**地回退。既没接管也没计数 ⇒ 仍然红。
     $tk = Field $n.detail 'takeovers'; $exp = Field $n.detail 'expectDelta'
     $fbn = Field $n.detail 'fallbacks'
+    $gtn = Field $n.detail 'gated'
     if ($fbn -eq '(缺)') { $fbn = '0' }   # 旧 jar 里没有这个字段：按 0 处理，保持向后兼容
-    if ($tk -ne '(缺)' -and $exp -ne '(缺)' -and ([int]$tk + [int]$fbn) -ne [int]$exp) {
-      $diff += "on腿调用未被完整记账(takeovers=$tk fallbacks=$fbn expect=$exp)"
+    if ($gtn -eq '(缺)') { $gtn = '0' }   # 同上（P1-NET 加的"按规模分流"计数）
+    if ($tk -ne '(缺)' -and $exp -ne '(缺)' -and ([int]$tk + [int]$fbn + [int]$gtn) -ne [int]$exp) {
+      $diff += "on腿调用未被完整记账(takeovers=$tk fallbacks=$fbn gated=$gtn expect=$exp)"
     }
     $rows += [pscustomobject]@{
       key = $k; ns_off = (Field $o.perf 'ns_avg'); ns_on = (Field $n.perf 'ns_avg')
@@ -204,6 +260,36 @@ if ($Compare) {
     foreach ($l in $inv) { Write-Host ("  {0}: {1}" -f (Split-Path $f -Leaf), $l) }
   }
   Write-Host ''
+  Write-Host "--- P1-NET：逐距离换手点（SWEEP；ns/次，off/on 与倍数）---"
+  $swOff = Get-Sweep $offFile
+  $swOn = Get-Sweep $onFile
+  $swKeys = @($swOff.Keys + $swOn.Keys | Sort-Object -Unique)
+  if ($swKeys.Count -eq 0) {
+    Write-Host "  （本腿没跑 -Sweep）"
+  } else {
+    Write-Host ("  {0,-22} {1,12} {2,12} {3,9} {4,9} {5,9} {6}" -f 'preset/mode/d', 'off ns', 'on ns', 'off/on', 'off nodes', 'on nodes', 'gate')
+    foreach ($k in $swKeys) {
+      $a = $swOff[$k]; $b = $swOn[$k]
+      $na = Field $a 'ns_avg'; $nb = Field $b 'ns_avg'
+      $ratio = ''
+      if ($na -match '^[\d.]+$' -and $nb -match '^[\d.]+$' -and [double]$nb -gt 0) {
+        $ratio = ('{0:n3}x' -f ([double]$na / [double]$nb))
+      }
+      Write-Host ("  {0,-22} {1,12} {2,12} {3,9} {4,9} {5,9} {6}" -f $k, $na, $nb, $ratio,
+        (Field $a 'nodes_avg'), (Field $b 'nodes_avg'), (Field $b 'gated'))
+    }
+  }
+  Write-Host ''
+  Write-Host "--- P1-NET：真实 AI 负载账本（AIDIST；最后一行 = 测量 sprint 之后的累计值）---"
+  foreach ($pair in @(@($offFile, 'off'), @($onFile, 'on'))) {
+    $l = LastLine $pair[0] 'AIDIST calls='
+    if ($l) { Write-Host "  $($pair[1]): $l" } else { Write-Host "  $($pair[1]): （本腿没跑 -AiLoad）" }
+  }
+  foreach ($pair in @(@($offFile, 'off'), @($onFile, 'on'))) {
+    $l = LastLine $pair[0] 'TICKSTAT ticks='
+    if ($l) { Write-Host "  $($pair[1]): $l" }
+  }
+  Write-Host ''
   if ($red.Count) {
     Write-Host "判定：**DIVERGENT**（$($red.Count) 处）"
     $red | ForEach-Object { Write-Host "  !! $_" }
@@ -215,7 +301,11 @@ if ($Compare) {
 
 if (-not $Leg) { throw '需要 -Leg <名字>（或用 -Compare）' }
 
-$want = $Presets.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+# **必须用 @() 强制成数组**：单个元素时 PowerShell 会把管道结果解包成字符串，
+# 于是 $want[0] 变成"字符串的第一个字符"（实测：-Presets long128 ⇒ $want[0]='l'
+# ⇒ `cava pathfind site l` / `cava pathfind sweep l ...` 都被"未知 preset"拒掉，
+# 而且 sendCommandFeedback=false 连错误都看不到 ⇒ 静默什么都没测）。
+$want = @($Presets.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 foreach ($w in $want) { if (-not $PresetN.Contains($w)) { throw "未知 preset：$w（可选 $($PresetN.Keys -join ',')）" } }
 
 Assert-PortsFree
@@ -262,6 +352,7 @@ $javaArgs = @('-Xms2G', '-Xmx4G', '-Dstdout.encoding=UTF-8', '-Dstderr.encoding=
 if ($Native -eq 'on') { $javaArgs += '-Dcava.pathfind.native=true' }
 if ($TargetOffset -ne 0) { $javaArgs += "-Dcava.pathfind.perf.targetOffset=$TargetOffset" }
 $javaArgs += '-Dcava.pathfind.probe=false'
+if ($GateMin -ge 0) { $javaArgs += "-Dcava.pathfind.gate.minBlocks=$GateMin" }
 $extraProps = @($JavaProp) + @($JavaProps -split '[,\s]+' | Where-Object { $_ })
 $javaArgs += $extraProps
 Write-Host "[perf] javaProp: $($extraProps -join ' ')"
@@ -335,13 +426,23 @@ function Wait-LogCount([string]$pattern, [int]$afterCount, [int]$timeoutSec) {
 }
 
 # --- 真实 AI 负载：这一整合包里"寻路到底多久发生一次"（per-tick 换算的唯一实测来源）---
+$aidistAfter = ''
+$tickAfter = ''
+$sparkAfter = ''
 if ($AiLoad) {
   Rcon ("cava pathfind site " + $want[0]) | Out-Null
   Start-Sleep -Seconds 3
   Rcon 'kill @e[type=minecraft:zombie]' | Out-Null
   Rcon 'kill @e[type=minecraft:villager]' | Out-Null
+  # 固定的光照/时间（doDaylightCycle 已关）：不让"白天烧僵尸"这类与寻路无关的随机事件
+  # 决定测量窗口里的生物数（**两条腿做同样的事**）。
+  Rcon 'time set midnight' | Out-Null
   Rcon 'tick unfreeze' | Out-Null
   Rcon 'summon minecraft:villager 70 71 -32 {PersistenceRequired:1b,Silent:1b,Tags:["cava_ai"]}' | Out-Null
+  # 村民**不许被打死**：P1-FIX 那条腿是 1200 tick，本流要跑 400 预热 + 2400 测量 = 2800 tick，
+  # 村民中途死亡会让"负载"在测量窗口内塌掉（而且死在哪个 tick 由 AI 随机数决定 ⇒ 两次不可比）。
+  # resistance 9 级 = 伤害免疫；**两条腿完全一样**。
+  Rcon 'effect give @e[type=minecraft:villager,tag=cava_ai] minecraft:resistance 100000 9 true' | Out-Null
   for ($i = 0; $i -lt $AiZombies; $i++) {
     $zx = 40 + (($i % 10) * 2)
     $zz = -44 + ([int]($i / 10) * 3)
@@ -349,7 +450,24 @@ if ($AiLoad) {
   }
   $stats0 = Rcon 'cava pathfind stats'
   $zBefore = Rcon 'execute if entity @e[type=minecraft:zombie] run say [perf] zombies_present'
-  Write-Host "[perf] ai-load: $AiZombies 只僵尸 + 1 村民；sprint $AiTicks tick"
+  Write-Host "[perf] ai-load: $AiZombies 只僵尸 + 1 村民；预热 sprint $AiWarmup tick + 测量 sprint $AiTicks tick"
+  Rcon 'tick freeze' | Out-Null
+  # **预热 sprint**：JIT 暖机。P1-PERF 实测过"同一个 6 格 bench 在冷/热服务端上差 22 倍"
+  # ⇒ 不预热的话两条腿的绝对耗时不可比。
+  if ($AiWarmup -gt 0) {
+    Rcon ("tick sprint " + $AiWarmup) | Out-Null
+    $swW = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($swW.Elapsed.TotalSeconds -lt 900) {
+      Start-Sleep -Seconds 3
+      $q = Rcon 'tick query'
+      if ("$q" -notmatch 'sprint') { break }
+    }
+    Start-Sleep -Seconds 2
+  }
+  # 清账本 + 清 MSPT 记录：**测量窗口 = 下面这一次 sprint 之间的所有 tick**。
+  # 两条腿用的是同一段代码、同一个口径 ⇒ 差值就是净收益（含回退的浪费）。
+  Rcon 'cava pathfind aidist reset' | Out-Null
+  Rcon 'cava pathfind tickstat reset' | Out-Null
   Rcon 'tick freeze' | Out-Null
   Rcon ("tick sprint " + $AiTicks) | Out-Null
   $swAi = [System.Diagnostics.Stopwatch]::StartNew()
@@ -358,7 +476,18 @@ if ($AiLoad) {
     $q = Rcon 'tick query'
     if ("$q" -notmatch 'sprint') { break }
   }
+  $swAi.Stop()
+  # **先读 TICKSTAT**（越早越好：sprint 结束后服务端回到 20 TPS 的"睡眠 tick"，
+  # 那些 tick 的间隔 ~50 ms 会被 TickTimeRecorder 当成慢 tick 滤掉，但少读一秒就少一分噪声）
+  $tickAfter = Rcon 'cava pathfind tickstat'
   Start-Sleep -Seconds 2
+  $aidistAfter = Rcon 'cava pathfind aidist'
+  Write-Host "[perf] ai-load sprint 用时 $('{0:n1}' -f $swAi.Elapsed.TotalSeconds) s"
+  Write-Host "[perf] ai-load AIDIST: $aidistAfter"
+  Write-Host "[perf] ai-load TICKSTAT: $tickAfter"
+  $sparkAfter = Rcon 'spark tps'
+  Write-Host "[perf] ai-load spark tps: $sparkAfter"
+  Start-Sleep -Seconds 1
   $stats1 = Rcon 'cava pathfind stats'
   Rcon 'say [perf] ai-load sprint done' | Out-Null
   $zAfter = Rcon 'execute if entity @e[type=minecraft:zombie] run say [perf] zombies_after_sprint'
@@ -368,8 +497,10 @@ if ($AiLoad) {
   Write-Host "[perf] ai-load stats0: $stats0"
   Write-Host "[perf] ai-load stats1: $stats1"
   Write-Host ("[perf] ai-load 寻路调用 = {0} 次 / {1} tick ⇒ {2:n4} 次/tick（canary {3} -> {4}）" -f ($c1 - $c0), $AiTicks, (($c1 - $c0) / [double]$AiTicks), $c0, $c1)
+  $vAfter = Rcon 'execute if entity @e[type=minecraft:villager,tag=cava_ai] run say [perf] villager_alive'
   Write-Host "[perf] ai-load zombies before: $zBefore"
   Write-Host "[perf] ai-load zombies after : $zAfter"
+  Write-Host "[perf] ai-load villager after : $vAfter"
   if ($OldBench -gt 0) {
     $b0 = (Select-String -LiteralPath $srv.Log -Pattern 'BENCH id=' -ErrorAction SilentlyContinue | Measure-Object).Count
     Rcon ("cava pathfind bench " + $OldBench) | Out-Null
@@ -380,6 +511,21 @@ if ($AiLoad) {
   Rcon 'kill @e[type=minecraft:villager]' | Out-Null
   Rcon 'tick freeze' | Out-Null
   Start-Sleep -Seconds 2
+}
+
+# --- P1-NET：逐距离换手点扫描（分流阈值的数据出处）---
+if ($Sweep) {
+  $swPat = "SWEEP id="
+  $b0 = (Select-String -LiteralPath $srv.Log -Pattern $swPat -ErrorAction SilentlyContinue | Measure-Object).Count
+  # 注意：Brigadier 的 word() 参数**不接受逗号**（只接受 [a-zA-Z0-9_.+-]）：
+  # 用逗号会整条命令被拒，而 sendCommandFeedback=false 连错误都看不到 ⇒ 实测白等 20 分钟。
+  # 所以这里把分隔符统一成 '_'（Java 侧三种分隔符都吃）。
+  $swArg = $Sweep -replace ',', '_'
+  Rcon "cava pathfind sweep $($want[0]) $swArg $SweepN $SweepMode" | Out-Null
+  if (-not (Wait-LogCount $swPat $b0 300)) {
+    Write-Host "[perf] !! SWEEP 没有回执行（命令被拒？）—— 检查日志里有没有 'Unknown or incomplete command'"
+  }
+  Select-String -LiteralPath $srv.Log -Pattern 'SWEEP id=' | ForEach-Object { Write-Host "  $($_.Line.Trim())" }
 }
 
 $modeList = if ($Modes -eq 'both') { @('reuse', 'repush') } else { @($Modes) }
@@ -434,7 +580,7 @@ foreach ($preset in $want) {
 }
 
 Start-Sleep -Seconds 1
-$lines = Select-String -LiteralPath $srv.Log -Pattern 'PERF id=|PERFDETAIL id=|SITE |DIAG |EXPLORE |INVALIDATE |BENCH id=|接管条件|pathfind\] 原生接管|PROBE_|ai-load' -ErrorAction SilentlyContinue |
+$lines = Select-String -LiteralPath $srv.Log -Pattern 'PERF id=|PERFDETAIL id=|SITE |DIAG |EXPLORE |INVALIDATE |BENCH id=|SWEEP id=|AIDIST|TICKSTAT ticks=|接管条件|pathfind\] 原生接管|PROBE_|ai-load' -ErrorAction SilentlyContinue |
   ForEach-Object { $_.Line.Trim() }
 Stop-LegServer $srv
 
@@ -455,6 +601,11 @@ $head += "#dllAfter=$($art1.dll)"
 $head += "#jarAfter=$($art1.jar)"
 $head += "#dllStable=$($art0.dll -eq $art1.dll)"
 $head += "#javaProp=$($extraProps -join ' ')"
+$head += "#aiZombies=$AiZombies aiTicks=$AiTicks aiWarmup=$AiWarmup aiLoad=$AiLoad"
+$head += "#sweep=$Sweep sweepN=$SweepN sweepMode=$SweepMode"
+$head += "#gateMin=$GateMin"
+$head += "#aidistA=$aidistAfter"
+$head += "#tickstatA=$tickAfter"
 $head += "#javaArgs=$($srv.CommandLine)"
 $outFile = Join-Path $resultsDir "$Leg.txt"
 ($head + $lines) | Set-Content -Encoding UTF8 $outFile

@@ -65,8 +65,56 @@ public final class PathfindSwitches {
      */
     public static final String PROP_WINDOW_NOT_REACHED = "cava.pathfind.window.notReached";
 
+    /**
+     * **按规模分流的最小"起步距离"**（默认见 {@link #DEFAULT_GATE_MIN_BLOCKS}，P1-NET 流加）。
+     *
+     * <p>单位是**方块**，口径是起点→目标的 **3D 切比雪夫距离** {@code max(|dx|,|dy|,|dz|)}
+     * （对能斜着走的陆地生物，这是"路径步数"的下界，O(1) 可算）。小于该值时**根本不调原生**：
+     * 直接返回 null 让 Java 逻辑跑（不付任何原生的区域推送/档案上传/跨界成本）。
+     *
+     * <p>为什么需要它（实测出处见 {@code docs/CAVA-p1-net-notes.md}）：短程搜索原生本来就慢
+     * （1 节点场景 0.09x–0.62x），而真实 AI 负载里短程调用占比很高 ⇒ 不分流时"打开开关"是净亏。
+     *
+     * <p>值为 {@code 0} = **关闭分流**（每个调用都尝试原生，这是修复后的原行为，保留给对照实验）。
+     */
+    public static final String PROP_GATE_MIN = "cava.pathfind.gate.minBlocks";
+
+    /**
+     * **回退归因诊断**（默认 false；P1-NET 加）：原生结果被窗口截断检测判回退时，
+     * 等 Java 跑完之后把**两条路径逐字段比一次**并计数（{@code fallbackSame/fallbackDiff}）。
+     *
+     * <p>回答的是 P1-FIX §8.3 第 1 条留下的问题："≈30–50% 的回退里，有多少是必须回退、
+     * 有多少是白回退"。开销只落在回退那一次调用上（两条路径各算一遍 FNV），默认关。
+     */
+    public static final String PROP_FALLBACK_COMPARE = "cava.pathfind.fallback.compare";
+
+    /**
+     * **成对对照诊断**（默认 false；P1-NET 加）：接管成功的那次调用**再跑一遍 Java**（把注入体当作不存在），
+     * 于是"同一次调用、同一份地形、同一个 JIT 状态"下两条路的耗时与结果都能直接相减。
+     *
+     * <p>为什么需要它：跨腿比较（off 腿 vs on 腿）在这个负载上**噪声压过信号** ——
+     * 实测纯 Java 的两条腿每 tick 寻路耗时 48.3 / 64.5 / 95.2 µs（**两倍**的离散度），
+     * 而开关的效应只有几十 µs/tick ⇒ 用跨腿差值判符号是不可靠的。成对对照把噪声消掉。
+     *
+     * <p>代价：每个接管调用多跑一次 Java（腿的墙钟明显变长，但**配对差**不受影响）；
+     * 金丝雀计数会因为内层重放调用翻倍（回执里如实可见）。
+     */
+    public static final String PROP_COMPARE_ALL = "cava.pathfind.diagnostic.compareAll";
+
     /** {@link #PROP_PROBE_TICKS} 的默认值。 */
     public static final int DEFAULT_PROBE_TICKS = 600;
+
+    /**
+     * {@link #PROP_GATE_MIN} 的默认值 = **0（不分流）**。
+     *
+     * <p>**数据出处：docs/CAVA-p1-net-notes.md §5**。结论是"按规模分流"在本负载上**不成立**：
+     * 真实 AI 调用的距离 p50=7 / p90=10 / max=11 格，而净亏**不集中在短程**——
+     * 逐距离桶的回退率是 23%/33%/33%/32%（≤2 / 3-4 / 5-8 / 9-16 格），几乎不随规模变化；
+     * 阈值只能"砍掉一段前缀"，砍掉哪一段都不能把总账翻正（实测：任何 T 的净收益都在 −3 ~ −6 µs/tick）。
+     * 所以默认值取 0（= 与已测行为一致），把"分流"留给**将来在别的负载上重新量**时用
+     * （`-Dcava.pathfind.gate.minBlocks=<N>` 即可打开，不需要改代码）。
+     */
+    public static final long DEFAULT_GATE_MIN_BLOCKS = 0L;
 
     private PathfindSwitches() {
     }
@@ -102,6 +150,21 @@ public final class PathfindSwitches {
     /** true = 做窗口截断检测（默认 true）。 */
     public static boolean windowGuardEnabled() {
         return readBoolean(PROP_WINDOW_GUARD, true);
+    }
+
+    /** 见 {@link #PROP_COMPARE_ALL}（默认 false）。 */
+    public static boolean compareAll() {
+        return readBoolean(PROP_COMPARE_ALL, false);
+    }
+
+    /** 见 {@link #PROP_FALLBACK_COMPARE}（默认 false）。 */
+    public static boolean fallbackCompare() {
+        return readBoolean(PROP_FALLBACK_COMPARE, false);
+    }
+
+    /** {@link #PROP_GATE_MIN} 的当前值（方块；0 = 关闭分流）。 */
+    public static long gateMinBlocks() {
+        return parseLong(System.getProperty(PROP_GATE_MIN), DEFAULT_GATE_MIN_BLOCKS);
     }
 
     /** {@link #PROP_WINDOW_NOT_REACHED} 的策略串（非法值一律回默认 {@code early-stop}）。 */
@@ -156,6 +219,7 @@ public final class PathfindSwitches {
                 + " probe=" + probeEnabled()
                 + " bypassProfileGate=" + bypassProfileGate()
                 + " probeTicks=" + probeTicks()
+                + " gateMinBlocks=" + gateMinBlocks()
                 + " " + WindowTruncationGuard.describe();
     }
 }

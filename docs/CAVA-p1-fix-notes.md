@@ -532,3 +532,17 @@ $env:GRADLE_USER_HOME='J:\mc\Cava\.gradle-home'; .\gradlew.bat build --no-daemon
 # 3) 比对（红 = exit 2）
 pwsh -File tools/parity-perf-pathfind.ps1 -Compare -OffTag off -OnTag on
 ~~~
+
+---
+
+## 附录 N【P1-NET 追加 2026-09-24】§8.3 第 3 条缺口已闭合：真实 AI 负载的净收益 = **−14.7 µs/tick（净亏）**
+
+`docs/CAVA-p1-net-notes.md`（P1-NET 流）把本文件 §8.3 的三条缺口补上/推进了：
+
+- §8.3 第 3 条（真实 AI 的规模分布）：**已测**。距离 p50=7 / p90=10 / max≈11–15 格（3D 切比雪夫）、
+  返回路径 p50=7–8 / p90=12–14 节点、原版预算恒 **560** 节点；每次调用耗时 p50=62–113 µs、p90=761–1626 µs（长尾极重）。
+- §8.3 第 1 条（回退该不该回退）：**部分闭合**，`-Dcava.pathfind.fallback.compare=true` 实测
+  `fbSame=45/105 = 42.9%` 的回退是"Java 结果与原生结果逐节点完全相同"的**纯浪费**；
+  成对对照（`compareAll`）进一步给出：接管调用上原生 157.7 µs vs Java 129.6 µs（**1.22x 慢**）。
+- 结论：**开关仍然是 NO-GO**（R2 判据①②③ 全不满足），而且**按规模分流不能翻正**（逐距离桶全亏、回退率与规模无关）。
+  本文件 §8.4 建议的第 1 条（分流）到此**已被数据否决**，第 2 条（窗口策略/ABI）才是唯一有希望的方向。

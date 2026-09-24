@@ -64,10 +64,36 @@ public abstract class PathNodeNavigatorMixin {
         if (!(self instanceof PathNodeNavigator navigator)) {
             return;
         }
+        // P1-NET：把这一次调用的"规模口径"记下来（**两条腿都要**：off 腿的分布才是真值）。
+        // navRange 从访问器拿（原版节点预算 = navRange × followRange，即搜索展开规模的上界）。
+        int navRange = (self instanceof PathNodeNavigatorAccessor acc) ? acc.cava$range() : -1;
+        hook.onCallArgs(mob, targets, maxRange, reachRange, followRange, navRange);
         Path replaced = hook.tryTakeover(navigator, chunkCache, mob, targets, maxRange, reachRange, followRange);
         if (replaced != null) {
             cir.setReturnValue(replaced);   // cancellable=true ⇒ setReturnValue 即取消原方法体
         }
+    }
+
+    /**
+     * Set 版的 {@code RETURN}（P1-NET 加）：**给"这一次调用最终走了 Java"记账**。
+     *
+     * <p>为什么必须是独立的 RETURN 注入：HEAD 注入只能看到"要不要接管"，看不到"没接管时这条路径花了多久"。
+     * 而"打开开关净赚还是净亏"要的是**两边的总时间**：off 腿全是这一边，on 腿是"接管的原生那段 +
+     * 回退/被分流时的 Java 那段"。没有 RETURN 就只能拿合成场景的每次调用耗时去推（P1-PERF 文档里
+     * 那列"每 tick 投影"就是推的），本流要的是直测。
+     *
+     * <p>{@code require = 0}、不改返回值、不取消：{@code cir.getReturnValue()} 只读。
+     * 接管成功的那次调用由 {@code PathfindHook} 自己判重（探针 {@code accounted}），不会重复记账；
+     * 即使 Mixin 在 {@code setReturnValue} 之后不再经过 RETURN，也只是少记一次"零成本"的分支。
+     */
+    @Inject(
+            method = "findPathToAny(Lnet/minecraft/world/chunk/ChunkCache;Lnet/minecraft/entity/mob/MobEntity;"
+                    + "Ljava/util/Set;FIF)Lnet/minecraft/entity/ai/pathing/Path;",
+            at = @At("RETURN"), require = 0)
+    private void cava$returnPublic(ChunkCache chunkCache, MobEntity mob, Set<BlockPos> targets,
+                                   float maxRange, int reachRange, float followRange,
+                                   CallbackInfoReturnable<Path> cir) {
+        PathfindHook.INSTANCE.onCallReturn(cir.getReturnValue(), mob, targets);
     }
 
     /**

@@ -102,6 +102,21 @@ public final class PathfindPerfBench {
                     .then(CommandManager.argument("preset", StringArgumentType.word())
                             .executes(ctx -> siteCommand(ctx.getSource(),
                                     StringArgumentType.getString(ctx, "preset"))));
+            // P1-NET：逐距离换手点扫描（分流阈值的数据出处）
+            LiteralArgumentBuilder<ServerCommandSource> sweep = CommandManager.literal("sweep")
+                    .then(CommandManager.argument("preset", StringArgumentType.word())
+                            .then(CommandManager.argument("distances", StringArgumentType.word())
+                                    .then(CommandManager.argument("count", IntegerArgumentType.integer(1, MAX_ITERATIONS))
+                                            .executes(ctx -> sweep(ctx.getSource(),
+                                                    StringArgumentType.getString(ctx, "preset"),
+                                                    StringArgumentType.getString(ctx, "distances"),
+                                                    IntegerArgumentType.getInteger(ctx, "count"), "reuse"))
+                                            .then(CommandManager.argument("mode", StringArgumentType.word())
+                                                    .executes(ctx -> sweep(ctx.getSource(),
+                                                            StringArgumentType.getString(ctx, "preset"),
+                                                            StringArgumentType.getString(ctx, "distances"),
+                                                            IntegerArgumentType.getInteger(ctx, "count"),
+                                                            StringArgumentType.getString(ctx, "mode")))))));
             LiteralArgumentBuilder<ServerCommandSource> diag = CommandManager.literal("diag")
                     .then(CommandManager.argument("preset", StringArgumentType.word())
                             .executes(ctx -> diag(ctx.getSource(), StringArgumentType.getString(ctx, "preset"))));
@@ -119,7 +134,7 @@ public final class PathfindPerfBench {
                                     StringArgumentType.getString(ctx, "preset"))));
             dispatcher.register(CommandManager.literal("cava")
                     .then(CommandManager.literal("pathfind").then(perf).then(site).then(explore).then(diag)
-                            .then(invalidate)));
+                            .then(sweep).then(invalidate)));
             LOG.info("[cava/pathfind] /cava pathfind {{perf <preset> <count> [reuse|repush]|site <preset>}} 已注册（presets={}）",
                     PathfindPerfScenario.names());
         } catch (Throwable t) {
@@ -233,6 +248,7 @@ public final class PathfindPerfBench {
         long[] guard0 = guardCounts();
         long takeovers0 = PathfindHook.INSTANCE.takeovers();
         long nativeCalls0 = PathfindHook.INSTANCE.nativeCalls();
+        long gated0 = PathfindHook.INSTANCE.gatedCalls();
         long uploadNanos0 = PathfindHook.INSTANCE.uploadNanos();
         long solveNanos0 = PathfindHook.INSTANCE.solveNanos();
 
@@ -285,6 +301,7 @@ public final class PathfindPerfBench {
         long[] guard = guardDeltas(guard0);
         long takeovers = PathfindHook.INSTANCE.takeovers() - takeovers0;
         long nativeDelta = PathfindHook.INSTANCE.nativeCalls() - nativeCalls0;
+        long gated = PathfindHook.INSTANCE.gatedCalls() - gated0;
         long uploadNanos = PathfindHook.INSTANCE.uploadNanos() - uploadNanos0;
         long solveNanos = PathfindHook.INSTANCE.solveNanos() - solveNanos0;
 
@@ -414,7 +431,7 @@ public final class PathfindPerfBench {
                 "[cava/pathfind] PERFDETAIL id=%d preset=%s mode=%s targetOffset=%d "
                         + "sig_coords=0x%016x sig_types=0x%016x sigDistinct=%d analyzeNulls=%d analyzeLen=%d "
                         + "startNode=%s endNode=%s solidNodes=0 collisionNodes=%d firstBadNode=%s "
-                        + "canaryDelta=%d expectDelta=%d takeovers=%d fallbacks=%d nativeCallsDelta=%d "
+                        + "canaryDelta=%d expectDelta=%d takeovers=%d fallbacks=%d gated=%d nativeCallsDelta=%d "
                         + "upload_avg_ns=%.1f solve_avg_ns=%.1f "
                         + "%s fb_shell=%d fb_goalShell=%d fb_notReached=%d fb_earlyStop=%d fb_structural=%d "
                         + "mirror=pushes:%d,reuse:%d,fail:%d,cells:%d "
@@ -425,7 +442,7 @@ public final class PathfindPerfBench {
                         + "env=%s startProbe=%s",
                 id, p.name(), mode, PathfindPerfScenario.targetOffset(),
                 sigCoords, sigTypes, sigDistinct, analyzeNulls, analyzeLen, startNode, endNode,
-                collisionNodes, firstBadNode, canaryDelta, count + WARMUP, takeovers, fallbacks, nativeDelta,
+                collisionNodes, firstBadNode, canaryDelta, count + WARMUP, takeovers, fallbacks, gated, nativeDelta,
                 nativeDelta == 0 ? 0.0 : uploadNanos / (double) nativeDelta,
                 nativeDelta == 0 ? 0.0 : solveNanos / (double) nativeDelta,
                 WindowTruncationGuard.describe(),
@@ -476,7 +493,8 @@ public final class PathfindPerfBench {
         BlockPos startPos = mob.getBlockPos();
         int reps = 5;
         try {
-            for (String raw : ranges.split(",")) {
+            // 同 sweep：word() 参数里逗号是非法的（实测：命令被整条拒掉、还没有错误回执）⇒ 三种分隔符都吃。
+            for (String raw : ranges.split("[,._]+")) {
                 int range;
                 try {
                     range = Integer.parseInt(raw.trim());
@@ -517,6 +535,155 @@ public final class PathfindPerfBench {
             mob.discard();
         }
         return 1;
+    }
+
+    /** 换手点扫描的预热次数（每个距离各自预热）。 */
+    public static final int SWEEP_WARMUP = 100;
+
+    /**
+     * **逐距离换手点扫描**（P1-NET 加）：{@code cava pathfind sweep <preset> <d1,d2,...> <count> [reuse|repush]}。
+     *
+     * <p>为什么需要它：分流阈值不能拍脑袋。要选的量是"起点→目标多少格以下不接管"，
+     * 那么缺的就是**每条腿在每个距离上的每次调用耗时**。现有的 preset 只给了几个固定几何
+     * （128/138/200/503 节点），中间那段（几格到几十格）是空的 —— 而真实 AI 的调用恰恰落在那里。
+     *
+     * <p>做法：在同一个 preset 的场地上（默认 {@code long128} 的平坦竞技场），把终点沿 +X 方向
+     * 逐距离摆开（起点固定 = 生物脚下的方块），每个距离独立预热后计时。两条腿（native off/on）
+     * 用同一台服务端、同一个 jar、同一段代码各跑一次 ⇒ 两个 SWEEP 表逐行相除就是换手点曲线。
+     *
+     * <p>回执行形如（**无空格值**，便于比对脚本逐 token 取）：
+     * {@code SWEEP preset=long128 mode=reuse blockDist=32 n=1500 warmup=100 ok=true ns_avg=.. ns_p50=..
+     * ns_p95=.. ns_p99=.. setup_avg=.. nodes_avg=.. nodes_p50=.. nodes_max=.. nullPaths=0 reached=1500
+     * takeovers=1500 fallbacks=0 gated=0 native=1500}
+     */
+    private static int sweep(ServerCommandSource source, String name, String distances, int count, String mode) {
+        long id = SEQ.incrementAndGet();
+        if (!RUNNING.compareAndSet(false, true)) {
+            LOG.warn("[cava/pathfind] SWEEP id={} ok=false reason=busy", id);
+            source.sendError(Text.literal("另一个 perf bench 正在跑"));
+            return 0;
+        }
+        try {
+            PathfindPerfScenario.Preset p = PathfindPerfScenario.byName(name);
+            if (p == null) {
+                source.sendError(Text.literal("未知 preset：" + name));
+                return 0;
+            }
+            boolean repush = "repush".equalsIgnoreCase(mode);
+            if (!repush && !"reuse".equalsIgnoreCase(mode)) {
+                source.sendError(Text.literal("sweep: mode 只能是 reuse|repush"));
+                return 0;
+            }
+            ServerWorld world = source.getServer().getOverworld();
+            PathfindPerfScenario.build(world, p);
+            MobEntity mob = PathfindPerfScenario.realizeMob(world, p);
+            if (mob == null) {
+                source.sendError(Text.literal("sweep: 造不出生物"));
+                return 0;
+            }
+            BlockPos startPos = mob.getBlockPos();
+            PathNodeNavigator navigator = PathfindPerfScenario.newNavigator(p);
+            RegionSource src = PathfindMirrorBridge.get(world);
+            RegionMirror mirror = (src instanceof RegionMirror rm) ? rm : null;
+            try {
+                // 分隔符：**不能用逗号**（Brigadier 的 word() 只接受 [a-zA-Z0-9_.+-]，逗号会被判成
+                // "Unknown or incomplete command"，而且 sendCommandFeedback=false 连错误都看不到 —— 实测坑）。
+                // 现在三种分隔符都吃：'_' / '.' / ','。
+                for (String raw : distances.split("[,._]+")) {
+                    int d;
+                    try {
+                        d = Integer.parseInt(raw.trim());
+                    } catch (NumberFormatException e) {
+                        continue;
+                    }
+                    if (d <= 0) {
+                        continue;
+                    }
+                    BlockPos target = new BlockPos(startPos.getX() + d, p.floorY() + 1, startPos.getZ());
+                    if (target.getX() < p.minX() || target.getX() > p.maxX()
+                            || target.getZ() < p.minZ() || target.getZ() > p.maxZ()) {
+                        LOG.info("[cava/pathfind] SWEEP id={} preset={} blockDist={} ok=false reason=target-out-of-site",
+                                id, p.name(), d);
+                        continue;
+                    }
+                    for (int i = 0; i < SWEEP_WARMUP; i++) {
+                        if (repush && mirror != null) {
+                            mirror.onBlockChanged(0, 0, 0);
+                        }
+                        ChunkCache c = PathfindPerfScenario.newCache(world, startPos, p.followRange());
+                        navigator.findPathToAny(c, mob, Set.of(target), p.maxRange(), p.reachRange(), p.followRange());
+                    }
+                    long[] ns = new long[count];
+                    long[] setup = new long[count];
+                    long[] lens = new long[count];
+                    int li = 0;
+                    int nulls = 0;
+                    int reached = 0;
+                    long tk0 = PathfindHook.INSTANCE.takeovers();
+                    long fb0 = PathfindHook.INSTANCE.windowFallbacks();
+                    long gt0 = PathfindHook.INSTANCE.gatedCalls();
+                    long nc0 = PathfindHook.INSTANCE.nativeCalls();
+                    for (int i = 0; i < count; i++) {
+                        if (repush && mirror != null) {
+                            mirror.onBlockChanged(0, 0, 0);
+                        }
+                        long t0 = System.nanoTime();
+                        ChunkCache cache = PathfindPerfScenario.newCache(world, startPos, p.followRange());
+                        long t1 = System.nanoTime();
+                        Path path = navigator.findPathToAny(cache, mob, Set.of(target), p.maxRange(),
+                                p.reachRange(), p.followRange());
+                        long t2 = System.nanoTime();
+                        setup[i] = t1 - t0;
+                        ns[i] = t2 - t0;
+                        if (path == null) {
+                            nulls++;
+                            continue;
+                        }
+                        lens[li++] = path.getLength();
+                        if (path.reachesTarget()) {
+                            reached++;
+                        }
+                    }
+                    long[] sorted = ns.clone();
+                    Arrays.sort(sorted);
+                    long[] lensSorted = Arrays.copyOf(lens, li);
+                    Arrays.sort(lensSorted);
+                    double nsTotal = 0;
+                    for (long v : ns) {
+                        nsTotal += v;
+                    }
+                    double setupTotal = 0;
+                    for (long v : setup) {
+                        setupTotal += v;
+                    }
+                    String line = String.format(Locale.ROOT,
+                            "[cava/pathfind] SWEEP id=%d preset=%s mode=%s blockDist=%d n=%d warmup=%d ok=true "
+                                    + "ns_avg=%.1f ns_p50=%d ns_p95=%d ns_p99=%d setup_avg=%.1f "
+                                    + "nodes_avg=%.2f nodes_p50=%d nodes_max=%d nullPaths=%d reached=%d "
+                                    + "takeovers=%d fallbacks=%d gated=%d native=%d",
+                            id, p.name(), mode, d, count, SWEEP_WARMUP,
+                            nsTotal / count, pct(sorted, 0.50), pct(sorted, 0.95), pct(sorted, 0.99),
+                            setupTotal / count,
+                            li == 0 ? 0.0 : Arrays.stream(lensSorted).average().orElse(0.0),
+                            pct(lensSorted, 0.50), lensSorted.length == 0 ? 0 : lensSorted[lensSorted.length - 1],
+                            nulls, reached,
+                            PathfindHook.INSTANCE.takeovers() - tk0,
+                            PathfindHook.INSTANCE.windowFallbacks() - fb0,
+                            PathfindHook.INSTANCE.gatedCalls() - gt0,
+                            PathfindHook.INSTANCE.nativeCalls() - nc0);
+                    LOG.info(line);
+                    source.sendFeedback(() -> Text.literal(line), false);
+                }
+                return 1;
+            } finally {
+                mob.discard();
+            }
+        } catch (Throwable t) {
+            LOG.error("[cava/pathfind] SWEEP 异常", t);
+            return 0;
+        } finally {
+            RUNNING.set(false);
+        }
     }
 
     /**

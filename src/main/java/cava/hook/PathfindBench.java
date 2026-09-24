@@ -103,6 +103,16 @@ public final class PathfindBench {
                     .then(CommandManager.literal("pathfind")
                             .then(CommandManager.literal("stats")
                                     .executes(ctx -> stats(ctx.getSource())))
+                            // P1-NET：真实负载的账本（每次调用的去向 / 规模分布 / 两边耗时）
+                            .then(CommandManager.literal("aidist")
+                                    .executes(ctx -> aiDist(ctx.getSource(), false))
+                                    .then(CommandManager.literal("reset")
+                                            .executes(ctx -> aiDist(ctx.getSource(), true))))
+                            // P1-NET：每 tick 服务端耗时的分布（口径见 TickTimeRecorder）
+                            .then(CommandManager.literal("tickstat")
+                                    .executes(ctx -> tickStat(ctx.getSource(), false))
+                                    .then(CommandManager.literal("reset")
+                                            .executes(ctx -> tickStat(ctx.getSource(), true))))
                             .then(CommandManager.literal("probe")
                                     .executes(ctx -> probe(ctx.getSource())))
                             .then(CommandManager.literal("bench")
@@ -129,6 +139,38 @@ public final class PathfindBench {
         String line = "[cava/pathfind] benchRuns=" + BENCH_DONE.get() + " benchSeq=" + BENCH_SEQ.get()
                 + " | " + PathfindHook.INSTANCE.stats() + " | " + PathfindSwitches.describe()
                 + " | " + PathfindMirrorBridge.describe();
+        LOG.info(line);
+        source.sendFeedback(() -> Text.literal(line), false);
+        return 1;
+    }
+
+    /**
+     * {@code cava pathfind aidist [reset]}：把 {@link PathfindHook} 的"每次调用账本"打出来。
+     *
+     * <p>{@code reset} 与记账在**同一个锁粒度**上（都是原子的单次操作）：真实负载里
+     * "sprint 前 reset、sprint 后读"两次命令之间不会有别的寻路插进来（命令与 tick 都在服务端线程上执行）。
+     */
+    private static int aiDist(ServerCommandSource source, boolean reset) {
+        if (reset) {
+            PathfindHook.INSTANCE.resetLedger();
+        }
+        String line = "[cava/pathfind] " + PathfindHook.INSTANCE.aiDistReport();
+        LOG.info(line);
+        source.sendFeedback(() -> Text.literal(line), false);
+        for (String bucket : PathfindHook.INSTANCE.aiBucketReport()) {
+            String bl = "[cava/pathfind] " + bucket;
+            LOG.info(bl);
+            source.sendFeedback(() -> Text.literal(bl), false);
+        }
+        return 1;
+    }
+
+    /** {@code cava pathfind tickstat [reset]}：每 tick 服务端耗时（MSPT）的分布。 */
+    private static int tickStat(ServerCommandSource source, boolean reset) {
+        if (reset) {
+            TickTimeRecorder.get().reset();
+        }
+        String line = "[cava/pathfind] " + TickTimeRecorder.get().report();
         LOG.info(line);
         source.sendFeedback(() -> Text.literal(line), false);
         return 1;

@@ -1,0 +1,15 @@
+# R6 机械对拍的**真实回执样本**（P1-NET 流加）。
+#
+# 为什么需要这个文件：曾经因为比对脚本把键名写成 reachesTargetFlag（回执里是 reachedTargetFlag），
+# Field() 两边都返回 (缺)、两边相等 ⇒ 那个字段**从来没被比过**，而整体判定还是绿的。
+# 所以除了"脚本字段名 vs 源码格式串"的集合对拍之外，还要拿**真实跑出来的回执行**再核对一遍：
+# 每一个"要比的字段"都必须能在这两行里取到值。
+#
+# 来源（逐字抄自实跑，未改一个字符）：testbed\perf-net\results\net4-off-F.txt
+#   jar=build\libs\cava-0.1.0.jar 579539 bytes
+#       sha256=FFFFB79D146824088C9A2CC264015CF63C3865B74BD7E13F97212413B4A282CA
+#   命令：pwsh -File tools/parity-perf-pathfind.ps1 -Leg net4-off-F -Native off -AiLoad
+#         -AiTicks 2400 -AiWarmup 400 -Presets long128 -Modes reuse -ForceN 300
+#         -Root J:\mc\Cava\testbed\perf-net -ServerPort 25690 -RconPort 25691
+[16:53:28] [Server thread/INFO]: [cava/pathfind] PERF id=1 preset=long128 mode=reuse run=1 n=300 warmup=300 ok=true ns_avg=402555.0 ns_p50=393500 ns_p95=478500 ns_p99=592200 ns_max=824800 ns_min=362600 setup_avg=31309.3 totalMs=120.8 nodes_avg=128.00 nodes_p50=128 nodes_min=128 nodes_max=128 nullPaths=0 endDistinct=1 end=(159,71,0) manh=1.000 reachedTargetFlag=true
+[16:53:28] [Server thread/INFO]: [cava/pathfind] PERFDETAIL id=1 preset=long128 mode=reuse targetOffset=0 sig_coords=0x7acb85719d26c525 sig_types=0x8b587018814f4325 sigDistinct=1 analyzeNulls=0 analyzeLen=128 startNode=(32,71,0) endNode=(159,71,0) solidNodes=0 collisionNodes=0 firstBadNode=(无) canaryDelta=600 expectDelta=600 takeovers=0 fallbacks=0 gated=0 nativeCallsDelta=0 upload_avg_ns=0.0 solve_avg_ns=0.0 windowGuard=on,notReached=early-stop fb_shell=0 fb_goalShell=0 fb_notReached=0 fb_earlyStop=0 fb_structural=0 mirror=pushes:0,reuse:0,fail:0,cells:0 mirrorReuse=sameTick:0,crossTick:0,crossTickBlocked:0 blockHook=hits:0,inWindow:0,invalidations:0 site:cells=14065,changed=0,hash=0xd3ccb7e8702c46e4,verify=PASS preset:long128 params=navRange:8,followRange:192.0,maxRange:384.0,reachRange:1,budget:1536,minNodes:50,horizDist:128.0 env=world=[stone/stone/stone/] cache=[stone/stone/stone/] cacheChunks=624/676 cacheSpan=[-168..232]x[-200..200] startProbe=WALKABLE@(32,71,0)

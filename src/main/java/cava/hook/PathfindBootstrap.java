@@ -36,6 +36,9 @@ public final class PathfindBootstrap {
         try {
             ServerLifecycleEvents.SERVER_STARTED.register(PathfindProbe::onServerStarted);
             ServerTickEvents.END_SERVER_TICK.register(PathfindProbe::onEndTick);
+            // P1-NET：每 tick 服务端耗时的分布（口径见 TickTimeRecorder 的类注释）。
+            // **与寻路无关、两条腿完全一样**，所以它不改变对照，只是把"每 tick 耗时"变成可读的回执。
+            ServerTickEvents.END_SERVER_TICK.register(server -> TickTimeRecorder.get().onEndTick());
             LOG.info("[cava/pathfind] 注入体已自举（{}）；{}；{}", PathfindSwitches.describe(),
                     PathfindMirrorBridge.describe(), AmphibiousPathNodeMakerAccess.describe());
         } catch (Throwable t) {

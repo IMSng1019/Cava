@@ -5,6 +5,104 @@
 
 ---
 
+## 门禁 #8：**P4 上线加固 + Windows 生产工具链切换 → 通过（captain 独立复跑，2026-09-24）**
+
+> 本节**只记我自己跑出来的**东西。逐项标注：**复跑** = 我重跑了原命令；**复核** = 我读了源码/产物并做了独立实验；
+> **未闭合** = 本机做不到（原因写清）。三条流的原始台账：`docs/CAVA-hardening-notes.md`（P4-A 加固）、
+> `docs/CAVA-platform-notes.md`（P4-B 平台/CI）、P4 MSVC 轮的提交 `77480f9`。
+
+### 8.1 ★ 交付物换成了 MSVC `/MT`（本轮唯一一处"改交付"的决定）
+
+**起因**：`docs/CAVA-platform-and-compat.md` §1.1 的目标产物矩阵白纸黑字写着
+`Windows x64 | MSVC 14.4x | cava.dll | /MT 静态 CRT`，§1.5 更写着 MinGW GCC「**仅作辅助**（其 libm 质量差，
+且不是生产工具链）」。而在此之前，`natives/windows-x64/cava.dll` 一直是 **MinGW** 的 CMake 产物
+（2855079 B，导入表 KERNEL32+msvcrt）。**交付物与本项目自己的契约不符**，而且 MSVC 那条路
+在 P4-B 那轮只在**源码副本**上验证过、从未从真实树构建过。
+
+**做法**（captain 亲自构建，产物按设计落到 `natives/windows-x64/`）：
+
+    cmd /c build\msvc-captain.bat        # call vcvars64 -> cmake -S J:\mc\Cava -G "Visual Studio 17 2022" -A x64
+    cmd /c build\msvc-captain-build.bat  # cmake --build build/native-captain-msvc --config Release --parallel 1
+
+**最终交付物指纹（此后所有依赖产物的结论都以它为准）**：
+
+    natives/windows-x64/cava.dll   257536 B   sha256 0EBE3B04A869819D7A59C8ADC11B0D1277B120B80F956A7C05D2EB62D007904D
+    build_id = cava 0.1.0 windows-x64 MSVC 19.44.35228.0 (MSVC toolset v143) /O2 /fp:strict safe=0 asan=0 ubsan=0
+    导入表   = KERNEL32.dll（**只有它** —— /MT 生效；默认 /MD 会拖 MSVCP140/VCRUNTIME140/api-ms-win-crt-*）
+
+| 验证项 | 命令 | 结果 |
+| --- | --- | --- |
+| 配置/build | 见上 | configure exit=0；build **0 个错误 / 9 个警告**，BUILD_EXIT=0 |
+| 原生测试（MSVC 编） | `ctest --test-dir build/native-captain-msvc -C Release` | **4/4 Passed** |
+| 自测计数 | `cava_test_cava_selftest.exe` | **180 passed, 0 failed** |
+| 寻路向量 | `cava_test_cava_pathfind_vectors.exe` | cases=10000 + 60，**mismatches=0** |
+| 平台数值套件（MSVC 编） | `build/native-msvc/suite-msvc/Release/cava_platform_suite.exe` | **pass=30 fail=0 skip=1** verdict=PASS |
+| 平台数值套件（GCC 编，跨编译器） | `build/platform-captain/cava_platform_suite.exe` | **pass=31 fail=0 skip=0** verdict=PASS（15456 行逐位 0 差异） |
+| ABI 布局 | 上述两条 | `cava_layout_report`=14 条、`layout_hash_sum=0x1C12265E`、`cava_open` rc=0 |
+| 导出面 | `objdump -p` | `cava_abi.h` 的 **19 个符号全在**，另有 3 个未在头文件声明的 `cava_push_*` |
+| ABI fuzz | `build-fuzz.ps1 -Cases 20000 -SkipBuild` | cases=40467，**crashes=0 undefined_returns=0 state_mutations=0 overruns=0** |
+| Java 全量 | `gradlew test --rerun-tasks` | **tests=235 failures=0 errors=0 skipped=9**（FFM 绑定的就是这份 MSVC DLL） |
+
+> **MSVC 少一条、多一个 skip 是正常的**：那条检查依赖 GCC 才有的编译期宏，MSVC 上走 `skip()` **明确记账**，
+> 不是假装通过。**检查条数是 31**（环境画像 4 + 编译开关 5 + 逐位一致性 6 + ABI 布局 16）——
+> 文档里原先写的 32 是错的，已在 `docs/CAVA-platform-notes.md` 就地更正（见 8.3）。
+
+> **本机环境坑（已固化）**：`cmake --build ... --parallel`（多节点 MSBuild）在本沙箱里**静默失败** ——
+> exit=1，却只打两行 `Checking File Globs / 1>Checking Build System`，**一条 error 都没有**。
+> 加 `--parallel 1` + `set MSBUILDDISABLENODEREUSE=1` 后 0 错误通过。**这不是代码问题**，
+> 看到"MSVC 编不过"先看是不是多节点 MSBuild。
+
+### 8.2 加固：P4-A 的六项，我逐项复跑
+
+| 项 | 我的复跑命令 | 我的结果 |
+| --- | --- | --- |
+| 熔断 | `tools/harden-breaker.ps1` | `BREAKER CHECK: PASS`；软失败 7 次不熔断、硬失败第 5 次熔断、**ERROR 恰好 1 条**、熔断后 100 次全 `-100`、`attempts=12` 冻结、`unavailableCalls=102` |
+| 看门狗 | 同上（报告行） | `看门狗[enabled=true threshold=50.000ms calls=12 slow=0 max=1.049ms warns=0 …]` —— 只观测 |
+| 一键回滚 | `tools/harden-rollback.ps1 -SkipBuild` | `ROLLBACK CHECK: PASS`；B 腿 `DISABLED_BY_FLAG`/`available()=false`/`pathfind→-100`/`ERROR=0`/`attempts=0` |
+| fuzz | `build-fuzz.ps1 -Cases 20000`（三份产物） | 3×40467=**121401 例，crashes/undefined/state_mutations/overruns 全 0** |
+| SAFE 构建 | 同上 safe 腿 | SAFE DLL 跑满 40467 例无崩溃（断言行本身的对照见 P4-A 台账） |
+| Java 门禁 | `gradlew test --rerun-tasks` / `gradlew build` | 235/0/0/9、BUILD SUCCESSFUL |
+
+### 8.3 我在复验里改掉的四处（都是"文档/计数与事实不符"）
+
+1. **熔断口径的类注释是陈旧的**：`NativeCallGuard` 类注释还写着"返回值 < 0 ⇒ 记一次失败"，
+   与实测逼出来的两级口径（硬 {-1,-2,-5,-6} 才熔断，软 {-3,-4,-7} 只计数）矛盾 ⇒ 已改。
+2. **`abort()` 把"原生调用抛异常"记进了 `instrumentationFailures`** —— 那会让运维在**真故障**时
+   误判成"看门狗坏了"，把注意力引到错误组件上。已拆成独立计数 `abortedCalls`，
+   并加单测 `CallWatchdogTest#anAbortedCallIsNotAnInstrumentationFailure` 钉住（提交 `66145db`）。
+3. **平台套件条数 32 是错的，实测 31**：三种跑法（三份 GCC 编的二进制 × 两种 DLL）都是
+   `pass=31 fail=0 skip=0`，逐行数 `[ ok ]` 也是 31；MSVC 编的套件是 `30 + 1 skip`。
+   P4-B 文档那两处已就地更正（提交 `4731a79`）。
+4. **导出面比头文件多 3 个符号**：`cava_push_away_from` / `cava_push_box_filter` / `cava_push_section_plan`
+   两份产物都导出，但 `cava_abi.h` 里没有它们（只给 `native/tests/push/` 用）。
+   不是 ABI 漂移（Java 侧从不解析），但已把"导出面以头文件为准、新符号必须走正规通道"写进契约 §2.1 第 9 条。
+
+### 8.4 新增护栏：**产物指纹纪律**（这是本轮真实付过代价的一条）
+
+`natives/<tag>/` 是**共享输出目录**，而且**有两个生产者**（根 CMakeLists 的 `cava` target 与
+`native/tests/build-mingw.ps1`）会写同一个 `cava.dll`。本轮实测到的事故形态：
+
+- P4-B 用自己的产物业已跑完的验证（`43129D92…`），被 P4-A 一次 `cmake --build` **静默换掉**（`D751A3D1…`）；
+- P4-A 报告里的一条 fuzz 结论随后也被另一次重建作废。
+
+**规则（今后照做）**：
+1. 任何"依赖产物"的结论**必须记录 Size + SHA256**；哈希一变，那条结论即作废，必须重跑。
+2. 交付物的**权威生产者 = 根 CMakeLists**（`gradlew buildNative`）；`build-mingw.ps1` 只是辅助路径。
+3. 落交付物之前先确认没有别人正在构建；MSVC 产物**故意**只写 `natives/<tag>/`（这是设计），
+   所以任何人在它之后再跑一次别的构建，都必须**重新确认交付物哈希**。
+
+### 8.5 仍未闭合（诚实清单）
+
+- **真实服务端里的 MSVC 产物冒烟**：MinGW 产物跑过（门禁 #6），MSVC 产物的真服冒烟由 P4 MSVC 流补齐中。
+- **7 天连续运行 / native 回退计数为 0**（prompts/07 验收第 2 条）：本机做不到，没有 7×24 环境。
+- **非 Windows 平台**：本机无 Linux/macOS/ARM 工具链、Docker 守护进程未运行、WSL 枚举被拒；
+   5 平台 CI 矩阵**写全了但一次都没跑过**（job 名里带 `[unverified-local]`）。
+- **ASan / UBSan**：同上，本机跑不起来（只在 CI 里排了）。
+- **区段并发卸载 fuzz / hs_err 崩溃取证**：P4-C 流进行中。
+- **性能对比（prompts/04 验收）**：P1-PERF 流进行中（大搜索空间 native on/off）。
+
+---
+
 ## 门禁 #4：**Gradle 构建与单元测试 → 通过（captain 独立复跑）**
 
 ```powershell

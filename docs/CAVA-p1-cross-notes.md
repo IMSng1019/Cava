@@ -411,4 +411,14 @@ cava pathfind xtick check <preset>                   # B：再解一次 → C：
 JAR 587168 B / `682ED206923A091155DA85E5F035E62BD4BE51ECE8AFEA877409CBB172B7130A`（六条腿同一个 jar）。
 **全量测试**：`suites=47 tests=265 failures=0 errors=0 skipped=9`。
 
-**commit**：见本文件所在提交（`git log -1 --format=%h`）。
+**commit**：`c527494`（本文件 + 仪表 + `xtick` 命令 + 两条上游文档的附录，7 files changed, 875 insertions(+), 2 deletions(-)）。
+
+## 11. 复现（复制即可）
+
+    # 0) 私有测试服（从 perf-net 复制；世界由脚本每次从 parity-base 恢复）
+    robocopy 'J:\mc\Cava\testbed\perf-net' 'J:\mc\Cava\testbed\perf-cross' /E /XD world results runs logs crash-reports
+    # 1) 构建（GRADLE_USER_HOME 必须显式；**加 --no-daemon**）
+    $env:GRADLE_USER_HOME='J:\mc\Cava\.gradle-home'; .\gradlew.bat build --no-daemon --console=plain --no-watch-fs
+    # 2) 端口确认空闲（25700/25701）后跑六条腿（§2.2 的命令）
+    # 3) 命中率/净收益直接读 testbed\perf-cross\results\*.txt 里的 AIDIST 行；
+    #    跨 tick 失效直接读 XTICK 行（PASS / RED 一目了然）
